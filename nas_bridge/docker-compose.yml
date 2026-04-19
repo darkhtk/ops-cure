@@ -1,0 +1,12 @@
+services:
+  nas-bridge:
+    build:
+      context: .
+    container_name: nas-bridge
+    env_file:
+      - .env
+    ports:
+      - "18080:8080"
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped

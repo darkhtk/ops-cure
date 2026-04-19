@@ -1,0 +1,59 @@
+project_name: UlalaCheese
+# Active target project directory for this preset.
+workdir: C:\sourcetree\ulala_cheese_vertical
+guild_id: "1494848853441253416"
+parent_channel_id: "1494851246480298125"
+allowed_user_ids:
+  - "573769589318615040"
+
+discord:
+  thread_name_template: "[{project_name}] {timestamp}"
+  auto_archive_duration: 1440
+
+bridge:
+  # This Windows PC and the NAS are on the same LAN, so use the NAS private IP.
+  # Public port 18080 is not reachable from outside right now.
+  base_url: "http://172.30.1.12:18080"
+  auth_token_env: "BRIDGE_TOKEN"
+
+agents:
+  - name: planner
+    cli: claude
+    role: planning
+    prompt_file: prompts/planner.md
+    default: false
+    timeout_seconds: 900
+
+  - name: coder
+    # Windows-first setup: use Claude here because Claude CLI is confirmed working locally.
+    # You can switch this back to codex later after fixing the local Codex executable issue.
+    cli: claude
+    role: coding
+    prompt_file: prompts/coder.md
+    default: true
+    timeout_seconds: 1800
+
+  - name: reviewer
+    cli: claude
+    role: review
+    prompt_file: prompts/reviewer.md
+    default: false
+    timeout_seconds: 900
+
+startup:
+  send_ready_message: true
+  restore_last_session: false
+  open_tools: []
+
+artifacts:
+  sessions_dir: "_discord_sessions"
+  quiet_discord: true
+
+finder:
+  roots:
+    - C:\sourcetree
+  analyze_agent: planner
+  prompt_file: prompts/finder.md
+  max_depth: 4
+  max_candidates: 8
+  analysis_timeout_seconds: 120
