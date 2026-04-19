@@ -1,21 +1,21 @@
 # Ops-Cure
 
-Ops-Cure is a Discord-native local agent orchestration framework built on a two-plane architecture:
+Ops-Cure는 Discord를 제어 인터페이스로 사용하고, 로컬 AI CLI를 실행 평면으로 사용하는 2-플레인 오케스트레이션 프레임워크입니다.
 
-- `nas_bridge/` is the Ops-Cure Bridge: the always-on control plane for Discord, SQLite state, thread routing, worker registration, heartbeats, jobs, and transcripts.
-- `pc_launcher/` is the Ops-Cure Launcher: the Windows execution plane that reads YAML project configs, registers them with the bridge, launches one worker per agent, and runs whitelisted CLI adapters as subprocesses.
-- Discord thread ids are the bridge session key. Local CLIs only receive an opaque `session_id`.
+- `nas_bridge/`는 Ops-Cure Bridge입니다. Discord 연동, SQLite 상태 관리, 스레드 라우팅, 워커 등록, heartbeat, job, transcript를 담당하는 항상 켜져 있는 제어 평면입니다.
+- `pc_launcher/`는 Ops-Cure Launcher입니다. Windows PC에서 YAML 프로젝트 설정을 읽고 bridge에 등록한 뒤, 에이전트별 worker를 실행하고 허용된 CLI adapter를 subprocess로 구동하는 실행 평면입니다.
+- Discord `thread_id`가 세션 키이고, 로컬 CLI는 Discord 세부사항을 모른 채 불투명한 `session_id`만 받습니다.
 
-## Implementation plan
+## 구현 계획
 
-1. Bring up the NAS bridge with FastAPI, Discord slash commands, SQLite models, and secure worker APIs.
-2. Add launcher-driven project manifest registration so the bridge only accepts preconfigured YAML projects.
-3. Add outbound-only Windows polling for launcher session claims and worker job pulls.
-4. Wrap Codex and Claude behind fixed adapter classes so Discord messages never become raw shell commands.
-5. Persist session, agent, job, and transcript state in SQLite and surface the lifecycle in Discord thread messages.
-6. Ship Docker for the NAS side, sample YAML and prompts for the PC side, plus setup docs and local development mode.
+1. NAS 쪽 bridge를 FastAPI, Discord slash command, SQLite 모델, 안전한 worker API로 구성합니다.
+2. launcher가 프로젝트 manifest를 등록하도록 만들어 bridge가 미리 정의된 YAML 프로젝트만 허용하게 합니다.
+3. Windows 쪽은 outbound polling만 사용해 launcher의 세션 claim과 worker의 job pull을 처리합니다.
+4. Codex, Claude 같은 CLI는 고정 adapter 뒤에 감싸서 Discord 메시지가 raw shell command가 되지 않도록 합니다.
+5. session, agent, job, transcript 상태를 SQLite에 저장하고, 그 라이프사이클을 Discord thread에 드러냅니다.
+6. NAS용 Docker, PC용 sample YAML/prompt, 설치 문서, local development mode까지 함께 제공합니다.
 
-## Repository tree
+## 저장소 구조
 
 ```text
 repo/
@@ -65,11 +65,12 @@ repo/
         project.yaml
         prompts/
           coder.md
+          finder.md
           planner.md
           reviewer.md
 ```
 
-## SQLite schema
+## SQLite 스키마
 
 ### `sessions`
 
@@ -128,12 +129,12 @@ repo/
 - `source_discord_message_id` TEXT NULL
 - `created_at` TIMESTAMP NOT NULL
 
-## Core flow
+## 핵심 동작 흐름
 
-1. The Windows launcher scans `project.yaml` files and registers project manifests to the bridge.
-2. A Discord user runs `/project start name:<session-name> preset:<optional-preset>`.
-3. The bridge resolves the preset from registered YAML manifests, validates guild, channel, and allowed user ids, creates a SQLite session row, and opens a Discord thread using the user-provided session name.
-4. The launcher claims the pending launch and spawns one worker process per configured agent.
-5. Workers register, heartbeat, and pull jobs from the bridge.
-6. Thread messages route by `@agentname` prefix, or auto-route only when a single agent exists.
-7. Worker results are sanitized, stored in transcripts, and posted back into the same Discord thread.
+1. Windows launcher가 `project.yaml` 파일들을 스캔해 bridge에 프로젝트 manifest를 등록합니다.
+2. Discord 사용자가 `/project start name:<session-name> preset:<optional-preset>`를 실행합니다.
+3. Bridge가 등록된 YAML manifest에서 preset을 해석하고, guild/channel/allowed user를 검증한 뒤, SQLite session row를 만들고 사용자가 지정한 이름으로 Discord thread를 엽니다.
+4. Launcher가 pending launch를 claim하고, 설정된 agent마다 worker process를 하나씩 띄웁니다.
+5. Worker는 bridge에 등록하고, heartbeat를 보내며, pending job을 pull합니다.
+6. Thread 메시지는 `@agentname` prefix로 라우팅되며, 단일 agent 세션일 때만 자동 라우팅됩니다.
+7. Worker 결과는 sanitize된 뒤 transcript에 저장되고, 동일한 Discord thread로 다시 게시됩니다.
