@@ -96,7 +96,7 @@ class BaseCliAdapter:
             "[[answer]]\n"
             "Direct answer for Discord.\n"
             "[[/answer]]\n"
-            "- Use this exact format when something looks inconsistent and you want a short async discussion with other agents:\n"
+            "- Use this exact format when something looks inconsistent, when feature intent may be misunderstood, or when review feedback may be interpreted differently and you want a short async discussion with other agents:\n"
             "[[discuss type=\"open\" ask=\"reviewer,coder\" anomaly=\"A-001\"]]\n"
             "Short anomaly description plus what the other agents should inspect next.\n"
             "[[/discuss]]\n"
