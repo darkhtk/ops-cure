@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
+import re
 import socket
 import subprocess
 import sys
 import time
 import uuid
 from contextlib import AbstractContextManager
+from dataclasses import dataclass
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -25,6 +28,26 @@ except ImportError:  # pragma: no cover - script mode support
     from verification_runner import CommandVerificationRunner
 
 LOGGER = logging.getLogger(__name__)
+ARG_PATTERN_TEMPLATE = r"--{name}\s+(?P<quote>[\"']?)(?P<value>.+?)(?P=quote)(?:\s+--|\s*$)"
+
+
+@dataclass(slots=True)
+class ManagedWorker:
+    process: subprocess.Popen[str]
+    session_id: str
+    agent_name: str
+    worker_id: str
+    project_file: Path
+
+
+@dataclass(slots=True)
+class ExternalWorkerProcess:
+    pid: int
+    session_id: str
+    agent_name: str
+    worker_id: str
+    project_file: Path
+    command_line: str
 
 
 class LauncherInstanceLock(AbstractContextManager["LauncherInstanceLock"]):
@@ -98,7 +121,7 @@ class LauncherDaemon:
         self.find_capacity = find_capacity
         self.verify_capacity = verify_capacity
         self.hostname = socket.gethostname()
-        self._managed_workers: dict[tuple[str, str], subprocess.Popen[str]] = {}
+        self._managed_workers: dict[tuple[str, str], ManagedWorker] = {}
         self._project_index: dict[str, tuple[Path, ProjectConfig]] = {}
         self._bridge_client: BridgeClient | None = None
         self._last_catalog_push_at = 0.0
@@ -107,11 +130,14 @@ class LauncherDaemon:
 
     def run_forever(self) -> None:
         LOGGER.info("Launcher %s scanning projects under %s", self.launcher_id, self.projects_dir)
+        self._reconcile_external_workers()
         while True:
             try:
                 self._refresh_projects()
                 self._register_catalog_if_needed(force=False)
                 self._reap_workers()
+                self._reconcile_external_workers()
+                self._reconcile_managed_workers_with_bridge()
                 self._claim_and_launch()
                 self._claim_and_resolve_project_finds()
                 self._claim_and_run_verifications()
@@ -186,8 +212,8 @@ class LauncherDaemon:
         project_file, project = self._project_index[preset_name]
         for agent in project.agents:
             key = (session_id, agent.name)
-            process = self._managed_workers.get(key)
-            if process is not None and process.poll() is None:
+            managed = self._managed_workers.get(key)
+            if managed is not None and managed.process.poll() is None:
                 continue
             self._managed_workers[key] = self._spawn_worker(
                 project_file=project_file,
@@ -203,8 +229,9 @@ class LauncherDaemon:
         session_id: str,
         agent_name: str,
         workdir_override: str | None,
-    ) -> subprocess.Popen[str]:
+    ) -> ManagedWorker:
         worker_script = Path(__file__).resolve().with_name("cli_worker.py")
+        worker_id = str(uuid.uuid4())
         command = [
             sys.executable,
             str(worker_script),
@@ -217,12 +244,19 @@ class LauncherDaemon:
             "--launcher-id",
             self.launcher_id,
             "--worker-id",
-            str(uuid.uuid4()),
+            worker_id,
         ]
         if workdir_override:
             command.extend(["--workdir-override", workdir_override])
         LOGGER.info("Spawning worker session=%s agent=%s", session_id, agent_name)
-        return subprocess.Popen(command, cwd=Path(__file__).resolve().parent, text=True)
+        process = subprocess.Popen(command, cwd=Path(__file__).resolve().parent, text=True)
+        return ManagedWorker(
+            process=process,
+            session_id=session_id,
+            agent_name=agent_name,
+            worker_id=worker_id,
+            project_file=project_file,
+        )
 
     def _resolve_project_find(self, request: dict[str, object]) -> None:
         assert self._bridge_client is not None
@@ -313,18 +347,214 @@ class LauncherDaemon:
 
     def _reap_workers(self) -> None:
         completed = []
-        for key, process in self._managed_workers.items():
-            if process.poll() is None:
+        for key, managed in self._managed_workers.items():
+            if managed.process.poll() is None:
                 continue
             completed.append(key)
             LOGGER.warning(
                 "Worker session=%s agent=%s exited with code %s",
                 key[0],
                 key[1],
-                process.returncode,
+                managed.process.returncode,
             )
         for key in completed:
             self._managed_workers.pop(key, None)
+
+    def _reconcile_external_workers(self) -> None:
+        managed_pids = {
+            managed.process.pid
+            for managed in self._managed_workers.values()
+            if managed.process.poll() is None and managed.process.pid is not None
+        }
+        valid_project_files = {
+            str(project_file.resolve()).lower()
+            for project_file, _ in self._project_index.values()
+        }
+        for worker in self._list_launcher_worker_processes():
+            if worker.pid in managed_pids:
+                continue
+            reason = "stale external worker was not managed by the active launcher daemon"
+            if not worker.project_file.exists() or str(worker.project_file.resolve()).lower() not in valid_project_files:
+                reason = "stale external worker uses an unknown or missing profile file"
+            self._terminate_external_worker_process(worker, reason)
+
+    def _reconcile_managed_workers_with_bridge(self) -> None:
+        assert self._bridge_client is not None
+        completed: list[tuple[str, str]] = []
+        for key, managed in self._managed_workers.items():
+            if managed.process.poll() is not None:
+                completed.append(key)
+                continue
+            try:
+                summary = self._bridge_client.get_session(managed.session_id)
+            except BridgeClientError as exc:
+                if "404" in str(exc):
+                    self._terminate_managed_worker(managed, "bridge no longer knows this session")
+                    completed.append(key)
+                continue
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.warning("Managed worker reconciliation failed for %s/%s: %s", managed.session_id, managed.agent_name, exc)
+                continue
+
+            if str(summary.get("status") or "") in {"closed", "failed_start"} or str(summary.get("desired_status") or "") == "closed":
+                self._terminate_managed_worker(managed, "session is no longer active")
+                completed.append(key)
+                continue
+
+            agents = list(summary.get("agents") or [])
+            matching_agent = next(
+                (
+                    agent
+                    for agent in agents
+                    if str(agent.get("agent_name") or "") == managed.agent_name
+                ),
+                None,
+            )
+            if matching_agent is None:
+                self._terminate_managed_worker(managed, "session no longer contains this agent")
+                completed.append(key)
+                continue
+            registered_worker_id = str(matching_agent.get("worker_id") or "").strip()
+            if registered_worker_id and registered_worker_id != managed.worker_id:
+                self._terminate_managed_worker(managed, "bridge reassigned this agent to a different worker")
+                completed.append(key)
+
+        for key in completed:
+            self._managed_workers.pop(key, None)
+
+    @staticmethod
+    def _extract_arg(command_line: str, name: str) -> str | None:
+        pattern = re.compile(ARG_PATTERN_TEMPLATE.format(name=re.escape(name)), re.IGNORECASE)
+        match = pattern.search(command_line)
+        if match is None:
+            return None
+        value = match.group("value").strip()
+        if value.endswith('"') and not value.startswith('"'):
+            value = value[:-1]
+        if value.endswith("'") and not value.startswith("'"):
+            value = value[:-1]
+        return value
+
+    def _list_launcher_worker_processes(self) -> list[ExternalWorkerProcess]:
+        if os.name == "nt":
+            return self._list_launcher_worker_processes_windows()
+        return self._list_launcher_worker_processes_posix()
+
+    def _list_launcher_worker_processes_windows(self) -> list[ExternalWorkerProcess]:
+        command = (
+            "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; "
+            "Get-CimInstance Win32_Process | "
+            "Where-Object { $_.CommandLine -and $_.CommandLine -like '*cli_worker.py*' } | "
+            "Select-Object ProcessId, CommandLine | ConvertTo-Json -Compress"
+        )
+        completed = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", command],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+        if completed.returncode != 0 or not completed.stdout.strip():
+            return []
+        payload = json.loads(completed.stdout)
+        rows = payload if isinstance(payload, list) else [payload]
+        return self._parse_external_workers(rows)
+
+    def _list_launcher_worker_processes_posix(self) -> list[ExternalWorkerProcess]:
+        completed = subprocess.run(
+            ["ps", "-ax", "-o", "pid=", "-o", "command="],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+        if completed.returncode != 0:
+            return []
+        rows = []
+        for line in completed.stdout.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            pid_text, _, command_line = stripped.partition(" ")
+            if not pid_text.isdigit():
+                continue
+            rows.append({"ProcessId": int(pid_text), "CommandLine": command_line})
+        return self._parse_external_workers(rows)
+
+    def _parse_external_workers(self, rows: list[dict[str, object]]) -> list[ExternalWorkerProcess]:
+        discovered: list[ExternalWorkerProcess] = []
+        for row in rows:
+            command_line = str(row.get("CommandLine") or "").strip()
+            if "cli_worker.py" not in command_line:
+                continue
+            launcher_id = self._extract_arg(command_line, "launcher-id")
+            if launcher_id != self.launcher_id:
+                continue
+            session_id = self._extract_arg(command_line, "session-id")
+            agent_name = self._extract_arg(command_line, "agent-name")
+            worker_id = self._extract_arg(command_line, "worker-id")
+            project_file = self._extract_arg(command_line, "project-file")
+            pid = int(row.get("ProcessId") or 0)
+            if not (pid and session_id and agent_name and worker_id and project_file):
+                continue
+            discovered.append(
+                ExternalWorkerProcess(
+                    pid=pid,
+                    session_id=session_id,
+                    agent_name=agent_name,
+                    worker_id=worker_id,
+                    project_file=Path(project_file).resolve(),
+                    command_line=command_line,
+                ),
+            )
+        return discovered
+
+    def _terminate_external_worker_process(self, worker: ExternalWorkerProcess, reason: str) -> None:
+        LOGGER.warning(
+            "Terminating external worker pid=%s session=%s agent=%s: %s",
+            worker.pid,
+            worker.session_id,
+            worker.agent_name,
+            reason,
+        )
+        self._terminate_pid(worker.pid)
+
+    def _terminate_managed_worker(self, managed: ManagedWorker, reason: str) -> None:
+        LOGGER.warning(
+            "Terminating managed worker pid=%s session=%s agent=%s: %s",
+            managed.process.pid,
+            managed.session_id,
+            managed.agent_name,
+            reason,
+        )
+        if managed.process.poll() is not None:
+            return
+        managed.process.terminate()
+        try:
+            managed.process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            managed.process.kill()
+
+    @staticmethod
+    def _terminate_pid(pid: int) -> None:
+        if pid <= 0:
+            return
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            )
+            return
+        try:
+            os.kill(pid, 15)
+        except OSError:
+            return
 
 
 def build_parser() -> argparse.ArgumentParser:
