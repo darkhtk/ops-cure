@@ -120,6 +120,7 @@ class SessionService:
         self.pause_workflow = None
         self.policy_workflow = None
         self.execution_provider = None
+        self.announcement_service = None
 
     def bind_orchestration(
         self,
@@ -130,6 +131,7 @@ class SessionService:
         pause_workflow,
         policy_workflow,
         execution_provider,
+        announcement_service,
     ) -> None:
         self.policy_service = policy_service
         self.recovery_service = recovery_service
@@ -137,6 +139,7 @@ class SessionService:
         self.pause_workflow = pause_workflow
         self.policy_workflow = policy_workflow
         self.execution_provider = execution_provider
+        self.announcement_service = announcement_service
 
     async def create_session_from_project(
         self,
@@ -228,6 +231,24 @@ class SessionService:
             updated_by=updated_by,
         )
 
+    async def render_session_status_text(self, session_id: str) -> str:
+        if self.announcement_service is not None:
+            return await self.announcement_service.render_session_status_text(session_id)
+        summary = await self.get_session_summary(session_id)
+        return (
+            f"Session `{summary.id}`\n"
+            f"Session title: `{summary.project_name}`\n"
+            f"Target project: `{summary.target_project_name or summary.project_name}`\n"
+            f"Profile: `{summary.preset or 'unknown'}`\n"
+            f"Workdir: `{summary.workdir}`\n"
+            f"Status: `{summary.status}` (desired `{summary.desired_status}`)"
+        )
+
+    async def _sync_session_status_message(self, session_id: str, *, force: bool = False) -> None:
+        if self.announcement_service is None:
+            return
+        await self.announcement_service.sync_session_status(session_id, force=force)
+
     async def _create_session_with_manifest(
         self,
         *,
@@ -309,13 +330,6 @@ class SessionService:
             )
             summary = self._to_summary_response(db, session_row)
 
-        await self.thread_manager.post_message(
-            discord_thread_id,
-            (
-                f"Session `{summary.id}` created for `{project_name}` using profile `{selected_preset}`.\n"
-                "Launcher claim is pending. Workers will join this thread when ready."
-            ),
-        )
         return summary
 
     async def claim_launches(self, launcher_id: str, capacity: int) -> list[SessionLaunchResponse]:
@@ -547,6 +561,7 @@ class SessionService:
 
         self.drift_monitor.clear_session(summary.id)
         await self.thread_manager.post_message(thread_id, "Session closed. New jobs will be rejected.")
+        await self._sync_session_status_message(summary.id, force=True)
         await self.thread_manager.archive_thread(thread_id, "Session closed")
         return summary
 
@@ -575,10 +590,12 @@ class SessionService:
             summary = self._to_summary_response(db, session_row)
 
         self.drift_monitor.clear_session(summary.id)
+        await self._sync_session_status_message(summary.id, force=True)
         await self.thread_manager.cleanup_thread(thread_id, "Session cleanup requested")
         return summary
 
     async def enqueue_restart(self, session_id: str, agent_name: str, requested_by: str) -> JobPayload:
+        payload: JobPayload | None = None
         with session_scope() as db:
             session_row = self._require_session(
                 db,
@@ -622,12 +639,15 @@ class SessionService:
                 session_row=session_with_agents,
                 current_agent=agent_name,
             )
-            return self._to_job_payload(
+            payload = self._to_job_payload(
                 job,
                 session_row=session_with_agents,
                 session_summary=session_summary,
                 recent_transcript=recent_transcript,
             )
+        await self._sync_session_status_message(session_id)
+        assert payload is not None
+        return payload
 
     async def reset_session(self, session_id: str, requested_by: str) -> None:
         thread_id = ""
@@ -673,6 +693,7 @@ class SessionService:
             thread_id,
             "Session reset requested. Pending jobs were cleared and all agents will restart.",
         )
+        await self._sync_session_status_message(session_id, force=True)
 
     async def route_discord_message(
         self,
@@ -746,7 +767,10 @@ class SessionService:
                 routing.agent_name,
                 routing.job_type,
             )
-            return routing.agent_name
+            session_id = session_row.id
+            routed_agent = routing.agent_name
+        await self._sync_session_status_message(session_id)
+        return routed_agent
 
     async def register_worker(
         self,
@@ -800,6 +824,7 @@ class SessionService:
         )
         if should_send_ready:
             await self.thread_manager.post_message(thread_id, ready_message)
+        await self._sync_session_status_message(session_id)
 
     async def heartbeat(
         self,
@@ -832,6 +857,7 @@ class SessionService:
         agent_name: str,
         worker_id: str,
     ) -> JobPayload | None:
+        payload: JobPayload | None = None
         with session_scope() as db:
             session_row = self._require_session(
                 db,
@@ -911,12 +937,15 @@ class SessionService:
                 session_row=session_row,
                 current_agent=agent_name,
             )
-            return self._to_job_payload(
+            payload = self._to_job_payload(
                 job,
                 session_row=session_row,
                 session_summary=session_summary,
                 recent_transcript=recent_transcript,
             )
+        if payload is not None:
+            await self._sync_session_status_message(session_id)
+        return payload
 
     async def complete_job(
         self,
@@ -996,6 +1025,7 @@ class SessionService:
                     agent_name=agent_name,
                     sent_chunks=sent_chunks,
                 )
+        await self._sync_session_status_message(session_id)
 
     async def fail_job(
         self,
@@ -1059,6 +1089,7 @@ class SessionService:
             agent_name=agent_name,
             sent_chunks=sent_chunks,
         )
+        await self._sync_session_status_message(session_id)
 
     def _resolve_agent(
         self,

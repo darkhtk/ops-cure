@@ -38,10 +38,12 @@ class StartWorkflow:
         session_service,
         policy_service: PolicyService,
         recovery_service: RecoveryService,
+        announcement_service,
     ) -> None:
         self.session_service = session_service
         self.policy_service = policy_service
         self.recovery_service = recovery_service
+        self.announcement_service = announcement_service
 
     async def run(
         self,
@@ -89,6 +91,7 @@ class StartWorkflow:
                 requested_by=user_id,
                 wake_if_needed=True,
             )
+            await self.announcement_service.sync_session_status(existing_session_id, force=True)
             return await self.session_service.get_session_summary(existing_session_id)
         if manifest is None:
             assert resolve_error is not None
@@ -119,12 +122,14 @@ class StartWorkflow:
             manifest=manifest,
             requested_by=user_id,
         )
+        await self.announcement_service.sync_session_status(summary.id, force=True)
         await self.recovery_service.recover_session(
             session_id=summary.id,
             reason="project-start",
             requested_by=user_id,
             wake_if_needed=True,
         )
+        await self.announcement_service.sync_session_status(summary.id, force=True)
         return await self.session_service.get_session_summary(summary.id)
 
     def _find_existing_session_id(

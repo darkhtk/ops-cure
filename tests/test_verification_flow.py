@@ -4,6 +4,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from sqlalchemy import select
+
 
 def build_verification_manifest(schemas):
     return schemas.ProjectManifest(
@@ -91,6 +93,16 @@ def test_verification_queue_claim_complete_and_review(app_env):
     assert completed.artifacts[0].artifact_type == "screenshot"
     assert app_env.thread_manager.messages
     assert "verification review_pending" in app_env.thread_manager.messages[-1][1]
+
+    from app.models import SessionModel
+
+    with app_env.db.session_scope() as db:
+        session_row = db.scalar(select(SessionModel).where(SessionModel.id == summary.id))
+        assert session_row is not None
+        assert session_row.status_message_id is not None
+        status_message = app_env.thread_manager.message_store[session_row.status_message_id][1]
+    assert "Verification: smoke -> review_pending" in status_message
+    assert "Attention: verification `smoke` is waiting for operator review" in status_message
 
     latest = __import__("asyncio").run(
         app_env.verification_service.latest_run(session_id=summary.id),

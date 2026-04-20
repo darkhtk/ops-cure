@@ -15,6 +15,8 @@ class FakeThreadManager:
     def __init__(self) -> None:
         self.created_threads: list[str] = []
         self.messages: list[tuple[str, str]] = []
+        self.message_store: dict[str, tuple[str, str]] = {}
+        self.edited_messages: list[tuple[str, str]] = []
         self.archived_threads: list[tuple[str, str]] = []
         self.cleaned_threads: list[tuple[str, str]] = []
 
@@ -34,7 +36,16 @@ class FakeThreadManager:
 
     async def post_message(self, thread_id: str, content: str):
         self.messages.append((thread_id, content))
-        return [(f"message-{len(self.messages)}", content)]
+        message_id = f"message-{len(self.messages)}"
+        self.message_store[message_id] = (thread_id, content)
+        return [(message_id, content)]
+
+    async def edit_message(self, thread_id: str, message_id: str, content: str):
+        if message_id not in self.message_store:
+            return None
+        self.edited_messages.append((thread_id, content))
+        self.message_store[message_id] = (thread_id, content)
+        return (message_id, content)
 
     async def archive_thread(self, thread_id: str, reason: str) -> None:
         self.archived_threads.append((thread_id, reason))
@@ -62,6 +73,7 @@ def app_env(tmp_path, monkeypatch):
 
     config.get_settings.cache_clear()
 
+    import app.services.announcement_service as announcement_service
     import app.db as db
     import app.drift_monitor as drift_monitor
     import app.schemas as schemas
@@ -82,6 +94,7 @@ def app_env(tmp_path, monkeypatch):
     registry = worker_registry.WorkerRegistry(90)
     transcript = transcript_service.TranscriptService()
     thread_manager = FakeThreadManager()
+    announcement_svc = announcement_service.AnnouncementService(thread_manager=thread_manager)
     drift = drift_monitor.DriftMonitor()
     session_svc = session_service.SessionService(
         registry=registry,
@@ -96,6 +109,7 @@ def app_env(tmp_path, monkeypatch):
         registry=registry,
         transcript_service=transcript,
         thread_manager=thread_manager,
+        announcement_service=announcement_svc,
         power_provider=power_provider,
         execution_provider=execution_provider,
         worker_stale_after_seconds=90,
@@ -105,20 +119,25 @@ def app_env(tmp_path, monkeypatch):
         registry=registry,
         transcript_service=transcript,
         thread_manager=thread_manager,
+        announcement_service=announcement_svc,
     )
     start_wf = start_workflow.StartWorkflow(
         session_service=session_svc,
         policy_service=policy_svc,
         recovery_service=recovery_svc,
+        announcement_service=announcement_svc,
     )
     pause_wf = pause_workflow.PauseWorkflow(
         recovery_service=recovery_svc,
         transcript_service=transcript,
+        announcement_service=announcement_svc,
     )
     policy_wf = policy_workflow.PolicyWorkflow(
         session_service=session_svc,
         policy_service=policy_svc,
+        announcement_service=announcement_svc,
     )
+    announcement_svc.bind_summary_provider(session_svc.get_session_summary)
     session_svc.bind_orchestration(
         policy_service=policy_svc,
         recovery_service=recovery_svc,
@@ -126,6 +145,7 @@ def app_env(tmp_path, monkeypatch):
         pause_workflow=pause_wf,
         policy_workflow=policy_wf,
         execution_provider=execution_provider,
+        announcement_service=announcement_svc,
     )
 
     return SimpleNamespace(
@@ -133,6 +153,7 @@ def app_env(tmp_path, monkeypatch):
         drift=drift,
         registry=registry,
         schemas=schemas,
+        announcement_service=announcement_svc,
         session_service=session_svc,
         policy_service=policy_svc,
         recovery_service=recovery_svc,

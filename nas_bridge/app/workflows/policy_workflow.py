@@ -9,9 +9,10 @@ from ..services.policy_service import PolicyService
 
 
 class PolicyWorkflow:
-    def __init__(self, *, session_service, policy_service: PolicyService) -> None:
+    def __init__(self, *, session_service, policy_service: PolicyService, announcement_service) -> None:
         self.session_service = session_service
         self.policy_service = policy_service
+        self.announcement_service = announcement_service
 
     async def show(self, *, session_id: str) -> SessionPolicyResponse:
         with session_scope() as db:
@@ -50,4 +51,6 @@ class PolicyWorkflow:
                 updated_by=updated_by,
             )
             session_row.policy_version = response.version
-            return PolicySetResponse(session_id=session_id, policy=response)
+            result = PolicySetResponse(session_id=session_id, policy=response)
+        await self.announcement_service.sync_session_status(session_id, force=True)
+        return result

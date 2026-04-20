@@ -35,10 +35,12 @@ class VerificationService:
         registry: WorkerRegistry,
         transcript_service: TranscriptService,
         thread_manager: ThreadManager,
+        announcement_service,
     ) -> None:
         self.registry = registry
         self.transcript_service = transcript_service
         self.thread_manager = thread_manager
+        self.announcement_service = announcement_service
 
     async def enqueue_run(
         self,
@@ -145,9 +147,11 @@ class VerificationService:
     ) -> VerifyRunSummaryResponse:
         thread_id = ""
         thread_message = ""
+        session_id = ""
         with session_scope() as db:
             run = self._require_run(db, run_id)
             session_row = self._require_session(db, run.session_id)
+            session_id = session_row.id
             if run.launcher_id and run.launcher_id != launcher_id:
                 raise PermissionError(
                     f"Verification run `{run_id}` is assigned to launcher `{run.launcher_id}`, not `{launcher_id}`.",
@@ -184,6 +188,7 @@ class VerificationService:
 
         if thread_message:
             await self.thread_manager.post_message(thread_id, thread_message)
+        await self.announcement_service.sync_session_status(session_id)
         return summary
 
     async def latest_run(self, *, session_id: str) -> VerifyRunSummaryResponse | None:
@@ -243,6 +248,7 @@ class VerificationService:
 
         if thread_message:
             await self.thread_manager.post_message(thread_id, thread_message)
+        await self.announcement_service.sync_session_status(session_id)
         return summary
 
     def _load_manifest_for_session(self, session_row: SessionModel) -> ProjectManifest:

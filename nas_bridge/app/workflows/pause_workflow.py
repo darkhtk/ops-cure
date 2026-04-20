@@ -17,9 +17,10 @@ def utcnow() -> datetime:
 
 
 class PauseWorkflow:
-    def __init__(self, *, recovery_service: RecoveryService, transcript_service) -> None:
+    def __init__(self, *, recovery_service: RecoveryService, transcript_service, announcement_service) -> None:
         self.recovery_service = recovery_service
         self.transcript_service = transcript_service
+        self.announcement_service = announcement_service
 
     async def pause(self, *, session_id: str, requested_by: str, reason: str | None = None) -> SessionPauseResponse:
         pause_reason = reason or f"Paused by {requested_by}"
@@ -64,12 +65,14 @@ class PauseWorkflow:
                 actor=requested_by,
                 content=f"Session paused. Reason: {pause_reason}",
             )
-            return SessionPauseResponse(
+            response = SessionPauseResponse(
                 session_id=session_row.id,
                 status=session_row.status,
                 desired_status=session_row.desired_status,
                 pause_reason=session_row.pause_reason,
             )
+        await self.announcement_service.sync_session_status(session_id, force=True)
+        return response
 
     async def resume(self, *, session_id: str, requested_by: str) -> SessionPauseResponse:
         with session_scope() as db:
@@ -113,9 +116,11 @@ class PauseWorkflow:
             session_row = db.scalar(select(SessionModel).where(SessionModel.id == session_id))
             if session_row is None:
                 raise ValueError("Session not found.")
-            return SessionPauseResponse(
+            response = SessionPauseResponse(
                 session_id=session_row.id,
                 status=session_row.status,
                 desired_status=session_row.desired_status,
                 pause_reason=session_row.pause_reason,
             )
+        await self.announcement_service.sync_session_status(session_id, force=True)
+        return response

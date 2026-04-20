@@ -18,6 +18,7 @@ from .config import Settings, get_settings
 from .db import init_db
 from .discord_gateway import DiscordGateway
 from .drift_monitor import DriftMonitor
+from .services.announcement_service import AnnouncementService
 from .services.policy_service import PolicyService
 from .services.recovery_service import RecoveryService
 from .services.verification_service import VerificationService
@@ -43,6 +44,7 @@ class ServiceContainer:
     registry: WorkerRegistry
     transcript_service: TranscriptService
     thread_manager: ThreadManager
+    announcement_service: AnnouncementService
     policy_service: PolicyService
     recovery_service: RecoveryService
     verification_service: VerificationService
@@ -58,11 +60,13 @@ def build_services(settings: Settings) -> ServiceContainer:
     drift_monitor = DriftMonitor()
     transcript_service = TranscriptService()
     thread_manager = ThreadManager(settings)
+    announcement_service = AnnouncementService(thread_manager=thread_manager)
     policy_service = PolicyService()
     verification_service = VerificationService(
         registry=registry,
         transcript_service=transcript_service,
         thread_manager=thread_manager,
+        announcement_service=announcement_service,
     )
     power_provider = RoutedPowerProvider([NoopPowerProvider(), WakeOnLanPowerProvider()])
     execution_provider = RoutedExecutionProvider([WindowsLauncherExecutionProvider(registry)])
@@ -70,6 +74,7 @@ def build_services(settings: Settings) -> ServiceContainer:
         registry=registry,
         transcript_service=transcript_service,
         thread_manager=thread_manager,
+        announcement_service=announcement_service,
         power_provider=power_provider,
         execution_provider=execution_provider,
         worker_stale_after_seconds=settings.worker_stale_after_seconds,
@@ -81,18 +86,22 @@ def build_services(settings: Settings) -> ServiceContainer:
         transcript_service=transcript_service,
         drift_monitor=drift_monitor,
     )
+    announcement_service.bind_summary_provider(session_service.get_session_summary)
     start_workflow = StartWorkflow(
         session_service=session_service,
         policy_service=policy_service,
         recovery_service=recovery_service,
+        announcement_service=announcement_service,
     )
     pause_workflow = PauseWorkflow(
         recovery_service=recovery_service,
         transcript_service=transcript_service,
+        announcement_service=announcement_service,
     )
     policy_workflow = PolicyWorkflow(
         session_service=session_service,
         policy_service=policy_service,
+        announcement_service=announcement_service,
     )
     session_service.bind_orchestration(
         policy_service=policy_service,
@@ -101,6 +110,7 @@ def build_services(settings: Settings) -> ServiceContainer:
         pause_workflow=pause_workflow,
         policy_workflow=policy_workflow,
         execution_provider=execution_provider,
+        announcement_service=announcement_service,
     )
     discord_gateway = DiscordGateway(
         settings=settings,
@@ -114,6 +124,7 @@ def build_services(settings: Settings) -> ServiceContainer:
         registry=registry,
         transcript_service=transcript_service,
         thread_manager=thread_manager,
+        announcement_service=announcement_service,
         policy_service=policy_service,
         recovery_service=recovery_service,
         verification_service=verification_service,

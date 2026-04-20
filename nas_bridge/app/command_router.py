@@ -134,66 +134,11 @@ def register_commands(
         await interaction.response.defer(ephemeral=True, thinking=True)
         try:
             session_summary = await _current_thread_session(interaction)
+            status_text = await session_service.render_session_status_text(session_summary.id)
         except Exception as exc:  # noqa: BLE001
             await interaction.followup.send(str(exc), ephemeral=True)
             return
-
-        agents = "\n".join(
-            (
-                f"- `{agent.agent_name}` {agent.status}/{agent.desired_status if hasattr(agent, 'desired_status') else agent.status} [{agent.cli_type}]"
-                f"{_format_drift_suffix(agent)}"
-            )
-            for agent in session_summary.agents
-        )
-        power_line = "not configured"
-        if session_summary.power_target is not None:
-            power_line = (
-                f"`{session_summary.power_target.name}` "
-                f"[{session_summary.power_target.provider}] state={session_summary.power_target.state}"
-            )
-        execution_line = "not configured"
-        if session_summary.execution_target is not None:
-            execution_line = (
-                f"`{session_summary.execution_target.name}` "
-                f"[{session_summary.execution_target.provider}] state={session_summary.execution_target.state}"
-            )
-            if session_summary.execution_target.launcher_id:
-                execution_line += f" launcher={session_summary.execution_target.launcher_id}"
-        policy_line = "policy unavailable"
-        if session_summary.policy is not None:
-            policy_line = (
-                f"parallel={session_summary.policy.max_parallel_agents}, "
-                f"auto_retry={session_summary.policy.auto_retry}, "
-                f"max_retries={session_summary.policy.max_retries}, "
-                f"approval={session_summary.policy.approval_mode}, "
-                f"quiet={session_summary.policy.quiet_discord}"
-            )
-        active_operation = "none"
-        if session_summary.active_operation is not None:
-            active_operation = (
-                f"`{session_summary.active_operation.operation_type}` "
-                f"[{session_summary.active_operation.status}] by {session_summary.active_operation.requested_by}"
-            )
-        await interaction.followup.send(
-            (
-                f"Session `{session_summary.id}`\n"
-                f"Session title: `{session_summary.project_name}`\n"
-                f"Target project: `{session_summary.target_project_name or session_summary.project_name}`\n"
-                f"Profile: `{session_summary.preset or 'unknown'}`\n"
-                f"Workdir: `{session_summary.workdir}`\n"
-                f"Status: `{session_summary.status}` (desired `{session_summary.desired_status}`)\n"
-                f"Launcher: `{session_summary.launcher_id or 'unclaimed'}`\n"
-                f"Power: {power_line}\n"
-                f"Execution: {execution_line}\n"
-                f"Pause reason: `{session_summary.pause_reason or 'none'}`\n"
-                f"Recovery: `{session_summary.last_recovery_reason or 'none'}` at "
-                f"`{session_summary.last_recovery_at.isoformat() if session_summary.last_recovery_at else 'n/a'}`\n"
-                f"Active operation: {active_operation}\n"
-                f"Policy: {policy_line}\n"
-                f"Agents:\n{agents}"
-            ),
-            ephemeral=True,
-        )
+        await interaction.followup.send(status_text, ephemeral=True)
 
     @project_group.command(name="pause", description="Pause the current session")
     @app_commands.describe(reason="Optional reason shown in status and transcripts")

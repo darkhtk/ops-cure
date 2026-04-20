@@ -53,6 +53,7 @@ class RecoveryService:
         registry: WorkerRegistry,
         transcript_service: TranscriptService,
         thread_manager: ThreadManager,
+        announcement_service,
         power_provider: PowerProvider,
         execution_provider: ExecutionProvider,
         worker_stale_after_seconds: int,
@@ -61,6 +62,7 @@ class RecoveryService:
         self.registry = registry
         self.transcript_service = transcript_service
         self.thread_manager = thread_manager
+        self.announcement_service = announcement_service
         self.power_provider = power_provider
         self.execution_provider = execution_provider
         self.worker_stale_after = timedelta(seconds=worker_stale_after_seconds)
@@ -190,6 +192,8 @@ class RecoveryService:
                 self._complete_operations(db, session_row.id, "resume")
         if cleanup_thread_id is not None and cleanup_reason is not None:
             await self.thread_manager.cleanup_thread(cleanup_thread_id, cleanup_reason)
+        if cleanup_thread_id is None:
+            await self.announcement_service.sync_session_status(session_id)
 
     def _clear_stale_workers(self, agents: list[AgentModel]) -> None:
         now = utcnow()

@@ -91,6 +91,29 @@ class ThreadManager:
             sent_chunks.append((str(sent_message.id), chunk))
         return sent_chunks
 
+    async def edit_message(self, thread_id: str, message_id: str, text: str) -> tuple[str, str] | None:
+        if not self.discord_enabled:
+            LOGGER.info("Discord disabled, edit thread %s message %s: %s", thread_id, message_id, text)
+            return (message_id, text)
+
+        channel = await self._load_thread(thread_id)
+        if channel is None:
+            return None
+
+        chunk = next(iter(chunk_text(text)), "(no output)")
+        try:
+            message = await channel.fetch_message(int(message_id))
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException) as exc:
+            LOGGER.warning("Unable to load message %s in thread %s for edit: %s", message_id, thread_id, exc)
+            return None
+
+        try:
+            await message.edit(content=chunk)
+        except (discord.Forbidden, discord.HTTPException) as exc:
+            LOGGER.warning("Unable to edit message %s in thread %s: %s", message_id, thread_id, exc)
+            return None
+        return (str(message.id), chunk)
+
     async def archive_thread(self, thread_id: str, reason: str) -> None:
         if not self.discord_enabled:
             LOGGER.info("Discord disabled, archive thread %s (%s)", thread_id, reason)
