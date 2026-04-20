@@ -383,6 +383,8 @@ class SessionSummaryResponse(BaseModel):
     execution_target: ExecutionTargetSummary | None = None
     policy: SessionPolicyResponse | None = None
     active_operation: SessionOperationResponse | None = None
+    pending_jobs: int = 0
+    active_jobs: int = 0
     agents: list[AgentStatusResponse]
 
 

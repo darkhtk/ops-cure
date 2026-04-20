@@ -1286,6 +1286,24 @@ class SessionService:
         )
 
     def _to_summary_response(self, db: Session, session_row: SessionModel) -> SessionSummaryResponse:
+        pending_jobs = int(
+            db.scalar(
+                select(func.count())
+                .select_from(JobModel)
+                .where(JobModel.session_id == session_row.id)
+                .where(JobModel.status == "pending"),
+            )
+            or 0,
+        )
+        active_jobs = int(
+            db.scalar(
+                select(func.count())
+                .select_from(JobModel)
+                .where(JobModel.session_id == session_row.id)
+                .where(JobModel.status == "in_progress"),
+            )
+            or 0,
+        )
         return SessionSummaryResponse(
             id=session_row.id,
             project_name=session_row.project_name,
@@ -1310,6 +1328,8 @@ class SessionService:
             execution_target=self._load_execution_target_summary(db, session_row),
             policy=self._load_policy_summary(db, session_row),
             active_operation=self._load_active_operation(db, session_row),
+            pending_jobs=pending_jobs,
+            active_jobs=active_jobs,
             agents=[self._to_agent_response(agent) for agent in session_row.agents],
         )
 
@@ -1975,7 +1995,7 @@ class SessionService:
         if "OPS:" in sanitized_error and "HUMAN:" in sanitized_error:
             return self._quiet_discord_text(sanitized_error) if quiet_discord else sanitized_error.strip()
         failure_preview = self._trim_context_text(sanitized_error, FAILURE_PREVIEW_LIMIT)
-        human_text = self._trim_context_text(failure_preview, 220 if quiet_discord else 420)
+        human_text = self._trim_thread_text(failure_preview, 220 if quiet_discord else 420)
         issue_text = "planner_recovery_queued" if recovery_queued else "triage_required"
         message = "\n".join(
             [
@@ -1990,13 +2010,13 @@ class SessionService:
         normalized_lines = [line.strip() for line in text.strip().splitlines() if line.strip()]
         if not normalized_lines:
             return ""
-        trimmed_lines = [self._trim_context_text(line, 180) for line in normalized_lines[:QUIET_DISCORD_LINE_LIMIT]]
+        trimmed_lines = [self._trim_thread_text(line, 180) for line in normalized_lines[:QUIET_DISCORD_LINE_LIMIT]]
         if len(normalized_lines) > QUIET_DISCORD_LINE_LIMIT:
-            trimmed_lines.append("...")
+            trimmed_lines.append("HUMAN: Additional detail omitted from the thread view.")
         compact = "\n".join(trimmed_lines)
         if len(compact) <= QUIET_DISCORD_CHAR_LIMIT:
             return compact
-        return self._trim_context_text(compact, QUIET_DISCORD_CHAR_LIMIT)
+        return self._trim_thread_text(compact, QUIET_DISCORD_CHAR_LIMIT)
 
     def _build_recovery_prompt(
         self,
@@ -2172,6 +2192,16 @@ class SessionService:
         if len(normalized) <= limit:
             return normalized
         return normalized[: limit - 3].rstrip() + "..."
+
+    @staticmethod
+    def _trim_thread_text(text: str, limit: int) -> str:
+        normalized = " ".join(text.split())
+        if len(normalized) <= limit:
+            return normalized
+        marker = " [truncated]"
+        if limit <= len(marker):
+            return normalized[:limit]
+        return normalized[: limit - len(marker)].rstrip() + marker
 
     def _validate_session_start(
         self,

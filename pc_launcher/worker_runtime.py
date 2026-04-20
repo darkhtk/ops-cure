@@ -66,6 +66,7 @@ class WorkerRuntime:
         self._session_name = self.project.resolved_default_target_name
         self._session_preset = self.project.profile_name
         self._workspace: SessionWorkspace | None = None
+        self._last_workspace_reconcile_at = 0.0
 
     @property
     def pid_hint(self) -> int:
@@ -118,6 +119,7 @@ class WorkerRuntime:
     def _heartbeat_loop(self) -> None:
         while not self._stop_event.wait(self.heartbeat_interval_seconds):
             try:
+                self._maybe_reconcile_workspace_from_bridge()
                 self.bridge_client.heartbeat(
                     session_id=self.session_id,
                     agent_name=self.agent_name,
@@ -380,3 +382,25 @@ class WorkerRuntime:
         except Exception as exc:  # noqa: BLE001
             LOGGER.warning("Failed to build artifact heartbeat snapshot: %s", exc)
             return None
+
+    def _maybe_reconcile_workspace_from_bridge(self) -> None:
+        if self._workspace is None or not self.agent.default:
+            return
+        if self._get_status() == "busy":
+            return
+        now = time.monotonic()
+        if now - self._last_workspace_reconcile_at < max(self.heartbeat_interval_seconds, 15):
+            return
+        self._last_workspace_reconcile_at = now
+        try:
+            summary = self.bridge_client.get_session(self.session_id)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("Failed to load session summary for artifact reconciliation: %s", exc)
+            return
+        try:
+            changed = self._workspace.reconcile_from_bridge_summary(summary, agent_name=self.agent_name)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("Artifact reconciliation failed: %s", exc)
+            return
+        if changed:
+            LOGGER.info("Reconciled local artifacts from bridge session summary for %s", self.session_id)

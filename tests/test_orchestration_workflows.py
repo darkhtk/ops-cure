@@ -401,6 +401,64 @@ def test_quiet_discord_policy_false_preserves_full_output(app_env):
     assert "line 11" in posted
 
 
+def test_quiet_discord_uses_explicit_truncation_marker(app_env):
+    summary = __import__("asyncio").run(_start_session(app_env))
+
+    __import__("asyncio").run(
+        app_env.session_service.register_worker(
+            session_id=summary.id,
+            agent_name="planner",
+            worker_id="worker-planner",
+            pid_hint=1001,
+        ),
+    )
+
+    from app.models import JobModel
+
+    with app_env.db.session_scope() as db:
+        job = JobModel(
+            session_id=summary.id,
+            agent_name="planner",
+            job_type="message",
+            user_id="user-1",
+            input_text="show compact output",
+        )
+        db.add(job)
+        db.flush()
+        job_id = job.id
+
+    claimed = __import__("asyncio").run(
+        app_env.session_service.claim_next_job(
+            session_id=summary.id,
+            agent_name="planner",
+            worker_id="worker-planner",
+        ),
+    )
+    assert claimed is not None
+    assert claimed.id == job_id
+
+    long_human = " ".join(["status"] * 120)
+    __import__("asyncio").run(
+        app_env.session_service.complete_job(
+            job_id=job_id,
+            session_id=summary.id,
+            agent_name="planner",
+            worker_id="worker-planner",
+            output_text="[[report]]ignored[[/report]]",
+            thread_output_text=(
+                "OPS: type=progress | actor=planner | task=T-001 | state=progress | read=CURRENT_STATE.md\n"
+                f"HUMAN: {long_human}\n"
+                "DONE: task=T-001"
+            ),
+            pid_hint=1001,
+        ),
+    )
+
+    _, posted = app_env.thread_manager.messages[-1]
+    assert "..." not in posted
+    assert "[truncated]" in posted
+
+
 def test_bridge_preserves_async_event_protocol_without_agent_wrapper(app_env):
     summary = __import__("asyncio").run(_start_session(app_env))
 

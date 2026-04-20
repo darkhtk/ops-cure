@@ -56,6 +56,16 @@ def trim_text(text: str, limit: int = 220) -> str:
     return normalized[: limit - 3].rstrip() + "..."
 
 
+def trim_thread_text(text: str, limit: int = 220) -> str:
+    normalized = " ".join(text.split())
+    if len(normalized) <= limit:
+        return normalized
+    marker = " [truncated]"
+    if limit <= len(marker):
+        return normalized[:limit]
+    return normalized[: limit - len(marker)].rstrip() + marker
+
+
 @dataclass(slots=True)
 class HandoffSpec:
     target_agent: str
@@ -240,6 +250,102 @@ class SessionWorkspace:
             "latest_artifact_at": latest_artifact_at,
             "latest_artifact_path": self._display_path(latest_path) if latest_path is not None else None,
         }
+
+    def reconcile_from_bridge_summary(self, summary: dict[str, object], *, agent_name: str) -> bool:
+        self.ensure_structure()
+        session_status = str(summary.get("status") or "unknown")
+        desired_status = str(summary.get("desired_status") or "ready")
+        pending_jobs = int(summary.get("pending_jobs") or 0)
+        active_jobs = int(summary.get("active_jobs") or 0)
+        agent_rows = [agent for agent in (summary.get("agents") or []) if isinstance(agent, dict)]
+        active_agent_states = {
+            str(agent.get("status") or "").strip().lower()
+            for agent in agent_rows
+            if str(agent.get("status") or "").strip()
+        }
+        settled = (
+            session_status in {"ready", "paused", "closed", "failed_start"}
+            and pending_jobs == 0
+            and active_jobs == 0
+            and active_agent_states.isdisjoint({"busy", "starting", "restarting"})
+        )
+        if not settled:
+            return False
+
+        updated_files: list[Path] = []
+        changed = False
+        index = self._load_task_index()
+        transient_statuses = {"in_progress", "review", "handoff_queued"}
+        for card in index.values():
+            if card.status not in transient_statuses:
+                continue
+            card.status = "ready" if session_status in {"ready", "paused"} else "failed"
+            card.updated_at = utcnow().isoformat()
+            card.notes = (
+                "Reconciled from bridge session state after the session settled without active jobs."
+            )
+            self._write_task_card(card)
+            updated_files.append(self.task_file(card.task_id))
+            changed = True
+        if changed:
+            self._save_task_index(index)
+        updated_files.append(self._refresh_task_board(index))
+
+        handoffs_needs_reset = self.handoffs_file.read_text(encoding="utf-8") != self._build_handoffs_template()
+        if handoffs_needs_reset:
+            self.handoffs_file.write_text(self._build_handoffs_template(), encoding="utf-8")
+            updated_files.append(self.handoffs_file)
+            changed = True
+
+        status_label = "paused" if desired_status == "paused" or session_status == "paused" else session_status
+        blocker_text = str(summary.get("pause_reason") or "none") if status_label == "paused" else "none"
+        next_action = self._bridge_next_action(
+            session_status=session_status,
+            desired_status=desired_status,
+            attached_workers=sum(1 for agent in agent_rows if agent.get("worker_id")),
+            total_agents=len(agent_rows),
+        )
+        summary_text = self._bridge_summary_text(
+            session_status=session_status,
+            pending_jobs=pending_jobs,
+            active_jobs=active_jobs,
+        )
+
+        self.state_file.write_text(
+            self._build_state_text(
+                status_label=status_label,
+                agent_name=agent_name,
+                summary=summary_text,
+                next_action=next_action,
+                blocker_text=blocker_text,
+                updated_files=updated_files or [self.state_file],
+            ),
+            encoding="utf-8",
+        )
+        self.current_task_file.write_text(
+            self._build_current_task_summary(
+                agent_name=agent_name,
+                state_label=status_label,
+                next_action=next_action,
+                latest_brief_name=None,
+                task_id=None,
+                task_path=None,
+                job_type="status_sync",
+                current_message="No active job. Local artifacts were synchronized from the bridge session summary.",
+            ),
+            encoding="utf-8",
+        )
+        self.status_file.write_text(
+            self._build_status_text(
+                agent_name=agent_name,
+                report_text=summary_text,
+                questions=[],
+                handoff_lines=["none"],
+                updated_files=updated_files or [self.state_file, self.current_task_file],
+            ),
+            encoding="utf-8",
+        )
+        return True
 
     def write_job_brief(
         self,
@@ -642,7 +748,7 @@ class SessionWorkspace:
                 task_id=task_id,
                 extra_paths=[self.questions_file, self.state_file],
             )
-            issue_text = trim_text(" ".join(question_blocks[0].split()), 220)
+            issue_text = trim_thread_text(" ".join(question_blocks[0].split()), 220)
             return "\n".join(
                 [
                     (
@@ -681,7 +787,7 @@ class SessionWorkspace:
     def _compose_human_summary(self, report_text: str) -> str:
         normalized = " ".join((report_text or "(no update)").split()) or "(no update)"
         limit = 420 if not self.quiet_discord else 220
-        return trim_text(normalized, limit)
+        return trim_thread_text(normalized, limit)
 
     def _compose_read_pointer(
         self,
@@ -1237,6 +1343,46 @@ class SessionWorkspace:
             return path.relative_to(self.root).as_posix()
         except ValueError:
             return path.name
+
+    @staticmethod
+    def _bridge_summary_text(
+        *,
+        session_status: str,
+        pending_jobs: int,
+        active_jobs: int,
+    ) -> str:
+        if session_status == "ready":
+            return "Bridge session summary says the session is ready and no jobs are active."
+        if session_status == "paused":
+            return "Bridge session summary says the session is paused and waiting for an explicit resume."
+        if session_status == "closed":
+            return "Bridge session summary says the session is closed."
+        if session_status == "failed_start":
+            return "Bridge session summary says startup failed before workers attached."
+        return (
+            f"Bridge session summary says status={session_status}, pending_jobs={pending_jobs}, "
+            f"active_jobs={active_jobs}."
+        )
+
+    @staticmethod
+    def _bridge_next_action(
+        *,
+        session_status: str,
+        desired_status: str,
+        attached_workers: int,
+        total_agents: int,
+    ) -> str:
+        if session_status == "waiting_for_workers":
+            return f"Wait for workers to attach ({attached_workers}/{total_agents})."
+        if session_status == "awaiting_launcher":
+            return "Wait for the launcher to reconnect."
+        if session_status == "failed_start":
+            return "Start a fresh session after checking the execution plane."
+        if session_status == "closed":
+            return "No further action. The session is closed."
+        if session_status == "paused" or desired_status == "paused":
+            return "Wait for an explicit resume request."
+        return "Waiting for the next user message or job."
 
     @staticmethod
     def _extract_backticked_field(text: str, label: str) -> str | None:
