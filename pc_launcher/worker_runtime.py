@@ -45,7 +45,7 @@ class WorkerRuntime:
         self.project_file = Path(project_file).resolve()
         self.project: ProjectConfig = load_project(self.project_file)
         if workdir_override:
-            self.project.default_workdir = str(Path(workdir_override).resolve())
+            self.project.workdir = str(Path(workdir_override).resolve())
         self.agent: AgentConfig = find_agent(self.project, agent_name)
         self.session_id = session_id
         self.agent_name = agent_name
