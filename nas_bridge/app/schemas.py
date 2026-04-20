@@ -77,12 +77,12 @@ class ProjectPolicy(BaseModel):
 class ProjectManifest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
-    profile_name: str = Field(validation_alias=AliasChoices("profile_name", "project_name"))
+    project_name: str = Field(validation_alias=AliasChoices("project_name", "profile_name"))
     default_target_name: str | None = Field(
         default=None,
         validation_alias=AliasChoices("default_target_name"),
     )
-    default_workdir: str = Field(validation_alias=AliasChoices("default_workdir", "workdir"))
+    workdir: str = Field(validation_alias=AliasChoices("workdir", "default_workdir"))
     guild_id: str
     parent_channel_id: str
     allowed_user_ids: list[str]
@@ -102,16 +102,16 @@ class ProjectManifest(BaseModel):
         return self
 
     @property
-    def project_name(self) -> str:
-        return self.profile_name
+    def profile_name(self) -> str:
+        return self.project_name
 
     @property
-    def workdir(self) -> str:
-        return self.default_workdir
+    def default_workdir(self) -> str:
+        return self.workdir
 
     @property
     def resolved_default_target_name(self) -> str:
-        return (self.default_target_name or Path(self.default_workdir).name or self.profile_name).strip()
+        return (self.default_target_name or Path(self.workdir).name or self.project_name).strip()
 
 
 class CatalogRegistrationRequest(BaseModel):
