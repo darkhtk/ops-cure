@@ -245,6 +245,23 @@ def register_commands(
             return
         await interaction.followup.send(f"Closed session `{summary.id}`.", ephemeral=True)
 
+    @project_group.command(name="cleanup", description="Close the current session and remove or archive its thread")
+    async def project_cleanup(interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        channel = interaction.channel
+        if not isinstance(channel, discord.Thread):
+            await interaction.followup.send("Run this command inside a managed session thread.", ephemeral=True)
+            return
+        try:
+            summary = await session_service.cleanup_session_thread(str(channel.id), str(interaction.user.id))
+        except Exception as exc:  # noqa: BLE001
+            await interaction.followup.send(str(exc), ephemeral=True)
+            return
+        await interaction.followup.send(
+            f"Cleanup requested for session `{summary.id}`. The thread was removed or archived if deletion was not allowed.",
+            ephemeral=True,
+        )
+
     @tree.command(name="agents", description="List agents in the current session")
     async def agents(interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True, thinking=True)

@@ -18,6 +18,18 @@ from ..schemas import ProjectManifest, SessionSummaryResponse
 from ..services.policy_service import PolicyService
 from ..services.recovery_service import RecoveryService
 
+START_REUSE_SESSION_STATUSES = {
+    "requested",
+    "waking_execution_plane",
+    "awaiting_launcher",
+    "waiting_for_workers",
+    "launching",
+    "restarting_workers",
+    "resuming_jobs",
+    "ready",
+    "paused",
+}
+
 
 class StartWorkflow:
     def __init__(
@@ -137,9 +149,24 @@ class StartWorkflow:
             if selected_preset is not None:
                 statement = statement.where(SessionModel.preset == selected_preset)
             session_row = db.scalar(statement)
-            if session_row is None:
+            if session_row is not None:
+                return session_row.id
+
+            fallback_statement = (
+                select(SessionModel)
+                .where(SessionModel.target_project_name == target_project_name)
+                .where(SessionModel.guild_id == guild_id)
+                .where(SessionModel.parent_channel_id == parent_channel_id)
+                .where(SessionModel.closed_at.is_(None))
+                .where(SessionModel.status.in_(START_REUSE_SESSION_STATUSES))
+                .order_by(SessionModel.created_at.desc())
+            )
+            if selected_preset is not None:
+                fallback_statement = fallback_statement.where(SessionModel.preset == selected_preset)
+            fallback_row = db.scalar(fallback_statement)
+            if fallback_row is None:
                 return None
-            return session_row.id
+            return fallback_row.id
 
     async def _resolve_target_workdir(
         self,

@@ -73,6 +73,7 @@ def build_services(settings: Settings) -> ServiceContainer:
         power_provider=power_provider,
         execution_provider=execution_provider,
         worker_stale_after_seconds=settings.worker_stale_after_seconds,
+        stalled_start_timeout_seconds=settings.stalled_start_timeout_seconds,
     )
     session_service = SessionService(
         registry=registry,

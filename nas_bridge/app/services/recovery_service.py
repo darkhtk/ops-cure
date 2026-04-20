@@ -24,6 +24,14 @@ from ..transcript_service import TranscriptService
 from ..worker_registry import WorkerRegistry
 
 LOGGER = logging.getLogger(__name__)
+STARTUP_SESSION_STATUSES = {
+    "requested",
+    "waking_execution_plane",
+    "awaiting_launcher",
+    "waiting_for_workers",
+    "launching",
+    "restarting_workers",
+}
 
 
 def utcnow() -> datetime:
@@ -48,6 +56,7 @@ class RecoveryService:
         power_provider: PowerProvider,
         execution_provider: ExecutionProvider,
         worker_stale_after_seconds: int,
+        stalled_start_timeout_seconds: int,
     ) -> None:
         self.registry = registry
         self.transcript_service = transcript_service
@@ -55,6 +64,7 @@ class RecoveryService:
         self.power_provider = power_provider
         self.execution_provider = execution_provider
         self.worker_stale_after = timedelta(seconds=worker_stale_after_seconds)
+        self.stalled_start_timeout = timedelta(seconds=stalled_start_timeout_seconds)
         self._stop_event = asyncio.Event()
 
     async def run_forever(self, *, interval_seconds: float = 5.0) -> None:
@@ -90,6 +100,8 @@ class RecoveryService:
         requested_by: str = "system",
         wake_if_needed: bool = False,
     ) -> None:
+        cleanup_thread_id: str | None = None
+        cleanup_reason: str | None = None
         with session_scope() as db:
             session_row = db.scalar(
                 select(SessionModel)
@@ -135,40 +147,49 @@ class RecoveryService:
 
             self._clear_stale_workers(session_row.agents)
 
-            if execution_status is None or execution_status.state in {"offline", "awaiting_launcher"}:
-                if wake_if_needed and power_target is not None:
-                    wake_result = self.power_provider.wake(power_target)
-                    session_row.power_state = wake_result.state
-                    session_row.status = "waking_execution_plane"
-                else:
-                    session_row.status = "awaiting_launcher"
-                return
+            if self._is_stalled_start(session_row):
+                cleanup_thread_id, cleanup_reason = self._fail_stalled_start(
+                    db,
+                    session_row=session_row,
+                    reason=reason,
+                )
+            else:
+                if execution_status is None or execution_status.state in {"offline", "awaiting_launcher"}:
+                    if wake_if_needed and power_target is not None:
+                        wake_result = self.power_provider.wake(power_target)
+                        session_row.power_state = wake_result.state
+                        session_row.status = "waking_execution_plane"
+                    else:
+                        session_row.status = "awaiting_launcher"
+                    return
 
-            if any(agent.worker_id is None for agent in session_row.agents):
-                session_row.status = "waiting_for_workers"
+                if any(agent.worker_id is None for agent in session_row.agents):
+                    session_row.status = "waiting_for_workers"
+                    for agent in session_row.agents:
+                        agent.desired_status = "ready"
+                        if agent.worker_id is None:
+                            agent.status = "starting"
+                    self._complete_operations(db, session_row.id, "start")
+                    return
+
+                pending_jobs = list(
+                    db.scalars(
+                        select(JobModel)
+                        .where(JobModel.session_id == session_row.id)
+                        .where(JobModel.status.in_(["pending", "in_progress"])),
+                    ),
+                )
                 for agent in session_row.agents:
                     agent.desired_status = "ready"
-                    if agent.worker_id is None:
-                        agent.status = "starting"
+                    if agent.status == "paused":
+                        agent.status = "idle"
+                        agent.paused_reason = None
+
+                session_row.status = "resuming_jobs" if pending_jobs else "ready"
                 self._complete_operations(db, session_row.id, "start")
-                return
-
-            pending_jobs = list(
-                db.scalars(
-                    select(JobModel)
-                    .where(JobModel.session_id == session_row.id)
-                    .where(JobModel.status.in_(["pending", "in_progress"])),
-                ),
-            )
-            for agent in session_row.agents:
-                agent.desired_status = "ready"
-                if agent.status == "paused":
-                    agent.status = "idle"
-                    agent.paused_reason = None
-
-            session_row.status = "resuming_jobs" if pending_jobs else "ready"
-            self._complete_operations(db, session_row.id, "start")
-            self._complete_operations(db, session_row.id, "resume")
+                self._complete_operations(db, session_row.id, "resume")
+        if cleanup_thread_id is not None and cleanup_reason is not None:
+            await self.thread_manager.cleanup_thread(cleanup_thread_id, cleanup_reason)
 
     def _clear_stale_workers(self, agents: list[AgentModel]) -> None:
         now = utcnow()
@@ -184,6 +205,70 @@ class RecoveryService:
                 agent.pid_hint = None
                 if agent.status != "busy":
                     agent.status = "starting"
+    def _is_stalled_start(self, session_row: SessionModel) -> bool:
+        if session_row.status not in STARTUP_SESSION_STATUSES:
+            return False
+        if session_row.closed_at is not None:
+            return False
+        created_at = ensure_aware_utc(session_row.created_at)
+        if created_at is None:
+            return False
+        if created_at + self.stalled_start_timeout > utcnow():
+            return False
+        if any(agent.worker_id for agent in session_row.agents):
+            return False
+        return True
+
+    def _fail_stalled_start(
+        self,
+        db,
+        *,
+        session_row: SessionModel,
+        reason: str,
+    ) -> tuple[str, str]:
+        session_row.status = "failed_start"
+        session_row.desired_status = "closed"
+        session_row.execution_state = "stalled_start"
+        session_row.closed_at = utcnow()
+        session_row.pause_reason = "Startup timed out before any worker attached."
+        for agent in session_row.agents:
+            agent.worker_id = None
+            agent.pid_hint = None
+            agent.status = "offline"
+            agent.desired_status = "closed"
+            agent.paused_reason = "Startup timed out."
+        for job in db.scalars(
+            select(JobModel)
+            .where(JobModel.session_id == session_row.id)
+            .where(JobModel.status.in_(["pending", "in_progress"])),
+        ):
+            job.status = "cancelled"
+            job.completed_at = utcnow()
+            if not job.error_text:
+                job.error_text = "Cancelled because the session startup timed out."
+        self.transcript_service.add_entry(
+            db,
+            session_id=session_row.id,
+            direction="system",
+            actor="bridge",
+            content=(
+                f"Startup timed out with no workers attached after {int(self.stalled_start_timeout.total_seconds())} seconds. "
+                f"Session marked failed_start during {reason} recovery."
+            ),
+        )
+        self._fail_operations(
+            db,
+            session_id=session_row.id,
+            operation_type="start",
+            result_json=json.dumps(
+                {
+                    "reason": "stalled_start_timeout",
+                    "timeout_seconds": int(self.stalled_start_timeout.total_seconds()),
+                },
+                ensure_ascii=False,
+            ),
+        )
+        return session_row.discord_thread_id, "Ops-Cure cleaned up a stalled startup session."
 
     @staticmethod
     def _load_power_target(db, session_row: SessionModel) -> PowerTarget | None:
@@ -239,4 +324,19 @@ class RecoveryService:
         )
         for operation in operations:
             operation.status = "completed"
+            operation.completed_at = utcnow()
+
+    @staticmethod
+    def _fail_operations(db, session_id: str, operation_type: str, result_json: str | None = None) -> None:
+        operations = list(
+            db.scalars(
+                select(SessionOperationModel)
+                .where(SessionOperationModel.session_id == session_id)
+                .where(SessionOperationModel.operation_type == operation_type)
+                .where(SessionOperationModel.status.in_(["pending", "running"])),
+            ),
+        )
+        for operation in operations:
+            operation.status = "failed"
+            operation.result_json = result_json
             operation.completed_at = utcnow()

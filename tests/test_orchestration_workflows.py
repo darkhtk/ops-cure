@@ -428,3 +428,76 @@ def test_start_workflow_keeps_windows_paths_stable_for_nas_bridge(app_env):
     assert workflow._canonical_workdir_value(r"C:\Users\darkh\Projects\GenWorld") == r"C:\Users\darkh\Projects\GenWorld"
     assert workflow._normalize_path_for_comparison(r"C:\Users\darkh\Projects\GenWorld") == r"c:\users\darkh\projects\genworld"
     assert workflow._matches_manifest_default_target(manifest, "SampleProject")
+
+
+def test_recovery_service_cleans_up_stalled_start_session(app_env):
+    summary = __import__("asyncio").run(_start_session(app_env))
+
+    from app.models import SessionModel, SessionOperationModel
+
+    with app_env.db.session_scope() as db:
+        session_row = db.scalar(select(SessionModel).where(SessionModel.id == summary.id))
+        assert session_row is not None
+        session_row.created_at = datetime.now(timezone.utc) - timedelta(minutes=10)
+
+    __import__("asyncio").run(
+        app_env.recovery_service.recover_session(
+            session_id=summary.id,
+            reason="stalled-start-test",
+        ),
+    )
+
+    refreshed = __import__("asyncio").run(app_env.session_service.get_session_summary(summary.id))
+    assert refreshed.status == "failed_start"
+    assert refreshed.desired_status == "closed"
+    assert refreshed.closed_at is not None
+    assert app_env.thread_manager.cleaned_threads == [
+        (summary.discord_thread_id, "Ops-Cure cleaned up a stalled startup session."),
+    ]
+
+    with app_env.db.session_scope() as db:
+        operation = db.scalar(
+            select(SessionOperationModel)
+            .where(SessionOperationModel.session_id == summary.id)
+            .where(SessionOperationModel.operation_type == "start"),
+        )
+        assert operation is not None
+        assert operation.status in {"completed", "failed"}
+
+
+def test_start_reuses_existing_target_session_even_with_different_session_title(app_env):
+    first_summary = __import__("asyncio").run(
+        _start_session(app_env, name="Session A", target="UlalaCheese"),
+    )
+
+    reused_summary = __import__("asyncio").run(
+        app_env.session_service.create_session_from_project(
+            project_name="Session B",
+            target_project_name="UlalaCheese",
+            preset="UlalaCheese",
+            user_id="user-1",
+            guild_id="guild-1",
+            parent_channel_id="parent-1",
+        ),
+    )
+
+    assert reused_summary.id == first_summary.id
+    assert len(app_env.thread_manager.created_threads) == 1
+
+
+def test_cleanup_session_thread_closes_and_cleans_thread(app_env):
+    summary = __import__("asyncio").run(_start_session(app_env))
+
+    cleaned = __import__("asyncio").run(
+        app_env.session_service.cleanup_session_thread(
+            summary.discord_thread_id,
+            "user-1",
+            reason="Manual cleanup requested.",
+        ),
+    )
+
+    assert cleaned.id == summary.id
+    assert cleaned.status == "closed"
+    assert app_env.thread_manager.cleaned_threads == [
+        (summary.discord_thread_id, "Session cleanup requested"),
+    ]

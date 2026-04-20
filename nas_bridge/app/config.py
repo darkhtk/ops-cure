@@ -36,6 +36,10 @@ class Settings(BaseSettings):
         default=5.0,
         alias="BRIDGE_RECOVERY_LOOP_INTERVAL_SECONDS",
     )
+    stalled_start_timeout_seconds: int = Field(
+        default=300,
+        alias="BRIDGE_STALLED_START_TIMEOUT_SECONDS",
+    )
 
     model_config = SettingsConfigDict(
         env_file=".env",

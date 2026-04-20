@@ -16,6 +16,7 @@ class FakeThreadManager:
         self.created_threads: list[str] = []
         self.messages: list[tuple[str, str]] = []
         self.archived_threads: list[tuple[str, str]] = []
+        self.cleaned_threads: list[tuple[str, str]] = []
 
     async def create_session_thread(
         self,
@@ -37,6 +38,11 @@ class FakeThreadManager:
 
     async def archive_thread(self, thread_id: str, reason: str) -> None:
         self.archived_threads.append((thread_id, reason))
+
+    async def cleanup_thread(self, thread_id: str, reason: str) -> str:
+        self.cleaned_threads.append((thread_id, reason))
+        self.archived_threads.append((thread_id, reason))
+        return "archived"
 
 
 @pytest.fixture()
@@ -93,6 +99,7 @@ def app_env(tmp_path, monkeypatch):
         power_provider=power_provider,
         execution_provider=execution_provider,
         worker_stale_after_seconds=90,
+        stalled_start_timeout_seconds=300,
     )
     verification_svc = verification_service.VerificationService(
         registry=registry,

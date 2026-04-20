@@ -536,34 +536,46 @@ class SessionService:
                 .options(selectinload(SessionModel.agents))
                 .where(SessionModel.discord_thread_id == thread_id),
             )
-            session_row.status = "closed"
-            session_row.desired_status = "closed"
-            session_row.closed_at = utcnow()
-
-            for agent in session_row.agents:
-                agent.status = "offline"
-
-            for job in db.scalars(
-                select(JobModel)
-                .where(JobModel.session_id == session_row.id)
-                .where(JobModel.status.in_(["pending", "in_progress"])),
-            ):
-                job.status = "cancelled"
-                job.completed_at = utcnow()
-                job.error_text = "Session closed."
-
-            self.transcript_service.add_entry(
+            self._close_session_row(
                 db,
-                session_id=session_row.id,
-                direction="system",
-                actor=closed_by,
-                content="Session closed from Discord.",
+                session_row=session_row,
+                closed_by=closed_by,
+                transcript_content="Session closed from Discord.",
+                job_error_text="Session closed.",
             )
             summary = self._to_summary_response(db, session_row)
 
         self.drift_monitor.clear_session(summary.id)
         await self.thread_manager.post_message(thread_id, "Session closed. New jobs will be rejected.")
         await self.thread_manager.archive_thread(thread_id, "Session closed")
+        return summary
+
+    async def cleanup_session_thread(
+        self,
+        thread_id: str,
+        closed_by: str,
+        *,
+        reason: str = "Session cleaned up from Discord.",
+    ) -> SessionSummaryResponse:
+        with session_scope() as db:
+            session_row = self._require_session(
+                db,
+                select(SessionModel)
+                .options(selectinload(SessionModel.agents))
+                .where(SessionModel.discord_thread_id == thread_id),
+            )
+            if session_row.closed_at is None:
+                self._close_session_row(
+                    db,
+                    session_row=session_row,
+                    closed_by=closed_by,
+                    transcript_content=reason,
+                    job_error_text="Session cleaned up.",
+                )
+            summary = self._to_summary_response(db, session_row)
+
+        self.drift_monitor.clear_session(summary.id)
+        await self.thread_manager.cleanup_thread(thread_id, "Session cleanup requested")
         return summary
 
     async def enqueue_restart(self, session_id: str, agent_name: str, requested_by: str) -> JobPayload:
@@ -2030,6 +2042,40 @@ class SessionService:
             "4. Every handoff body must contain a `T-###` line, a `Target summary:` line, and the exact reminder `Read CURRENT_STATE.md and TASK_BOARD.md first.`\n"
             "5. Keep each handoff compact and include `Files:` plus `Done condition:` so the next agent can execute it safely.\n"
             "6. Keep Discord output to a short `[[report]]...[[/report]]`, and use `[[question]]...[[/question]]` only for truly critical blockers.\n"
+        )
+
+    def _close_session_row(
+        self,
+        db: Session,
+        *,
+        session_row: SessionModel,
+        closed_by: str,
+        transcript_content: str,
+        job_error_text: str,
+    ) -> None:
+        session_row.status = "closed"
+        session_row.desired_status = "closed"
+        session_row.closed_at = utcnow()
+
+        for agent in session_row.agents:
+            agent.status = "offline"
+            agent.desired_status = "closed"
+
+        for job in db.scalars(
+            select(JobModel)
+            .where(JobModel.session_id == session_row.id)
+            .where(JobModel.status.in_(["pending", "in_progress"])),
+        ):
+            job.status = "cancelled"
+            job.completed_at = utcnow()
+            job.error_text = job_error_text
+
+        self.transcript_service.add_entry(
+            db,
+            session_id=session_row.id,
+            direction="system",
+            actor=closed_by,
+            content=transcript_content,
         )
 
     @staticmethod

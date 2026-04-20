@@ -96,9 +96,39 @@ class ThreadManager:
             LOGGER.info("Discord disabled, archive thread %s (%s)", thread_id, reason)
             return
 
-        assert self.discord_client is not None
-        thread = self.discord_client.get_channel(int(thread_id))
-        if thread is None:
-            thread = await self.discord_client.fetch_channel(int(thread_id))
+        thread = await self._load_thread(thread_id)
         if isinstance(thread, discord.Thread):
             await thread.edit(archived=True, locked=False, reason=reason)
+
+    async def cleanup_thread(self, thread_id: str, reason: str) -> str:
+        if not self.discord_enabled:
+            LOGGER.info("Discord disabled, cleanup thread %s (%s)", thread_id, reason)
+            return "disabled"
+
+        thread = await self._load_thread(thread_id)
+        if not isinstance(thread, discord.Thread):
+            return "missing"
+
+        try:
+            await thread.delete(reason=reason)
+            return "deleted"
+        except (discord.Forbidden, discord.HTTPException) as exc:
+            LOGGER.warning("Thread delete failed for %s: %s", thread_id, exc)
+
+        try:
+            await thread.edit(archived=True, locked=False, reason=reason)
+            return "archived"
+        except (discord.Forbidden, discord.HTTPException) as exc:
+            LOGGER.warning("Thread archive fallback failed for %s: %s", thread_id, exc)
+            return "failed"
+
+    async def _load_thread(self, thread_id: str):
+        assert self.discord_client is not None
+        thread = self.discord_client.get_channel(int(thread_id))
+        if thread is not None:
+            return thread
+        try:
+            return await self.discord_client.fetch_channel(int(thread_id))
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException) as exc:
+            LOGGER.warning("Unable to load thread %s: %s", thread_id, exc)
+            return None
