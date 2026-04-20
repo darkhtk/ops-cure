@@ -15,6 +15,7 @@ __pycache__/
 *.log
 logs/
 runtime_logs/
+.ops-cure-launcher-*.lock
 
 _discord_sessions/
 nas_bridge/data/
