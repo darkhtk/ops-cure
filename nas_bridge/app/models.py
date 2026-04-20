@@ -19,11 +19,20 @@ class SessionModel(Base):
     id: Mapped[str] = mapped_column(primary_key=True, default=lambda: str(uuid.uuid4()))
     project_name: Mapped[str] = mapped_column(index=True)
     preset: Mapped[str | None] = mapped_column(nullable=True)
+    power_target_name: Mapped[str | None] = mapped_column(index=True, nullable=True)
+    execution_target_name: Mapped[str | None] = mapped_column(index=True, nullable=True)
     discord_thread_id: Mapped[str] = mapped_column(unique=True, index=True)
     guild_id: Mapped[str] = mapped_column(index=True)
     parent_channel_id: Mapped[str] = mapped_column(index=True)
     workdir: Mapped[str] = mapped_column(Text())
     status: Mapped[str] = mapped_column(index=True, default="waiting_for_workers")
+    desired_status: Mapped[str] = mapped_column(index=True, default="ready")
+    power_state: Mapped[str] = mapped_column(index=True, default="unknown")
+    execution_state: Mapped[str] = mapped_column(index=True, default="unknown")
+    pause_reason: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    last_recovery_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_recovery_reason: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    policy_version: Mapped[int] = mapped_column(Integer(), default=1)
     created_by: Mapped[str] = mapped_column(index=True)
     launcher_id: Mapped[str | None] = mapped_column(index=True, nullable=True)
     send_ready_message: Mapped[bool] = mapped_column(Boolean(), default=True)
@@ -45,6 +54,14 @@ class SessionModel(Base):
     project_finds: Mapped[list["ProjectFindModel"]] = relationship(
         back_populates="session",
     )
+    policies: Mapped[list["SessionPolicyModel"]] = relationship(
+        back_populates="session",
+        cascade="all, delete-orphan",
+    )
+    operations: Mapped[list["SessionOperationModel"]] = relationship(
+        back_populates="session",
+        cascade="all, delete-orphan",
+    )
 
 
 class AgentModel(Base):
@@ -61,6 +78,8 @@ class AgentModel(Base):
     role: Mapped[str] = mapped_column(Text())
     is_default: Mapped[bool] = mapped_column(Boolean(), default=False)
     status: Mapped[str] = mapped_column(index=True, default="offline")
+    desired_status: Mapped[str] = mapped_column(index=True, default="ready")
+    paused_reason: Mapped[str | None] = mapped_column(Text(), nullable=True)
     last_heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     pid_hint: Mapped[int | None] = mapped_column(Integer(), nullable=True)
     worker_id: Mapped[str | None] = mapped_column(index=True, nullable=True)
@@ -135,3 +154,67 @@ class ProjectFindModel(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     session: Mapped[SessionModel | None] = relationship(back_populates="project_finds")
+
+
+class PowerTargetModel(Base):
+    __tablename__ = "power_targets"
+    __table_args__ = (UniqueConstraint("name", name="uq_power_target_name"),)
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=lambda: str(uuid.uuid4()))
+    name: Mapped[str] = mapped_column(index=True)
+    provider: Mapped[str] = mapped_column(index=True, default="noop")
+    mac_address: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    broadcast_ip: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    metadata_json: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class ExecutionTargetModel(Base):
+    __tablename__ = "execution_targets"
+    __table_args__ = (UniqueConstraint("name", name="uq_execution_target_name"),)
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=lambda: str(uuid.uuid4()))
+    name: Mapped[str] = mapped_column(index=True)
+    provider: Mapped[str] = mapped_column(index=True, default="windows_launcher")
+    platform: Mapped[str] = mapped_column(index=True, default="windows")
+    launcher_id_hint: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    host_pattern: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    metadata_json: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class SessionPolicyModel(Base):
+    __tablename__ = "session_policies"
+    __table_args__ = (UniqueConstraint("session_id", name="uq_session_policy_session"),)
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=lambda: str(uuid.uuid4()))
+    session_id: Mapped[str] = mapped_column(ForeignKey("sessions.id", ondelete="CASCADE"), index=True)
+    source: Mapped[str] = mapped_column(index=True, default="preset")
+    policy_json: Mapped[str] = mapped_column(Text())
+    version: Mapped[int] = mapped_column(Integer(), default=1)
+    updated_by: Mapped[str] = mapped_column(index=True, default="system")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+    session: Mapped[SessionModel] = relationship(back_populates="policies")
+
+
+class SessionOperationModel(Base):
+    __tablename__ = "session_operations"
+    __table_args__ = (
+        Index("ix_session_operations_session_status", "session_id", "status"),
+        Index("ix_session_operations_type_status", "operation_type", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=lambda: str(uuid.uuid4()))
+    session_id: Mapped[str] = mapped_column(ForeignKey("sessions.id", ondelete="CASCADE"), index=True)
+    operation_type: Mapped[str] = mapped_column(index=True)
+    status: Mapped[str] = mapped_column(index=True, default="pending")
+    requested_by: Mapped[str] = mapped_column(index=True)
+    input_json: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    result_json: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    session: Mapped[SessionModel] = relationship(back_populates="operations")

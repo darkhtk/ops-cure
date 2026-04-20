@@ -64,6 +64,13 @@ class WorkerRegistry:
                 return project
         return None
 
+    def find_launcher_for_project(self, project_name: str) -> LauncherRecord | None:
+        self.prune_stale_launchers()
+        for record in self._launchers.values():
+            if project_name in record.projects:
+                return record
+        return None
+
     def get_projects_for_launcher(self, launcher_id: str) -> dict[str, ProjectManifest]:
         self.prune_stale_launchers()
         record = self._launchers.get(launcher_id)

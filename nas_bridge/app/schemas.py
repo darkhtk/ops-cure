@@ -35,6 +35,43 @@ class FinderManifest(BaseModel):
     exclude_dirs: list[str] = Field(default_factory=list)
 
 
+class PowerManifest(BaseModel):
+    target: str = "default"
+    provider: str = "noop"
+    mac_address: str | None = None
+    broadcast_ip: str | None = None
+    metadata: dict[str, str] = Field(default_factory=dict)
+
+
+class ExecutionManifest(BaseModel):
+    target: str = "default"
+    provider: str = "windows_launcher"
+    platform: str = "windows"
+    launcher_id_hint: str | None = None
+    host_pattern: str | None = None
+    auto_start_expected: bool = True
+    metadata: dict[str, str] = Field(default_factory=dict)
+
+
+class ProjectPolicy(BaseModel):
+    max_parallel_agents: int = 1
+    auto_retry: bool = True
+    max_retries: int = 1
+    quiet_discord: bool = True
+    approval_mode: str = "critical_only"
+    allow_cross_agent_handoff: bool = True
+
+    @field_validator("max_parallel_agents")
+    @classmethod
+    def validate_parallel_agents(cls, value: int) -> int:
+        return max(1, min(value, 8))
+
+    @field_validator("max_retries")
+    @classmethod
+    def validate_max_retries(cls, value: int) -> int:
+        return max(0, min(value, 10))
+
+
 class ProjectManifest(BaseModel):
     project_name: str
     workdir: str
@@ -45,6 +82,9 @@ class ProjectManifest(BaseModel):
     agents: list[AgentManifest]
     startup: StartupManifest = Field(default_factory=StartupManifest)
     finder: FinderManifest = Field(default_factory=FinderManifest)
+    power: PowerManifest = Field(default_factory=PowerManifest)
+    execution: ExecutionManifest = Field(default_factory=ExecutionManifest)
+    policy: ProjectPolicy = Field(default_factory=ProjectPolicy)
 
     @model_validator(mode="after")
     def validate_default_agent(self) -> "ProjectManifest":
@@ -78,6 +118,8 @@ class AgentStatusResponse(BaseModel):
     role: str
     is_default: bool
     status: str
+    desired_status: str = "ready"
+    paused_reason: str | None = None
     last_heartbeat_at: datetime | None = None
     worker_id: str | None = None
     pid_hint: int | None = None
@@ -95,6 +137,37 @@ class TranscriptContextEntry(BaseModel):
     actor: str
     content: str
     created_at: datetime
+
+
+class PowerTargetSummary(BaseModel):
+    name: str
+    provider: str
+    state: str
+
+
+class ExecutionTargetSummary(BaseModel):
+    name: str
+    provider: str
+    platform: str
+    state: str
+    launcher_id: str | None = None
+    auto_start_expected: bool = True
+
+
+class SessionPolicyResponse(ProjectPolicy):
+    source: str = "preset"
+    version: int = 1
+    updated_by: str = "system"
+    updated_at: datetime | None = None
+
+
+class SessionOperationResponse(BaseModel):
+    id: str
+    operation_type: str
+    status: str
+    requested_by: str
+    created_at: datetime
+    completed_at: datetime | None = None
 
 
 class SessionLaunchResponse(BaseModel):
@@ -247,11 +320,39 @@ class SessionSummaryResponse(BaseModel):
     parent_channel_id: str
     workdir: str
     status: str
+    desired_status: str = "ready"
+    power_state: str = "unknown"
+    execution_state: str = "unknown"
+    pause_reason: str | None = None
+    last_recovery_at: datetime | None = None
+    last_recovery_reason: str | None = None
     created_by: str
     launcher_id: str | None = None
     created_at: datetime
     closed_at: datetime | None = None
+    power_target: PowerTargetSummary | None = None
+    execution_target: ExecutionTargetSummary | None = None
+    policy: SessionPolicyResponse | None = None
+    active_operation: SessionOperationResponse | None = None
     agents: list[AgentStatusResponse]
+
+
+class PolicySetRequest(BaseModel):
+    key: str
+    value: str
+    updated_by: str
+
+
+class PolicySetResponse(BaseModel):
+    session_id: str
+    policy: SessionPolicyResponse
+
+
+class SessionPauseResponse(BaseModel):
+    session_id: str
+    status: str
+    desired_status: str
+    pause_reason: str | None = None
 
 
 class HealthResponse(BaseModel):

@@ -1,6 +1,6 @@
 project_name: UlalaCheese
 # Active target project directory for this preset.
-workdir: C:\sourcetree\ulala_cheese_vertical
+workdir: C:\Users\darkh\Projects\UlalaCheese
 guild_id: "1494848853441253416"
 parent_channel_id: "1494851246480298125"
 allowed_user_ids:
@@ -51,6 +51,7 @@ artifacts:
 
 finder:
   roots:
+    - C:\Users\darkh\Projects
     - C:\sourcetree
   analyze_agent: planner
   prompt_file: prompts/finder.md

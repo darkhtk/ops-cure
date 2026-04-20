@@ -16,6 +16,7 @@ def register_commands(
     project_group = app_commands.Group(name="project", description="Manage project sessions")
     agent_group = app_commands.Group(name="agent", description="Manage individual agents")
     session_group = app_commands.Group(name="session", description="Manage the active session")
+    policy_group = app_commands.Group(name="policy", description="Manage session policy overrides")
 
     async def _current_thread_session(interaction: discord.Interaction):
         channel = interaction.channel
@@ -125,20 +126,92 @@ def register_commands(
 
         agents = "\n".join(
             (
-                f"- `{agent.agent_name}` {agent.status} [{agent.cli_type}]"
+                f"- `{agent.agent_name}` {agent.status}/{agent.desired_status if hasattr(agent, 'desired_status') else agent.status} [{agent.cli_type}]"
                 f"{_format_drift_suffix(agent)}"
             )
             for agent in session_summary.agents
         )
+        power_line = "not configured"
+        if session_summary.power_target is not None:
+            power_line = (
+                f"`{session_summary.power_target.name}` "
+                f"[{session_summary.power_target.provider}] state={session_summary.power_target.state}"
+            )
+        execution_line = "not configured"
+        if session_summary.execution_target is not None:
+            execution_line = (
+                f"`{session_summary.execution_target.name}` "
+                f"[{session_summary.execution_target.provider}] state={session_summary.execution_target.state}"
+            )
+            if session_summary.execution_target.launcher_id:
+                execution_line += f" launcher={session_summary.execution_target.launcher_id}"
+        policy_line = "policy unavailable"
+        if session_summary.policy is not None:
+            policy_line = (
+                f"parallel={session_summary.policy.max_parallel_agents}, "
+                f"auto_retry={session_summary.policy.auto_retry}, "
+                f"max_retries={session_summary.policy.max_retries}, "
+                f"approval={session_summary.policy.approval_mode}, "
+                f"quiet={session_summary.policy.quiet_discord}"
+            )
+        active_operation = "none"
+        if session_summary.active_operation is not None:
+            active_operation = (
+                f"`{session_summary.active_operation.operation_type}` "
+                f"[{session_summary.active_operation.status}] by {session_summary.active_operation.requested_by}"
+            )
         await interaction.followup.send(
             (
                 f"Session `{session_summary.id}`\n"
                 f"Project: `{session_summary.project_name}`\n"
                 f"Preset: `{session_summary.preset or 'unknown'}`\n"
-                f"Status: `{session_summary.status}`\n"
+                f"Status: `{session_summary.status}` (desired `{session_summary.desired_status}`)\n"
                 f"Launcher: `{session_summary.launcher_id or 'unclaimed'}`\n"
+                f"Power: {power_line}\n"
+                f"Execution: {execution_line}\n"
+                f"Pause reason: `{session_summary.pause_reason or 'none'}`\n"
+                f"Recovery: `{session_summary.last_recovery_reason or 'none'}` at "
+                f"`{session_summary.last_recovery_at.isoformat() if session_summary.last_recovery_at else 'n/a'}`\n"
+                f"Active operation: {active_operation}\n"
+                f"Policy: {policy_line}\n"
                 f"Agents:\n{agents}"
             ),
+            ephemeral=True,
+        )
+
+    @project_group.command(name="pause", description="Pause the current session")
+    @app_commands.describe(reason="Optional reason shown in status and transcripts")
+    async def project_pause(interaction: discord.Interaction, reason: str | None = None) -> None:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            summary = await _current_thread_session(interaction)
+            paused = await session_service.pause_session(
+                session_id=summary.id,
+                requested_by=str(interaction.user.id),
+                reason=reason,
+            )
+        except Exception as exc:  # noqa: BLE001
+            await interaction.followup.send(str(exc), ephemeral=True)
+            return
+        await interaction.followup.send(
+            f"Paused session `{paused.session_id}`. Reason: `{paused.pause_reason or 'none'}`",
+            ephemeral=True,
+        )
+
+    @project_group.command(name="resume", description="Resume the current session")
+    async def project_resume(interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            summary = await _current_thread_session(interaction)
+            resumed = await session_service.resume_session(
+                session_id=summary.id,
+                requested_by=str(interaction.user.id),
+            )
+        except Exception as exc:  # noqa: BLE001
+            await interaction.followup.send(str(exc), ephemeral=True)
+            return
+        await interaction.followup.send(
+            f"Resume requested for session `{resumed.session_id}`. Current status: `{resumed.status}`.",
             ephemeral=True,
         )
 
@@ -199,9 +272,55 @@ def register_commands(
             return
         await interaction.followup.send("Session reset queued for all agents.", ephemeral=True)
 
+    @policy_group.command(name="show", description="Show the effective session policy")
+    async def policy_show(interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            summary = await _current_thread_session(interaction)
+            policy = await session_service.show_policy(session_id=summary.id)
+        except Exception as exc:  # noqa: BLE001
+            await interaction.followup.send(str(exc), ephemeral=True)
+            return
+        await interaction.followup.send(
+            (
+                f"Policy v{policy.version} [{policy.source}] by `{policy.updated_by}`\n"
+                f"- max_parallel_agents: `{policy.max_parallel_agents}`\n"
+                f"- auto_retry: `{policy.auto_retry}`\n"
+                f"- max_retries: `{policy.max_retries}`\n"
+                f"- quiet_discord: `{policy.quiet_discord}`\n"
+                f"- approval_mode: `{policy.approval_mode}`\n"
+                f"- allow_cross_agent_handoff: `{policy.allow_cross_agent_handoff}`"
+            ),
+            ephemeral=True,
+        )
+
+    @policy_group.command(name="set", description="Override a policy value for this session")
+    @app_commands.describe(key="Policy key", value="New value")
+    async def policy_set(interaction: discord.Interaction, key: str, value: str) -> None:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            summary = await _current_thread_session(interaction)
+            updated = await session_service.set_policy(
+                session_id=summary.id,
+                key=key,
+                value=value,
+                updated_by=str(interaction.user.id),
+            )
+        except Exception as exc:  # noqa: BLE001
+            await interaction.followup.send(str(exc), ephemeral=True)
+            return
+        await interaction.followup.send(
+            (
+                f"Updated policy `{key}` for session `{updated.session_id}`.\n"
+                f"New policy version: `{updated.policy.version}`"
+            ),
+            ephemeral=True,
+        )
+
     tree.add_command(project_group)
     tree.add_command(agent_group)
     tree.add_command(session_group)
+    tree.add_command(policy_group)
 
 
 def _format_drift_suffix(agent) -> str:

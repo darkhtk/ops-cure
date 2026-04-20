@@ -13,15 +13,31 @@ from sqlalchemy.orm import Session, selectinload
 
 from .db import session_scope
 from .drift_monitor import ArtifactSnapshot, DriftEvaluation, DriftMonitor
-from .models import AgentModel, JobModel, ProjectFindModel, SessionModel, TranscriptModel
+from .models import (
+    AgentModel,
+    ExecutionTargetModel,
+    JobModel,
+    PowerTargetModel,
+    ProjectFindModel,
+    SessionModel,
+    SessionOperationModel,
+    SessionPolicyModel,
+    TranscriptModel,
+)
 from .schemas import (
     AgentStatusResponse,
     ArtifactHeartbeatSnapshot,
+    ExecutionTargetSummary,
     JobPayload,
+    PolicySetResponse,
+    PowerTargetSummary,
     ProjectFindCandidate,
     ProjectFindCompleteRequest,
     ProjectFindLaunchResponse,
     ProjectManifest,
+    SessionOperationResponse,
+    SessionPauseResponse,
+    SessionPolicyResponse,
     SessionLaunchResponse,
     ProjectFindSummaryResponse,
     SessionSummaryResponse,
@@ -98,6 +114,29 @@ class SessionService:
         self.thread_manager = thread_manager
         self.transcript_service = transcript_service
         self.drift_monitor = drift_monitor
+        self.policy_service = None
+        self.recovery_service = None
+        self.start_workflow = None
+        self.pause_workflow = None
+        self.policy_workflow = None
+        self.execution_provider = None
+
+    def bind_orchestration(
+        self,
+        *,
+        policy_service,
+        recovery_service,
+        start_workflow,
+        pause_workflow,
+        policy_workflow,
+        execution_provider,
+    ) -> None:
+        self.policy_service = policy_service
+        self.recovery_service = recovery_service
+        self.start_workflow = start_workflow
+        self.pause_workflow = pause_workflow
+        self.policy_workflow = policy_workflow
+        self.execution_provider = execution_provider
 
     async def create_session_from_project(
         self,
@@ -109,6 +148,15 @@ class SessionService:
         parent_channel_id: str,
         workdir_override: str | None = None,
     ) -> SessionSummaryResponse:
+        if self.start_workflow is not None:
+            return await self.start_workflow.run(
+                project_name=project_name,
+                preset=preset,
+                user_id=user_id,
+                guild_id=guild_id,
+                parent_channel_id=parent_channel_id,
+                workdir_override=workdir_override,
+            )
         manifest, selected_preset = self._resolve_manifest(preset)
         self._validate_session_start(
             manifest,
@@ -125,6 +173,56 @@ class SessionService:
             guild_id=guild_id,
             parent_channel_id=parent_channel_id,
             workdir_override=workdir_override,
+        )
+
+    async def pause_session(
+        self,
+        *,
+        session_id: str,
+        requested_by: str,
+        reason: str | None = None,
+    ) -> SessionPauseResponse:
+        if self.pause_workflow is None:
+            raise RuntimeError("Pause workflow is not configured.")
+        return await self.pause_workflow.pause(
+            session_id=session_id,
+            requested_by=requested_by,
+            reason=reason,
+        )
+
+    async def resume_session(
+        self,
+        *,
+        session_id: str,
+        requested_by: str,
+    ) -> SessionPauseResponse:
+        if self.pause_workflow is None:
+            raise RuntimeError("Pause workflow is not configured.")
+        return await self.pause_workflow.resume(
+            session_id=session_id,
+            requested_by=requested_by,
+        )
+
+    async def show_policy(self, *, session_id: str) -> SessionPolicyResponse:
+        if self.policy_workflow is None:
+            raise RuntimeError("Policy workflow is not configured.")
+        return await self.policy_workflow.show(session_id=session_id)
+
+    async def set_policy(
+        self,
+        *,
+        session_id: str,
+        key: str,
+        value: str,
+        updated_by: str,
+    ) -> PolicySetResponse:
+        if self.policy_workflow is None:
+            raise RuntimeError("Policy workflow is not configured.")
+        return await self.policy_workflow.set(
+            session_id=session_id,
+            key=key,
+            value=value,
+            updated_by=updated_by,
         )
 
     async def _create_session_with_manifest(
@@ -159,7 +257,10 @@ class SessionService:
                 guild_id=manifest.guild_id,
                 parent_channel_id=manifest.parent_channel_id,
                 workdir=resolved_workdir,
-                status="waiting_for_workers",
+                status="requested",
+                desired_status="ready",
+                power_state="unknown",
+                execution_state="unknown",
                 created_by=user_id,
                 send_ready_message=manifest.startup.send_ready_message,
             )
@@ -175,6 +276,7 @@ class SessionService:
                         role=agent.role,
                         is_default=agent.default,
                         status="starting",
+                        desired_status="ready",
                     ),
                 )
 
@@ -182,7 +284,11 @@ class SessionService:
             session_row = self._require_session(
                 db,
                 select(SessionModel)
-                .options(selectinload(SessionModel.agents))
+                .options(
+                    selectinload(SessionModel.agents),
+                    selectinload(SessionModel.policies),
+                    selectinload(SessionModel.operations),
+                )
                 .where(SessionModel.id == session_row.id),
             )
             self.transcript_service.add_entry(
@@ -195,7 +301,7 @@ class SessionService:
                     f" Workdir: {resolved_workdir}"
                 ),
             )
-            summary = self._to_summary_response(session_row)
+            summary = self._to_summary_response(db, session_row)
 
         await self.thread_manager.post_message(
             discord_thread_id,
@@ -219,7 +325,8 @@ class SessionService:
                 select(SessionModel)
                 .options(selectinload(SessionModel.agents))
                 .where(SessionModel.preset.in_(preset_names))
-                .where(SessionModel.status.in_(["waiting_for_workers", "launching"]))
+                .where(SessionModel.status.in_(["requested", "waiting_for_workers", "launching", "awaiting_launcher", "restarting_workers"]))
+                .where(SessionModel.desired_status != "paused")
                 .where(SessionModel.closed_at.is_(None))
                 .order_by(SessionModel.created_at.asc())
             )
@@ -233,6 +340,7 @@ class SessionService:
                 if session_row.status == "launching" and not manifest.startup.restore_last_session:
                     continue
                 session_row.status = "launching"
+                session_row.execution_state = "launching"
                 session_row.launcher_id = launcher_id
                 launches.append(self._to_launch_response(session_row))
 
@@ -391,20 +499,28 @@ class SessionService:
             session_row = self._require_session(
                 db,
                 select(SessionModel)
-                .options(selectinload(SessionModel.agents))
+                .options(
+                    selectinload(SessionModel.agents),
+                    selectinload(SessionModel.policies),
+                    selectinload(SessionModel.operations),
+                )
                 .where(SessionModel.id == session_id),
             )
-            return self._to_summary_response(session_row)
+            return self._to_summary_response(db, session_row)
 
     async def get_session_summary_by_thread(self, thread_id: str) -> SessionSummaryResponse:
         with session_scope() as db:
             session_row = self._require_session(
                 db,
                 select(SessionModel)
-                .options(selectinload(SessionModel.agents))
+                .options(
+                    selectinload(SessionModel.agents),
+                    selectinload(SessionModel.policies),
+                    selectinload(SessionModel.operations),
+                )
                 .where(SessionModel.discord_thread_id == thread_id),
             )
-            return self._to_summary_response(session_row)
+            return self._to_summary_response(db, session_row)
 
     async def close_session(self, thread_id: str, closed_by: str) -> SessionSummaryResponse:
         with session_scope() as db:
@@ -415,6 +531,7 @@ class SessionService:
                 .where(SessionModel.discord_thread_id == thread_id),
             )
             session_row.status = "closed"
+            session_row.desired_status = "closed"
             session_row.closed_at = utcnow()
 
             for agent in session_row.agents:
@@ -436,7 +553,7 @@ class SessionService:
                 actor=closed_by,
                 content="Session closed from Discord.",
             )
-            summary = self._to_summary_response(session_row)
+            summary = self._to_summary_response(db, session_row)
 
         self.drift_monitor.clear_session(summary.id)
         await self.thread_manager.post_message(thread_id, "Session closed. New jobs will be rejected.")
@@ -559,6 +676,8 @@ class SessionService:
             )
             if session_row.status == "closed":
                 raise ValueError("This session is already closed.")
+            if session_row.desired_status == "paused" or session_row.status == "paused":
+                raise ValueError("This session is paused. Resume it before sending new work.")
 
             routing = self._resolve_agent(
                 db,
@@ -634,16 +753,17 @@ class SessionService:
             agent = self._require_agent(db, session_id=session_id, agent_name=agent_name)
             agent.worker_id = worker_id
             agent.pid_hint = pid_hint
-            agent.status = "idle"
+            agent.status = "paused" if session_row.desired_status == "paused" else "idle"
             agent.last_heartbeat_at = utcnow()
             agent.last_error = None
-            session_row.status = "launching"
+            session_row.execution_state = "online"
+            session_row.status = "paused" if session_row.desired_status == "paused" else "launching"
             thread_id = session_row.discord_thread_id
 
             if all(member.worker_id for member in session_row.agents):
-                session_row.status = "ready"
+                session_row.status = "paused" if session_row.desired_status == "paused" else "ready"
                 if previous_status != "ready":
-                    should_send_ready = session_row.send_ready_message
+                    should_send_ready = session_row.send_ready_message and session_row.desired_status != "paused"
                     ready_message = self._format_ready_message(session_row.agents)
 
             self.transcript_service.add_entry(
@@ -676,7 +796,7 @@ class SessionService:
         with session_scope() as db:
             agent = self._require_agent(db, session_id=session_id, agent_name=agent_name)
             agent.worker_id = worker_id
-            agent.status = status
+            agent.status = "paused" if agent.desired_status == "paused" and status != "busy" else status
             agent.pid_hint = pid_hint
             agent.last_heartbeat_at = utcnow()
         self.drift_monitor.record_heartbeat(
@@ -702,6 +822,11 @@ class SessionService:
                 .where(SessionModel.id == session_id),
             )
             if session_row.status == "closed":
+                return None
+            if session_row.desired_status == "paused" or session_row.status in {"paused", "awaiting_launcher", "waking_execution_plane"}:
+                agent = self._require_agent(db, session_id=session_id, agent_name=agent_name)
+                if session_row.desired_status == "paused":
+                    agent.status = "paused"
                 return None
 
             agent = self._require_agent(db, session_id=session_id, agent_name=agent_name)
@@ -799,7 +924,7 @@ class SessionService:
             job.result_text = visible_output
             job.completed_at = utcnow()
 
-            agent.status = "idle"
+            agent.status = "paused" if session_row.desired_status == "paused" else "idle"
             agent.pid_hint = pid_hint
             agent.last_heartbeat_at = utcnow()
             agent.last_error = None
@@ -868,7 +993,7 @@ class SessionService:
             job.error_text = sanitized
             job.completed_at = utcnow()
 
-            agent.status = "idle"
+            agent.status = "paused" if session_row.desired_status == "paused" else "idle"
             agent.pid_hint = pid_hint
             agent.last_heartbeat_at = utcnow()
             agent.last_error = sanitized
@@ -1083,7 +1208,7 @@ class SessionService:
             agents=[self._to_agent_response(agent) for agent in session_row.agents],
         )
 
-    def _to_summary_response(self, session_row: SessionModel) -> SessionSummaryResponse:
+    def _to_summary_response(self, db: Session, session_row: SessionModel) -> SessionSummaryResponse:
         return SessionSummaryResponse(
             id=session_row.id,
             project_name=session_row.project_name,
@@ -1093,11 +1218,88 @@ class SessionService:
             parent_channel_id=session_row.parent_channel_id,
             workdir=session_row.workdir,
             status=session_row.status,
+            desired_status=session_row.desired_status,
+            power_state=session_row.power_state,
+            execution_state=session_row.execution_state,
+            pause_reason=session_row.pause_reason,
+            last_recovery_at=session_row.last_recovery_at,
+            last_recovery_reason=session_row.last_recovery_reason,
             created_by=session_row.created_by,
             launcher_id=session_row.launcher_id,
             created_at=session_row.created_at,
             closed_at=session_row.closed_at,
+            power_target=self._load_power_target_summary(db, session_row),
+            execution_target=self._load_execution_target_summary(db, session_row),
+            policy=self._load_policy_summary(db, session_row),
+            active_operation=self._load_active_operation(db, session_row),
             agents=[self._to_agent_response(agent) for agent in session_row.agents],
+        )
+
+    def _load_power_target_summary(self, db: Session, session_row: SessionModel) -> PowerTargetSummary | None:
+        if not session_row.power_target_name:
+            return None
+        row = db.scalar(
+            select(PowerTargetModel).where(PowerTargetModel.name == session_row.power_target_name),
+        )
+        if row is None:
+            return None
+        return PowerTargetSummary(
+            name=row.name,
+            provider=row.provider,
+            state=session_row.power_state,
+        )
+
+    def _load_execution_target_summary(
+        self,
+        db: Session,
+        session_row: SessionModel,
+    ) -> ExecutionTargetSummary | None:
+        if not session_row.execution_target_name:
+            return None
+        row = db.scalar(
+            select(ExecutionTargetModel).where(ExecutionTargetModel.name == session_row.execution_target_name),
+        )
+        if row is None:
+            return None
+        metadata = {}
+        if row.metadata_json:
+            metadata = json.loads(row.metadata_json)
+        return ExecutionTargetSummary(
+            name=row.name,
+            provider=row.provider,
+            platform=row.platform,
+            state=session_row.execution_state,
+            launcher_id=session_row.launcher_id,
+            auto_start_expected=bool(metadata.get("auto_start_expected", True)),
+        )
+
+    def _load_policy_summary(self, db: Session, session_row: SessionModel) -> SessionPolicyResponse | None:
+        if self.policy_service is None or session_row.preset is None:
+            return None
+        manifest = self.registry.get_project(session_row.preset)
+        return self.policy_service.get_policy_response(
+            db,
+            session_id=session_row.id,
+            manifest=manifest,
+        )
+
+    @staticmethod
+    def _load_active_operation(db: Session, session_row: SessionModel) -> SessionOperationResponse | None:
+        operation = db.scalar(
+            select(SessionOperationModel)
+            .where(SessionOperationModel.session_id == session_row.id)
+            .where(SessionOperationModel.status.in_(["pending", "running"]))
+            .order_by(SessionOperationModel.created_at.desc()),
+        )
+        if operation is None:
+            return None
+        return SessionOperationResponse(
+            id=operation.id,
+            operation_type=operation.operation_type,
+            status=operation.status,
+            requested_by=operation.requested_by,
+            created_at=operation.created_at,
+            completed_at=operation.completed_at,
         )
 
     def _to_project_find_response(self, row: ProjectFindModel) -> ProjectFindSummaryResponse:
@@ -1160,6 +1362,8 @@ class SessionService:
             role=agent.role,
             is_default=agent.is_default,
             status=agent.status,
+            desired_status=agent.desired_status,
+            paused_reason=agent.paused_reason,
             last_heartbeat_at=agent.last_heartbeat_at,
             worker_id=agent.worker_id,
             pid_hint=agent.pid_hint,
@@ -1181,19 +1385,18 @@ class SessionService:
                     .where(SessionModel.closed_at.is_(None)),
                 ),
             )
-
-        agents_in_drift = 0
-        sessions_with_drift = 0
-        for session_row in sessions:
-            session_has_drift = False
-            for agent in session_row.agents:
-                if self._evaluate_agent_drift(agent).drift_state != "drift":
-                    continue
-                agents_in_drift += 1
-                session_has_drift = True
-            if session_has_drift:
-                sessions_with_drift += 1
-        return agents_in_drift, sessions_with_drift
+            agents_in_drift = 0
+            sessions_with_drift = 0
+            for session_row in sessions:
+                session_has_drift = False
+                for agent in session_row.agents:
+                    if self._evaluate_agent_drift(agent).drift_state != "drift":
+                        continue
+                    agents_in_drift += 1
+                    session_has_drift = True
+                if session_has_drift:
+                    sessions_with_drift += 1
+            return agents_in_drift, sessions_with_drift
 
     def _evaluate_agent_drift(self, agent: AgentModel) -> DriftEvaluation:
         return self.drift_monitor.evaluate_agent(

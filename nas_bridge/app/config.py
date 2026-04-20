@@ -32,6 +32,10 @@ class Settings(BaseSettings):
         default=90,
         alias="BRIDGE_WORKER_STALE_AFTER_SECONDS",
     )
+    recovery_loop_interval_seconds: float = Field(
+        default=5.0,
+        alias="BRIDGE_RECOVERY_LOOP_INTERVAL_SECONDS",
+    )
 
     model_config = SettingsConfigDict(
         env_file=".env",
