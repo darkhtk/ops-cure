@@ -74,6 +74,12 @@ class ParsedCliOutput:
 
 
 @dataclass(slots=True)
+class BridgeCompletionPayload:
+    control_text: str
+    thread_text: str
+
+
+@dataclass(slots=True)
 class TaskCard:
     task_id: str
     title: str
@@ -301,7 +307,7 @@ class SessionWorkspace:
         user_text: str,
         raw_output: str,
         preserve_handoffs: bool = True,
-    ) -> str:
+    ) -> BridgeCompletionPayload:
         self.ensure_structure()
         parsed = self._parse_cli_output(raw_output)
         stamp = timestamp_slug()
@@ -435,13 +441,19 @@ class SessionWorkspace:
         )
         updated_files.append(self.status_file)
 
-        return self._compose_bridge_output(
-            agent_name=agent_name,
-            task_id=current_task_id,
-            report_text=report_text,
-            question_blocks=parsed.question_blocks,
-            handoffs=handoffs if preserve_handoffs else [],
-            updated_files=updated_files,
+        return BridgeCompletionPayload(
+            control_text=self._compose_control_output(
+                parsed=parsed,
+                preserve_handoffs=preserve_handoffs,
+            ),
+            thread_text=self._compose_thread_output(
+                agent_name=agent_name,
+                task_id=current_task_id,
+                report_text=report_text,
+                question_blocks=parsed.question_blocks,
+                handoffs=handoffs if preserve_handoffs else [],
+                updated_files=updated_files,
+            ),
         )
 
     def record_cli_failure(
@@ -603,7 +615,17 @@ class SessionWorkspace:
             fallback_summary=fallback,
         )
 
-    def _compose_bridge_output(
+    def _compose_control_output(
+        self,
+        *,
+        parsed: ParsedCliOutput,
+        preserve_handoffs: bool,
+    ) -> str:
+        if preserve_handoffs:
+            return parsed.raw_output
+        return HANDOFF_BLOCK_RE.sub("", parsed.raw_output).strip()
+
+    def _compose_thread_output(
         self,
         *,
         agent_name: str,

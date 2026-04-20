@@ -164,3 +164,34 @@ def test_launcher_reconciles_managed_workers_when_bridge_reassigns_worker(tmp_pa
 
     assert managed_process.terminated is True
     assert ("session-2", "planner") not in daemon._managed_workers
+
+
+def test_launcher_reconciles_managed_workers_when_bridge_forgets_session(tmp_path, monkeypatch):
+    monkeypatch.setenv("BRIDGE_TOKEN", "test-token")
+    projects_dir = tmp_path / "projects"
+    project_file = _write_sample_project(projects_dir)
+
+    from pc_launcher.bridge_client import BridgeClientError
+    from pc_launcher.launcher import LauncherDaemon, ManagedWorker
+
+    daemon = LauncherDaemon(projects_dir=projects_dir, launcher_id="homedev")
+    managed_process = DummyProcess(pid=656)
+    managed = ManagedWorker(
+        process=managed_process,
+        session_id="session-3",
+        agent_name="planner",
+        worker_id="worker-1",
+        project_file=project_file,
+    )
+    daemon._managed_workers[("session-3", "planner")] = managed
+
+    def raise_missing(session_id: str):
+        del session_id
+        raise BridgeClientError("404: session missing")
+
+    monkeypatch.setattr(daemon._bridge_client, "get_session", raise_missing)
+
+    daemon._reconcile_managed_workers_with_bridge()
+
+    assert managed_process.terminated is True
+    assert ("session-3", "planner") not in daemon._managed_workers

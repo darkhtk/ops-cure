@@ -955,12 +955,15 @@ class SessionService:
         agent_name: str,
         worker_id: str,
         output_text: str,
+        thread_output_text: str | None = None,
         pid_hint: int | None,
     ) -> None:
         sanitized = sanitize_text(output_text)
+        sanitized_thread = sanitize_text(thread_output_text) if thread_output_text else ""
         thread_id = ""
         thread_message = ""
         visible_output = ""
+        display_output = ""
         quiet_discord = True
         with session_scope() as db:
             job = self._require_job(
@@ -984,9 +987,10 @@ class SessionService:
                 agents=session_row.agents,
                 source_agent=agent_name,
             )
+            display_output = sanitized_thread or visible_output
 
             job.status = "completed"
-            job.result_text = visible_output
+            job.result_text = display_output
             job.completed_at = utcnow()
 
             agent.status = "paused" if session_row.desired_status == "paused" else "idle"
@@ -1012,14 +1016,14 @@ class SessionService:
                 )
             thread_message = self._format_agent_thread_message(
                 agent_name=agent_name,
-                visible_output=visible_output,
+                visible_output=display_output,
                 handoffs=handoffs,
                 quiet_discord=quiet_discord,
             )
 
         if thread_message:
             sent_chunks = await self.thread_manager.post_message(thread_id, thread_message)
-            if visible_output:
+            if display_output:
                 self._record_outbound_thread_messages(
                     session_id=session_id,
                     agent_name=agent_name,

@@ -66,6 +66,7 @@ async def complete_job(job_id: str, payload: JobCompleteRequest, request: Reques
             agent_name=payload.agent_name,
             worker_id=payload.worker_id,
             output_text=payload.output_text,
+            thread_output_text=payload.thread_output_text,
             pid_hint=payload.pid_hint,
         )
     except PermissionError as exc:

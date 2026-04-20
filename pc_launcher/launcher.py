@@ -17,12 +17,12 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 try:
-    from .bridge_client import BridgeClient
+    from .bridge_client import BridgeClient, BridgeClientError
     from .config_loader import ProjectConfig, discover_projects
     from .project_finder import ProjectFinder
     from .verification_runner import CommandVerificationRunner
 except ImportError:  # pragma: no cover - script mode support
-    from bridge_client import BridgeClient
+    from bridge_client import BridgeClient, BridgeClientError
     from config_loader import ProjectConfig, discover_projects
     from project_finder import ProjectFinder
     from verification_runner import CommandVerificationRunner

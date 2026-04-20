@@ -157,18 +157,19 @@ class BridgeClient:
         agent_name: str,
         worker_id: str,
         output_text: str,
+        thread_output_text: str | None = None,
         pid_hint: int | None,
     ) -> dict[str, Any]:
-        return self._post(
-            f"/api/workers/jobs/{job_id}/complete",
-            {
-                "session_id": session_id,
-                "agent_name": agent_name,
-                "worker_id": worker_id,
-                "output_text": output_text,
-                "pid_hint": pid_hint,
-            },
-        )
+        payload = {
+            "session_id": session_id,
+            "agent_name": agent_name,
+            "worker_id": worker_id,
+            "output_text": output_text,
+            "pid_hint": pid_hint,
+        }
+        if thread_output_text is not None:
+            payload["thread_output_text"] = thread_output_text
+        return self._post(f"/api/workers/jobs/{job_id}/complete", payload)
 
     def fail_job(
         self,

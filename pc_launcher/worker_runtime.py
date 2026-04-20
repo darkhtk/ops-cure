@@ -12,12 +12,12 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 try:
-    from .artifact_workspace import SessionWorkspace
+    from .artifact_workspace import BridgeCompletionPayload, SessionWorkspace
     from .bridge_client import BridgeClient, BridgeClientError
     from .cli_adapters import AdapterContext, get_adapter
     from .config_loader import AgentConfig, ProjectConfig, find_agent, load_project
 except ImportError:  # pragma: no cover - script mode support
-    from artifact_workspace import SessionWorkspace
+    from artifact_workspace import BridgeCompletionPayload, SessionWorkspace
     from bridge_client import BridgeClient, BridgeClientError
     from cli_adapters import AdapterContext, get_adapter
     from config_loader import AgentConfig, ProjectConfig, find_agent, load_project
@@ -163,13 +163,14 @@ class WorkerRuntime:
                     pid_hint=self.pid_hint,
                 )
             else:
-                output_text = self._run_cli_for_job(job)
+                completion = self._run_cli_for_job(job)
                 self.bridge_client.complete_job(
                     job_id=job_id,
                     session_id=self.session_id,
                     agent_name=self.agent_name,
                     worker_id=self.worker_id,
-                    output_text=output_text,
+                    output_text=completion.control_text,
+                    thread_output_text=completion.thread_text,
                     pid_hint=self.pid_hint,
                 )
         except Exception as exc:  # noqa: BLE001
@@ -188,7 +189,7 @@ class WorkerRuntime:
         finally:
             self._set_status("idle")
 
-    def _run_cli_for_job(self, job: dict[str, object]) -> str:
+    def _run_cli_for_job(self, job: dict[str, object]) -> BridgeCompletionPayload:
         job_type = str(job.get("job_type") or "message")
         workspace = self._ensure_session_workspace(job)
         workspace.write_job_brief(

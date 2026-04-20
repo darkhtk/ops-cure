@@ -25,7 +25,7 @@ def test_record_cli_result_emits_async_bus_protocol(tmp_path):
         agent_names=["planner", "coder", "reviewer"],
     )
 
-    message = workspace.record_cli_result(
+    payload = workspace.record_cli_result(
         agent_name="planner",
         job_type="orchestration",
         user_text="T-001 analyze the current issue",
@@ -41,13 +41,14 @@ def test_record_cli_result_emits_async_bus_protocol(tmp_path):
         ),
     )
 
-    assert "OPS: type=handoff" in message
-    assert "task=T-002" in message
-    assert "from=planner" in message
-    assert "to=coder" in message
-    assert "read=CURRENT_STATE.md,TASKS/T-002.md" in message
-    assert "HUMAN: QA harness setup has been handed to coder." in message
-    assert "[[handoff" not in message
+    assert "[[handoff agent=\"coder\"]]" in payload.control_text
+    assert "OPS: type=handoff" in payload.thread_text
+    assert "task=T-002" in payload.thread_text
+    assert "from=planner" in payload.thread_text
+    assert "to=coder" in payload.thread_text
+    assert "read=CURRENT_STATE.md,TASKS/T-002.md" in payload.thread_text
+    assert "HUMAN: QA harness setup has been handed to coder." in payload.thread_text
+    assert "[[handoff" not in payload.thread_text
 
 
 def test_record_cli_failure_emits_async_bus_protocol(tmp_path):

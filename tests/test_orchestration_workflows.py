@@ -443,7 +443,8 @@ def test_bridge_preserves_async_event_protocol_without_agent_wrapper(app_env):
             session_id=summary.id,
             agent_name="coder",
             worker_id="worker-coder",
-            output_text=(
+            output_text="[[report]]coder가 T-002를 마무리했다.[[/report]]",
+            thread_output_text=(
                 "OPS: type=done | actor=coder | task=T-002 | state=idle | read=CURRENT_STATE.md,TASKS/T-002.md\n"
                 "HUMAN: coder가 T-002를 마무리했다.\n"
                 "DONE: task=T-002"
@@ -476,6 +477,93 @@ def test_start_defaults_to_sample_profile_when_omitted(app_env):
     )
 
     assert summary.preset == "sample"
+
+
+def test_bridge_queues_handoff_from_control_payload_while_posting_thread_payload(app_env):
+    summary = __import__("asyncio").run(_start_session(app_env))
+
+    __import__("asyncio").run(
+        app_env.session_service.register_worker(
+            session_id=summary.id,
+            agent_name="planner",
+            worker_id="worker-planner",
+            pid_hint=1001,
+        ),
+    )
+    __import__("asyncio").run(
+        app_env.session_service.register_worker(
+            session_id=summary.id,
+            agent_name="coder",
+            worker_id="worker-coder",
+            pid_hint=1002,
+        ),
+    )
+
+    from app.models import JobModel
+
+    with app_env.db.session_scope() as db:
+        job = JobModel(
+            session_id=summary.id,
+            agent_name="planner",
+            job_type="orchestration",
+            user_id="user-1",
+            input_text="T-001 analyze and hand off implementation",
+        )
+        db.add(job)
+        db.flush()
+        job_id = job.id
+
+    claimed = __import__("asyncio").run(
+        app_env.session_service.claim_next_job(
+            session_id=summary.id,
+            agent_name="planner",
+            worker_id="worker-planner",
+        ),
+    )
+    assert claimed is not None
+    assert claimed.id == job_id
+
+    raw_output = (
+        "[[report]]QA harness setup has been handed to coder.[[/report]]\n"
+        "[[handoff agent=\"coder\"]]\n"
+        "T-002\n"
+        "Target summary: Set up the playable QA harness.\n"
+        "Read CURRENT_STATE.md and TASK_BOARD.md first.\n"
+        "Files: tools/qa.py\n"
+        "Done condition: Harness runs locally.\n"
+        "[[/handoff]]"
+    )
+    thread_output = (
+        "OPS: type=handoff | task=T-002 | from=planner | to=coder | state=ready | "
+        "read=CURRENT_STATE.md,TASKS/T-002.md\n"
+        "HUMAN: QA harness setup has been handed to coder."
+    )
+
+    __import__("asyncio").run(
+        app_env.session_service.complete_job(
+            job_id=job_id,
+            session_id=summary.id,
+            agent_name="planner",
+            worker_id="worker-planner",
+            output_text=raw_output,
+            thread_output_text=thread_output,
+            pid_hint=1001,
+        ),
+    )
+
+    _, posted = app_env.thread_manager.messages[-1]
+    assert posted == thread_output
+
+    coder_job = __import__("asyncio").run(
+        app_env.session_service.claim_next_job(
+            session_id=summary.id,
+            agent_name="coder",
+            worker_id="worker-coder",
+        ),
+    )
+    assert coder_job is not None
+    assert coder_job.job_type == "handoff"
+    assert coder_job.input_text.startswith("T-002\n")
 
 
 def test_start_workflow_keeps_windows_paths_stable_for_nas_bridge(app_env):

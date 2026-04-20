@@ -286,6 +286,7 @@ class JobCompleteRequest(BaseModel):
     agent_name: str
     worker_id: str
     output_text: str
+    thread_output_text: str | None = None
     pid_hint: int | None = None
 
 
