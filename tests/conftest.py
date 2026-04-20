@@ -19,6 +19,7 @@ class FakeThreadManager:
         self.edited_messages: list[tuple[str, str]] = []
         self.archived_threads: list[tuple[str, str]] = []
         self.cleaned_threads: list[tuple[str, str]] = []
+        self.missing_threads: set[str] = set()
 
     async def create_session_thread(
         self,
@@ -54,6 +55,13 @@ class FakeThreadManager:
         self.cleaned_threads.append((thread_id, reason))
         self.archived_threads.append((thread_id, reason))
         return "archived"
+
+    async def probe_thread_state(self, thread_id: str) -> str:
+        if thread_id in self.missing_threads:
+            return "missing"
+        if thread_id in self.created_threads:
+            return "exists"
+        return "unknown"
 
 
 @pytest.fixture()

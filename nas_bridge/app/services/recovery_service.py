@@ -115,6 +115,16 @@ class RecoveryService:
 
             session_row.last_recovery_at = utcnow()
             session_row.last_recovery_reason = reason
+
+            thread_state = await self.thread_manager.probe_thread_state(session_row.discord_thread_id)
+            if thread_state == "missing":
+                self._close_missing_thread_session(
+                    db,
+                    session_row=session_row,
+                    reason=reason,
+                )
+                return
+
             manifest = self.registry.get_project(session_row.preset or "")
 
             power_target = self._load_power_target(db, session_row)
@@ -273,6 +283,57 @@ class RecoveryService:
             ),
         )
         return session_row.discord_thread_id, "Ops-Cure cleaned up a stalled startup session."
+
+    def _close_missing_thread_session(
+        self,
+        db,
+        *,
+        session_row: SessionModel,
+        reason: str,
+    ) -> None:
+        session_row.status = "closed"
+        session_row.desired_status = "closed"
+        session_row.execution_state = "thread_missing"
+        session_row.closed_at = utcnow()
+        session_row.pause_reason = "Discord thread was deleted; session closed automatically."
+        for agent in session_row.agents:
+            agent.worker_id = None
+            agent.pid_hint = None
+            agent.status = "offline"
+            agent.desired_status = "closed"
+            agent.paused_reason = "Discord thread deleted; session closed."
+        for job in db.scalars(
+            select(JobModel)
+            .where(JobModel.session_id == session_row.id)
+            .where(JobModel.status.in_(["pending", "in_progress"])),
+        ):
+            job.status = "cancelled"
+            job.completed_at = utcnow()
+            if not job.error_text:
+                job.error_text = "Cancelled because the Discord thread was deleted."
+        self.transcript_service.add_entry(
+            db,
+            session_id=session_row.id,
+            direction="system",
+            actor="bridge",
+            content=(
+                "Discord thread is missing. Ops-Cure automatically closed the session "
+                f"during {reason} recovery."
+            ),
+        )
+        for operation_type in ("start", "resume", "pause"):
+            self._fail_operations(
+                db,
+                session_id=session_row.id,
+                operation_type=operation_type,
+                result_json=json.dumps(
+                    {
+                        "reason": "discord_thread_missing",
+                        "recovery_reason": reason,
+                    },
+                    ensure_ascii=False,
+                ),
+            )
 
     @staticmethod
     def _load_power_target(db, session_row: SessionModel) -> PowerTarget | None:

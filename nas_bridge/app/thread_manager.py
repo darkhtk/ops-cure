@@ -145,6 +145,24 @@ class ThreadManager:
             LOGGER.warning("Thread archive fallback failed for %s: %s", thread_id, exc)
             return "failed"
 
+    async def probe_thread_state(self, thread_id: str) -> str:
+        if not self.discord_enabled:
+            return "exists"
+
+        assert self.discord_client is not None
+        thread = self.discord_client.get_channel(int(thread_id))
+        if thread is not None:
+            return "exists"
+
+        try:
+            await self.discord_client.fetch_channel(int(thread_id))
+        except discord.NotFound:
+            return "missing"
+        except (discord.Forbidden, discord.HTTPException) as exc:
+            LOGGER.warning("Unable to probe thread %s: %s", thread_id, exc)
+            return "unknown"
+        return "exists"
+
     async def _load_thread(self, thread_id: str):
         assert self.discord_client is not None
         thread = self.discord_client.get_channel(int(thread_id))

@@ -501,3 +501,22 @@ def test_cleanup_session_thread_closes_and_cleans_thread(app_env):
     assert app_env.thread_manager.cleaned_threads == [
         (summary.discord_thread_id, "Session cleanup requested"),
     ]
+
+
+def test_recovery_service_closes_session_when_thread_is_missing(app_env):
+    summary = __import__("asyncio").run(_start_session(app_env))
+
+    app_env.thread_manager.missing_threads.add(summary.discord_thread_id)
+
+    __import__("asyncio").run(
+        app_env.recovery_service.recover_session(
+            session_id=summary.id,
+            reason="missing-thread-test",
+        ),
+    )
+
+    refreshed = __import__("asyncio").run(app_env.session_service.get_session_summary(summary.id))
+    assert refreshed.status == "closed"
+    assert refreshed.desired_status == "closed"
+    assert refreshed.closed_at is not None
+    assert refreshed.execution_state == "thread_missing"
