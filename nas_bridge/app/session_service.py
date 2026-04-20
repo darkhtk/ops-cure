@@ -1380,6 +1380,11 @@ class SessionService:
             assert manifest is not None
             return manifest, selected_preset
 
+        if "sample" in available_presets:
+            manifest = self.registry.get_project("sample")
+            assert manifest is not None
+            return manifest, "sample"
+
         available = ", ".join(sorted(available_presets)) or "(none)"
         raise ValueError(
             f"Multiple profiles are registered. Please provide /project start profile:<name>. Available profiles: {available}",

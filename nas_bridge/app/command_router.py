@@ -30,7 +30,7 @@ def register_commands(
     @project_group.command(name="start", description="Start a new project session")
     @app_commands.describe(
         target="Project to open and work on",
-        profile="Optional execution profile from registered YAML",
+        profile="Optional execution profile from registered YAML; defaults to sample when omitted",
         session="Optional Discord thread title override",
     )
     async def project_start(

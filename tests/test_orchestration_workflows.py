@@ -37,6 +37,39 @@ def build_manifest(schemas, *, project_name: str = "UlalaCheese"):
     )
 
 
+def build_manifest_for_profile(schemas, *, profile_name: str, project_name: str | None = None):
+    target_name = project_name or profile_name
+    return schemas.ProjectManifest(
+        profile_name=profile_name,
+        default_target_name=target_name,
+        default_workdir=fr"C:\Users\darkh\Projects\{target_name}",
+        guild_id="guild-1",
+        parent_channel_id="parent-1",
+        allowed_user_ids=["user-1"],
+        agents=[
+            schemas.AgentManifest(
+                name="planner",
+                cli="claude",
+                role="planning",
+                prompt_file="prompts/planner.md",
+                default=False,
+            ),
+            schemas.AgentManifest(
+                name="coder",
+                cli="claude",
+                role="coding",
+                prompt_file="prompts/coder.md",
+                default=True,
+            ),
+        ],
+        finder=schemas.FinderManifest(
+            roots=[r"C:\Users\darkh\Projects"],
+            analyze_agent="planner",
+            prompt_file="prompts/finder.md",
+        ),
+    )
+
+
 async def _start_session(
     app_env,
     *,
@@ -366,3 +399,23 @@ def test_quiet_discord_policy_false_preserves_full_output(app_env):
     _, posted = app_env.thread_manager.messages[-1]
     assert "line 1" in posted
     assert "line 11" in posted
+
+
+def test_start_defaults_to_sample_profile_when_omitted(app_env):
+    sample_manifest = build_manifest_for_profile(app_env.schemas, profile_name="sample", project_name="SampleProject")
+    extra_manifest = build_manifest_for_profile(app_env.schemas, profile_name="other", project_name="OtherProject")
+    app_env.registry.register_projects("launcher-1", "host-1", [sample_manifest, extra_manifest])
+
+    summary = __import__("asyncio").run(
+        app_env.session_service.create_session_from_project(
+            project_name="GenWorld",
+            target_project_name="GenWorld",
+            preset=None,
+            user_id="user-1",
+            guild_id="guild-1",
+            parent_channel_id="parent-1",
+            workdir_override=r"C:\Users\darkh\Projects\GenWorld",
+        ),
+    )
+
+    assert summary.preset == "sample"
