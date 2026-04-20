@@ -7,8 +7,9 @@ from sqlalchemy import select
 
 def build_manifest(schemas, *, project_name: str = "UlalaCheese"):
     return schemas.ProjectManifest(
-        project_name=project_name,
-        workdir=r"C:\Users\darkh\Projects\UlalaCheese",
+        profile_name="UlalaCheese",
+        default_target_name=project_name,
+        default_workdir=r"C:\Users\darkh\Projects\UlalaCheese",
         guild_id="guild-1",
         parent_channel_id="parent-1",
         allowed_user_ids=["user-1"],
@@ -217,3 +218,7 @@ def test_start_prefers_requested_target_over_profile_default(app_env, monkeypatc
     assert summary.project_name == "GenWorld session"
     assert summary.target_project_name == "GenWorld"
     assert summary.workdir == r"C:\Users\darkh\Projects\GenWorld"
+    assert summary.power_target is not None
+    assert summary.execution_target is not None
+    assert summary.power_target.name == "UlalaCheese:default"
+    assert summary.execution_target.name == "UlalaCheese:default"

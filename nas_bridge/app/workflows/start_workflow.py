@@ -155,7 +155,7 @@ class StartWorkflow:
             return requested_target, workdir_override
 
         if self._matches_manifest_default_target(manifest, requested_target):
-            return manifest.project_name, manifest.workdir
+            return manifest.resolved_default_target_name, manifest.default_workdir
 
         if not manifest.finder.roots:
             raise ValueError(
@@ -181,11 +181,14 @@ class StartWorkflow:
             raise ValueError(
                 f"Ops-Cure could not safely resolve `{requested_target}` with profile `{selected_preset}`: {reason}"
             )
-        default_workdir = Path(manifest.workdir).resolve()
+        default_workdir = Path(manifest.default_workdir).resolve()
         selected_path = Path(resolved.selected_path).resolve()
-        if requested_target.casefold() != manifest.project_name.casefold() and selected_path == default_workdir:
+        if (
+            requested_target.casefold() != manifest.resolved_default_target_name.casefold()
+            and selected_path == default_workdir
+        ):
             raise ValueError(
-                f"Target `{requested_target}` resolved back to the profile default workdir `{manifest.workdir}`. "
+                f"Target `{requested_target}` resolved back to the profile default workdir `{manifest.default_workdir}`. "
                 "Refusing to start because the requested target and profile default still look mismatched."
             )
         return resolved.selected_name or requested_target, str(selected_path)
@@ -194,9 +197,10 @@ class StartWorkflow:
     def _matches_manifest_default_target(manifest: ProjectManifest, requested_target: str) -> bool:
         normalized = requested_target.casefold()
         return normalized in {
-            manifest.project_name.casefold(),
-            Path(manifest.workdir).name.casefold(),
-            str(Path(manifest.workdir).resolve()).casefold(),
+            manifest.resolved_default_target_name.casefold(),
+            Path(manifest.default_workdir).name.casefold(),
+            str(Path(manifest.default_workdir).resolve()).casefold(),
+            manifest.profile_name.casefold(),
         }
 
     def _ensure_session_capabilities(
@@ -215,8 +219,9 @@ class StartWorkflow:
             if session_row is None:
                 raise ValueError("Session not found while preparing start workflow.")
 
-            power_name = f"{manifest.project_name}:{manifest.power.target}"
-            execution_name = f"{manifest.project_name}:{manifest.execution.target}"
+            profile_key = session_row.preset or manifest.profile_name
+            power_name = f"{profile_key}:{manifest.power.target}"
+            execution_name = f"{profile_key}:{manifest.execution.target}"
             power_target = db.scalar(
                 select(PowerTargetModel).where(PowerTargetModel.name == power_name),
             )
@@ -268,7 +273,7 @@ class StartWorkflow:
                     requested_by=requested_by,
                     input_json=json.dumps(
                         {
-                            "profile": session_row.preset or manifest.project_name,
+                            "profile": session_row.preset or manifest.profile_name,
                             "session_title": session_row.project_name,
                             "target_project_name": session_row.target_project_name or session_row.project_name,
                             "workdir": session_row.workdir,

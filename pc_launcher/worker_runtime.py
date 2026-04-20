@@ -45,7 +45,7 @@ class WorkerRuntime:
         self.project_file = Path(project_file).resolve()
         self.project: ProjectConfig = load_project(self.project_file)
         if workdir_override:
-            self.project.workdir = str(Path(workdir_override).resolve())
+            self.project.default_workdir = str(Path(workdir_override).resolve())
         self.agent: AgentConfig = find_agent(self.project, agent_name)
         self.session_id = session_id
         self.agent_name = agent_name
@@ -63,8 +63,8 @@ class WorkerRuntime:
         self._status_lock = threading.Lock()
         self._stop_event = threading.Event()
         self._current_process: subprocess.Popen[str] | None = None
-        self._session_name = self.project.project_name
-        self._session_preset = self.project.project_name
+        self._session_name = self.project.resolved_default_target_name
+        self._session_preset = self.project.profile_name
         self._workspace: SessionWorkspace | None = None
 
     @property
@@ -209,7 +209,7 @@ class WorkerRuntime:
             preset=str(job["preset"]) if job.get("preset") is not None else None,
             session_status=str(job.get("session_status") or "unknown"),
             session_summary=str(job["session_summary"]) if job.get("session_summary") is not None else None,
-            project_workdir=str(self.project.workdir),
+            project_workdir=str(self.project.default_workdir),
             session_workspace=str(workspace.root),
             session_workspace_relative=workspace.relative_root.as_posix(),
             available_agents=list(job.get("available_agents") or []),
@@ -231,7 +231,7 @@ class WorkerRuntime:
         )
         process = subprocess.Popen(
             command,
-            cwd=self.project.workdir,
+            cwd=self.project.default_workdir,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -331,7 +331,7 @@ class WorkerRuntime:
             available_agents = [configured_agent.name for configured_agent in self.project.agents]
 
         self._workspace = SessionWorkspace.create(
-            project_workdir=self.project.workdir,
+            project_workdir=self.project.default_workdir,
             artifacts=self.project.artifacts,
             session_name=self._session_name,
             session_id=self.session_id,

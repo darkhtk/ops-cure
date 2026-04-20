@@ -1,6 +1,7 @@
-project_name: UlalaCheese
-# Active target project directory for this preset.
-workdir: C:\Users\darkh\Projects\UlalaCheese
+profile_name: UlalaCheese
+default_target_name: UlalaCheese
+# Default target project directory for this execution profile.
+default_workdir: C:\Users\darkh\Projects\UlalaCheese
 guild_id: "1494848853441253416"
 parent_channel_id: "1494851246480298125"
 allowed_user_ids:

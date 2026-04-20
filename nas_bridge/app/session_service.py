@@ -240,7 +240,7 @@ class SessionService:
         parent_channel_id: str,
         workdir_override: str | None = None,
     ) -> SessionSummaryResponse:
-        resolved_workdir = (workdir_override or manifest.workdir).strip()
+        resolved_workdir = (workdir_override or manifest.default_workdir).strip()
         if not resolved_workdir:
             raise ValueError("Resolved workdir cannot be empty.")
 

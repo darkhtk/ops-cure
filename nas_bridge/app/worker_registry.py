@@ -32,7 +32,7 @@ class WorkerRegistry:
         hostname: str,
         projects: list[ProjectManifest],
     ) -> None:
-        manifest_map = {project.project_name: project for project in projects}
+        manifest_map = {project.profile_name: project for project in projects}
         self._launchers[launcher_id] = LauncherRecord(
             launcher_id=launcher_id,
             hostname=hostname,

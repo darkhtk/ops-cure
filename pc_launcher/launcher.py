@@ -64,7 +64,7 @@ class LauncherDaemon:
 
     def _refresh_projects(self) -> None:
         self._project_index = {
-            config.project_name: (project_file, config)
+            config.profile_name: (project_file, config)
             for project_file, config in discover_projects(self.projects_dir)
         }
         if not self._project_index:

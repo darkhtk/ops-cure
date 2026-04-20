@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pathlib import Path
+
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class AgentManifest(BaseModel):
@@ -73,8 +75,14 @@ class ProjectPolicy(BaseModel):
 
 
 class ProjectManifest(BaseModel):
-    project_name: str
-    workdir: str
+    model_config = ConfigDict(populate_by_name=True)
+
+    profile_name: str = Field(validation_alias=AliasChoices("profile_name", "project_name"))
+    default_target_name: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("default_target_name"),
+    )
+    default_workdir: str = Field(validation_alias=AliasChoices("default_workdir", "workdir"))
     guild_id: str
     parent_channel_id: str
     allowed_user_ids: list[str]
@@ -92,6 +100,18 @@ class ProjectManifest(BaseModel):
         if len(self.agents) > 1 and len(defaults) > 1:
             raise ValueError("Only one agent can be marked as default.")
         return self
+
+    @property
+    def project_name(self) -> str:
+        return self.profile_name
+
+    @property
+    def workdir(self) -> str:
+        return self.default_workdir
+
+    @property
+    def resolved_default_target_name(self) -> str:
+        return (self.default_target_name or Path(self.default_workdir).name or self.profile_name).strip()
 
 
 class CatalogRegistrationRequest(BaseModel):

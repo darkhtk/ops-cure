@@ -274,10 +274,10 @@ class ProjectFinder:
     def _run_agent_analysis(self, *, query_text: str, candidates: list[CandidateSummary]) -> dict[str, object]:
         command = self.adapter.build_command()
         env = self._build_subprocess_env()
-        cwd = Path(self.finder.roots[0]).resolve() if self.finder.roots else Path(self.project.workdir).resolve()
+        cwd = Path(self.finder.roots[0]).resolve() if self.finder.roots else Path(self.project.default_workdir).resolve()
         payload = {
             "query": query_text,
-            "preset": self.project.project_name,
+            "preset": self.project.profile_name,
             "allowed_roots": self.finder.roots,
             "candidates": [candidate.to_agent_payload() for candidate in candidates],
         }

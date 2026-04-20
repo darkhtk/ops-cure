@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Iterable
 
 import yaml
-from pydantic import BaseModel, Field, model_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 
 
 class DiscordProjectConfig(BaseModel):
@@ -63,8 +63,14 @@ class FinderConfig(BaseModel):
 
 
 class ProjectConfig(BaseModel):
-    project_name: str
-    workdir: str
+    model_config = ConfigDict(populate_by_name=True)
+
+    profile_name: str = Field(validation_alias=AliasChoices("profile_name", "project_name"))
+    default_target_name: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("default_target_name"),
+    )
+    default_workdir: str = Field(validation_alias=AliasChoices("default_workdir", "workdir"))
     guild_id: str
     parent_channel_id: str
     allowed_user_ids: list[str]
@@ -82,6 +88,18 @@ class ProjectConfig(BaseModel):
             raise ValueError("Only one agent can be marked as default.")
         return self
 
+    @property
+    def project_name(self) -> str:
+        return self.profile_name
+
+    @property
+    def workdir(self) -> str:
+        return self.default_workdir
+
+    @property
+    def resolved_default_target_name(self) -> str:
+        return (self.default_target_name or Path(self.default_workdir).name or self.profile_name).strip()
+
     def prompt_path_for(self, agent: AgentConfig, project_file: Path) -> Path:
         return (project_file.parent / agent.prompt_file).resolve()
 
@@ -90,8 +108,11 @@ class ProjectConfig(BaseModel):
 
     def to_bridge_manifest(self) -> dict[str, object]:
         return {
-            "project_name": self.project_name,
-            "workdir": self.workdir,
+            "profile_name": self.profile_name,
+            "default_target_name": self.resolved_default_target_name,
+            "default_workdir": self.default_workdir,
+            "project_name": self.profile_name,
+            "workdir": self.default_workdir,
             "guild_id": self.guild_id,
             "parent_channel_id": self.parent_channel_id,
             "allowed_user_ids": self.allowed_user_ids,
@@ -124,4 +145,4 @@ def find_agent(config: ProjectConfig, agent_name: str) -> AgentConfig:
     for agent in config.agents:
         if agent.name == agent_name:
             return agent
-    raise ValueError(f"Agent '{agent_name}' is not configured for project '{config.project_name}'.")
+    raise ValueError(f"Agent '{agent_name}' is not configured for profile '{config.profile_name}'.")
