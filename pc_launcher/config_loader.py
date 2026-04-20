@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ntpath
 from pathlib import Path
 from typing import Iterable
 
@@ -119,7 +120,9 @@ class ProjectConfig(BaseModel):
 
     @property
     def resolved_default_target_name(self) -> str:
-        return (self.default_target_name or Path(self.workdir).name or self.project_name).strip()
+        normalized = self.workdir.strip().rstrip("\\/")
+        derived = ntpath.basename(normalized) or Path(normalized).name
+        return (self.default_target_name or derived or self.project_name).strip()
 
     def prompt_path_for(self, agent: AgentConfig, project_file: Path) -> Path:
         return (project_file.parent / agent.prompt_file).resolve()

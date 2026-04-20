@@ -419,3 +419,12 @@ def test_start_defaults_to_sample_profile_when_omitted(app_env):
     )
 
     assert summary.preset == "sample"
+
+
+def test_start_workflow_keeps_windows_paths_stable_for_nas_bridge(app_env):
+    manifest = build_manifest_for_profile(app_env.schemas, profile_name="sample", project_name="SampleProject")
+    workflow = app_env.session_service.start_workflow
+
+    assert workflow._canonical_workdir_value(r"C:\Users\darkh\Projects\GenWorld") == r"C:\Users\darkh\Projects\GenWorld"
+    assert workflow._normalize_path_for_comparison(r"C:\Users\darkh\Projects\GenWorld") == r"c:\users\darkh\projects\genworld"
+    assert workflow._matches_manifest_default_target(manifest, "SampleProject")

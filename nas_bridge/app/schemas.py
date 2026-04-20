@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
+import ntpath
 from pathlib import Path
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -132,7 +133,9 @@ class ProjectManifest(BaseModel):
 
     @property
     def resolved_default_target_name(self) -> str:
-        return (self.default_target_name or Path(self.workdir).name or self.project_name).strip()
+        normalized = self.workdir.strip().rstrip("\\/")
+        derived = ntpath.basename(normalized) or Path(normalized).name
+        return (self.default_target_name or derived or self.project_name).strip()
 
 
 class CatalogRegistrationRequest(BaseModel):

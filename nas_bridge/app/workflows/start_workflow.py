@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import ntpath
 from pathlib import Path
 
 from sqlalchemy import select
@@ -181,8 +182,8 @@ class StartWorkflow:
             raise ValueError(
                 f"Ops-Cure could not safely resolve `{requested_target}` with profile `{selected_preset}`: {reason}"
             )
-        default_workdir = Path(manifest.default_workdir).resolve()
-        selected_path = Path(resolved.selected_path).resolve()
+        default_workdir = self._normalize_path_for_comparison(manifest.default_workdir)
+        selected_path = self._normalize_path_for_comparison(resolved.selected_path)
         if (
             requested_target.casefold() != manifest.resolved_default_target_name.casefold()
             and selected_path == default_workdir
@@ -191,17 +192,44 @@ class StartWorkflow:
                 f"Target `{requested_target}` resolved back to the profile default workdir `{manifest.default_workdir}`. "
                 "Refusing to start because the requested target and profile default still look mismatched."
             )
-        return resolved.selected_name or requested_target, str(selected_path)
+        return resolved.selected_name or requested_target, self._canonical_workdir_value(resolved.selected_path)
 
-    @staticmethod
-    def _matches_manifest_default_target(manifest: ProjectManifest, requested_target: str) -> bool:
+    @classmethod
+    def _matches_manifest_default_target(cls, manifest: ProjectManifest, requested_target: str) -> bool:
         normalized = requested_target.casefold()
         return normalized in {
             manifest.resolved_default_target_name.casefold(),
-            Path(manifest.default_workdir).name.casefold(),
-            str(Path(manifest.default_workdir).resolve()).casefold(),
+            cls._basename_from_any_path(manifest.default_workdir).casefold(),
+            cls._normalize_path_for_comparison(manifest.default_workdir).casefold(),
             manifest.profile_name.casefold(),
         }
+
+    @staticmethod
+    def _looks_like_windows_path(raw_path: str) -> bool:
+        value = raw_path.strip()
+        drive, _ = ntpath.splitdrive(value)
+        return bool(drive) or value.startswith("\\\\")
+
+    @classmethod
+    def _normalize_path_for_comparison(cls, raw_path: str) -> str:
+        value = raw_path.strip()
+        if cls._looks_like_windows_path(value):
+            return ntpath.normcase(ntpath.normpath(value))
+        return str(Path(value).resolve())
+
+    @classmethod
+    def _canonical_workdir_value(cls, raw_path: str) -> str:
+        value = raw_path.strip()
+        if cls._looks_like_windows_path(value):
+            return ntpath.normpath(value)
+        return str(Path(value).resolve())
+
+    @staticmethod
+    def _basename_from_any_path(raw_path: str) -> str:
+        value = raw_path.strip().rstrip("\\/")
+        if not value:
+            return ""
+        return ntpath.basename(value) or Path(value).name
 
     def _ensure_session_capabilities(
         self,
