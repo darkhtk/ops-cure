@@ -8,8 +8,10 @@ from pathlib import Path
 
 try:
     from .config_loader import ProjectConfig
+    from .process_io import build_utf8_subprocess_env, decode_text_output, text_subprocess_kwargs, wrap_powershell_utf8
 except ImportError:  # pragma: no cover - script mode support
     from config_loader import ProjectConfig
+    from process_io import build_utf8_subprocess_env, decode_text_output, text_subprocess_kwargs, wrap_powershell_utf8
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".webp"}
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".webm", ".gif"}
@@ -37,9 +39,8 @@ class CommandVerificationRunner:
 
         command = [str(part) for part in run_payload["command"]]
         timeout_seconds = int(run_payload["timeout_seconds"])
-        env = os.environ.copy()
-        env.update(
-            {
+        env = build_utf8_subprocess_env(
+            extra={
                 "OPS_CURE_VERIFY_DIR": str(artifact_dir),
                 "OPS_CURE_VERIFY_RUN_ID": str(run_payload["id"]),
                 "OPS_CURE_VERIFY_SESSION_ID": str(run_payload["session_id"]),
@@ -50,22 +51,26 @@ class CommandVerificationRunner:
 
         stdout_path = artifact_dir / "stdout.log"
         stderr_path = artifact_dir / "stderr.log"
+        stdout_bin_path = artifact_dir / "stdout.bin"
+        stderr_bin_path = artifact_dir / "stderr.bin"
         result_path = artifact_dir / "result.json"
 
         try:
             completed = subprocess.run(
                 command,
                 cwd=workdir,
-                text=True,
                 capture_output=True,
                 timeout=timeout_seconds,
                 env=env,
+                **text_subprocess_kwargs(),
             )
         except subprocess.TimeoutExpired as exc:
-            stdout_text = exc.stdout or ""
-            stderr_text = exc.stderr or ""
+            stdout_text = decode_text_output(exc.stdout)
+            stderr_text = decode_text_output(exc.stderr)
             stdout_path.write_text(stdout_text, encoding="utf-8")
             stderr_path.write_text(stderr_text, encoding="utf-8")
+            stdout_bin_path.write_bytes((stdout_text or "").encode("utf-8", errors="replace"))
+            stderr_bin_path.write_bytes((stderr_text or "").encode("utf-8", errors="replace"))
             if project.verification.capture.screenshots:
                 self._capture_desktop_screenshot(artifact_dir)
             summary = (
@@ -91,8 +96,12 @@ class CommandVerificationRunner:
                 artifacts=artifacts,
             )
 
-        stdout_path.write_text(completed.stdout or "", encoding="utf-8")
-        stderr_path.write_text(completed.stderr or "", encoding="utf-8")
+        stdout_text = decode_text_output(completed.stdout)
+        stderr_text = decode_text_output(completed.stderr)
+        stdout_path.write_text(stdout_text, encoding="utf-8")
+        stderr_path.write_text(stderr_text, encoding="utf-8")
+        stdout_bin_path.write_bytes(stdout_text.encode("utf-8", errors="replace"))
+        stderr_bin_path.write_bytes(stderr_text.encode("utf-8", errors="replace"))
         if project.verification.capture.screenshots:
             self._capture_desktop_screenshot(artifact_dir)
 
@@ -192,11 +201,11 @@ class CommandVerificationRunner:
         )
         try:
             subprocess.run(
-                ["powershell", "-NoProfile", "-Command", powershell],
+                ["powershell", "-NoProfile", "-Command", wrap_powershell_utf8(powershell)],
                 capture_output=True,
-                text=True,
                 timeout=30,
                 check=False,
+                **text_subprocess_kwargs(),
             )
         except Exception:
             return

@@ -16,11 +16,13 @@ try:
     from .bridge_client import BridgeClient, BridgeClientError
     from .cli_adapters import AdapterContext, get_adapter
     from .config_loader import AgentConfig, ProjectConfig, find_agent, load_project
+    from .process_io import build_utf8_subprocess_env, text_subprocess_kwargs
 except ImportError:  # pragma: no cover - script mode support
     from artifact_workspace import BridgeCompletionPayload, SessionWorkspace
     from bridge_client import BridgeClient, BridgeClientError
     from cli_adapters import AdapterContext, get_adapter
     from config_loader import AgentConfig, ProjectConfig, find_agent, load_project
+    from process_io import build_utf8_subprocess_env, text_subprocess_kwargs
 
 LOGGER = logging.getLogger(__name__)
 HANDOFF_TIMEOUT_CAP_SECONDS = 900
@@ -238,10 +240,8 @@ class WorkerRuntime:
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
             env=env,
+            **text_subprocess_kwargs(),
         )
         self._current_process = process
         try:
@@ -365,14 +365,8 @@ class WorkerRuntime:
 
     @staticmethod
     def _build_subprocess_env() -> dict[str, str]:
-        env = os.environ.copy()
         # Force UTF-8 so non-ASCII prompts and reports survive Windows subprocess hops.
-        env["PYTHONIOENCODING"] = "utf-8"
-        env["PYTHONUTF8"] = "1"
-        env["LANG"] = env.get("LANG") or "C.UTF-8"
-        env["LC_ALL"] = env.get("LC_ALL") or "C.UTF-8"
-        env["NO_COLOR"] = "1"
-        return env
+        return build_utf8_subprocess_env()
 
     def _build_artifact_snapshot(self) -> dict[str, object] | None:
         if self._workspace is None:

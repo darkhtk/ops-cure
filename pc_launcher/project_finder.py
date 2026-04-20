@@ -13,9 +13,11 @@ from typing import Any
 try:
     from .cli_adapters import get_adapter
     from .config_loader import AgentConfig, ProjectConfig, find_agent
+    from .process_io import build_utf8_subprocess_env, text_subprocess_kwargs
 except ImportError:  # pragma: no cover - script mode support
     from cli_adapters import get_adapter
     from config_loader import AgentConfig, ProjectConfig, find_agent
+    from process_io import build_utf8_subprocess_env, text_subprocess_kwargs
 
 LOGGER = logging.getLogger(__name__)
 DEFAULT_FINDER_PROMPT = """You are helping resume a local software project from Discord.
@@ -277,10 +279,8 @@ class ProjectFinder:
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
             env=env,
+            **text_subprocess_kwargs(),
         )
         try:
             stdout, stderr = process.communicate(
@@ -437,10 +437,4 @@ class ProjectFinder:
 
     @staticmethod
     def _build_subprocess_env() -> dict[str, str]:
-        env = os.environ.copy()
-        env["PYTHONIOENCODING"] = "utf-8"
-        env["PYTHONUTF8"] = "1"
-        env["LANG"] = env.get("LANG") or "C.UTF-8"
-        env["LC_ALL"] = env.get("LC_ALL") or "C.UTF-8"
-        env["NO_COLOR"] = "1"
-        return env
+        return build_utf8_subprocess_env()

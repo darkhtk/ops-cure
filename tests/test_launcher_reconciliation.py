@@ -1,8 +1,15 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import yaml
+
+
+OPS_CURE_ROOT = Path(r"C:\Users\darkh\Projects\ops-cure")
+
+if str(OPS_CURE_ROOT) not in sys.path:
+    sys.path.insert(0, str(OPS_CURE_ROOT))
 
 
 def _write_sample_project(projects_dir: Path) -> Path:

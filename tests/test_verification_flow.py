@@ -200,3 +200,83 @@ def test_command_verification_runner_collects_artifacts(tmp_path):
     labels = {artifact["label"] for artifact in result.artifacts}
     assert "proof.txt" in labels
     assert "result.json" in labels
+
+
+def test_command_verification_runner_preserves_korean_stdout_and_stderr(tmp_path):
+    repo_root = Path(r"C:\Users\darkh\Projects\ops-cure")
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
+
+    from pc_launcher.config_loader import (
+        AgentConfig,
+        ArtifactConfig,
+        BridgeProjectConfig,
+        DiscordProjectConfig,
+        ProjectConfig,
+        StartupConfig,
+        VerificationCaptureConfig,
+        VerificationConfig,
+        VerificationReviewConfig,
+    )
+    from pc_launcher.verification_runner import CommandVerificationRunner
+
+    workdir = tmp_path / "project"
+    workdir.mkdir()
+    config = ProjectConfig(
+        profile_name="RunnerProfile",
+        default_target_name="RunnerTarget",
+        default_workdir=str(workdir),
+        guild_id="guild-1",
+        parent_channel_id="parent-1",
+        allowed_user_ids=["user-1"],
+        bridge=BridgeProjectConfig(base_url="http://bridge", auth_token_env="BRIDGE_TOKEN"),
+        agents=[
+            AgentConfig(
+                name="planner",
+                cli="claude",
+                role="planning",
+                prompt_file="prompts/planner.md",
+                default=True,
+            ),
+        ],
+        discord=DiscordProjectConfig(),
+        startup=StartupConfig(),
+        artifacts=ArtifactConfig(),
+        verification=VerificationConfig(
+            enabled=True,
+            provider="command",
+            artifact_dir="_verification",
+            run_timeout_seconds=120,
+            commands={},
+            capture=VerificationCaptureConfig(screenshots=False, video=False),
+            review=VerificationReviewConfig(require_operator_approval=False),
+        ),
+    )
+    runner = CommandVerificationRunner()
+    artifact_dir = tmp_path / "artifacts"
+    run_payload = {
+        "id": "verify-kr",
+        "session_id": "session-1",
+        "mode": "smoke",
+        "workdir": str(workdir),
+        "artifact_dir": str(artifact_dir),
+        "timeout_seconds": 120,
+        "command": [
+            sys.executable,
+            "-c",
+            (
+                "import sys; "
+                "print('한글 출력 확인'); "
+                "sys.stderr.write('한글 경고\\n')"
+            ),
+        ],
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    result = runner.run(run_payload=run_payload, project=config)
+
+    assert result.status == "completed"
+    assert "한글 출력 확인" in (artifact_dir / "stdout.log").read_text(encoding="utf-8")
+    assert "한글 경고" in (artifact_dir / "stderr.log").read_text(encoding="utf-8")
+    assert "한글 출력 확인".encode("utf-8") in (artifact_dir / "stdout.bin").read_bytes()
+    assert "한글 경고".encode("utf-8") in (artifact_dir / "stderr.bin").read_bytes()

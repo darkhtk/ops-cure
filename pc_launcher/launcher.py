@@ -20,11 +20,13 @@ try:
     from .bridge_client import BridgeClient, BridgeClientError
     from .config_loader import ProjectConfig, discover_projects
     from .project_finder import ProjectFinder
+    from .process_io import text_subprocess_kwargs, wrap_powershell_utf8
     from .verification_runner import CommandVerificationRunner
 except ImportError:  # pragma: no cover - script mode support
     from bridge_client import BridgeClient, BridgeClientError
     from config_loader import ProjectConfig, discover_projects
     from project_finder import ProjectFinder
+    from process_io import text_subprocess_kwargs, wrap_powershell_utf8
     from verification_runner import CommandVerificationRunner
 
 LOGGER = logging.getLogger(__name__)
@@ -441,8 +443,7 @@ class LauncherDaemon:
         return self._list_launcher_worker_processes_posix()
 
     def _list_launcher_worker_processes_windows(self) -> list[ExternalWorkerProcess]:
-        command = (
-            "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; "
+        command = wrap_powershell_utf8(
             "Get-CimInstance Win32_Process | "
             "Where-Object { $_.CommandLine -and $_.CommandLine -like '*cli_worker.py*' } | "
             "Select-Object ProcessId, CommandLine | ConvertTo-Json -Compress"
@@ -450,10 +451,8 @@ class LauncherDaemon:
         completed = subprocess.run(
             ["powershell", "-NoProfile", "-Command", command],
             capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
             check=False,
+            **text_subprocess_kwargs(),
         )
         if completed.returncode != 0 or not completed.stdout.strip():
             return []
@@ -465,10 +464,8 @@ class LauncherDaemon:
         completed = subprocess.run(
             ["ps", "-ax", "-o", "pid=", "-o", "command="],
             capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
             check=False,
+            **text_subprocess_kwargs(),
         )
         if completed.returncode != 0:
             return []
@@ -545,10 +542,8 @@ class LauncherDaemon:
             subprocess.run(
                 ["taskkill", "/PID", str(pid), "/T", "/F"],
                 capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
                 check=False,
+                **text_subprocess_kwargs(),
             )
             return
         try:
