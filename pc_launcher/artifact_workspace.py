@@ -1012,9 +1012,7 @@ class SessionWorkspace:
         return lines
 
     def _compose_human_summary(self, report_text: str) -> str:
-        normalized = " ".join((report_text or "(no update)").split()) or "(no update)"
-        limit = 420 if not self.quiet_discord else 220
-        return trim_thread_text(normalized, limit)
+        return " ".join((report_text or "(no update)").split()) or "(no update)"
 
     def _compose_answer_summary(self, answer_text: str | None) -> str | None:
         if not answer_text:

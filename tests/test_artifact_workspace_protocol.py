@@ -222,7 +222,7 @@ def test_reconcile_from_bridge_summary_marks_active_task_and_consumes_handoff(tm
     assert "`T-011` | owner=`coder`" in task_board_text
 
 
-def test_record_cli_result_thread_summary_uses_explicit_truncation_marker(tmp_path):
+def test_record_cli_result_keeps_human_line_untruncated(tmp_path):
     project_root = tmp_path / "GenWorld"
     project_root.mkdir(parents=True, exist_ok=True)
     workspace = SessionWorkspace.create(
@@ -242,8 +242,9 @@ def test_record_cli_result_thread_summary_uses_explicit_truncation_marker(tmp_pa
     )
 
     assert "HUMAN:" in payload.thread_text
+    assert long_sentence in payload.thread_text
     assert "..." not in payload.thread_text
-    assert "[truncated]" in payload.thread_text
+    assert "[truncated]" not in payload.thread_text
 
 
 def test_record_cli_result_emits_discuss_open_event_lines(tmp_path):

@@ -331,6 +331,24 @@ def test_max_parallel_agents_policy_limits_claims(app_env):
     assert coder_job is None
 
 
+def test_quiet_discord_preserves_human_line_without_truncation(app_env):
+    long_ops = "OPS: " + " ".join(["state=busy"] * 80)
+    long_human = " ".join(["operator-facing"] * 120)
+
+    compact = app_env.session_service._quiet_discord_text(
+        "\n".join(
+            [
+                long_ops,
+                f"HUMAN: {long_human}",
+                "ISSUE: triage_required",
+            ],
+        ),
+    )
+
+    assert "[truncated]" in compact
+    assert f"HUMAN: {long_human}" in compact
+
+
 def test_quiet_discord_policy_false_preserves_full_output(app_env):
     summary = __import__("asyncio").run(_start_session(app_env))
 
@@ -401,7 +419,7 @@ def test_quiet_discord_policy_false_preserves_full_output(app_env):
     assert "line 11" in posted
 
 
-def test_quiet_discord_uses_explicit_truncation_marker(app_env):
+def test_quiet_discord_keeps_human_line_untruncated(app_env):
     summary = __import__("asyncio").run(_start_session(app_env))
 
     __import__("asyncio").run(
@@ -456,7 +474,8 @@ def test_quiet_discord_uses_explicit_truncation_marker(app_env):
 
     _, posted = app_env.thread_manager.messages[-1]
     assert "..." not in posted
-    assert "[truncated]" in posted
+    assert f"HUMAN: {long_human}" in posted
+    assert "[truncated]" not in posted
 
 
 def test_bridge_preserves_async_event_protocol_without_agent_wrapper(app_env):

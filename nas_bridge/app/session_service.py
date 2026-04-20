@@ -2174,8 +2174,7 @@ class SessionService:
     ) -> str:
         if "OPS:" in sanitized_error and "HUMAN:" in sanitized_error:
             return self._quiet_discord_text(sanitized_error) if quiet_discord else sanitized_error.strip()
-        failure_preview = self._trim_context_text(sanitized_error, FAILURE_PREVIEW_LIMIT)
-        human_text = self._trim_thread_text(failure_preview, 220 if quiet_discord else 420)
+        human_text = self._normalize_thread_text(sanitized_error) or "(no error details)"
         issue_text = "planner_recovery_queued" if recovery_queued else "triage_required"
         message = "\n".join(
             [
@@ -2190,11 +2189,19 @@ class SessionService:
         normalized_lines = [line.strip() for line in text.strip().splitlines() if line.strip()]
         if not normalized_lines:
             return ""
-        trimmed_lines = [self._trim_thread_text(line, 180) for line in normalized_lines[:QUIET_DISCORD_LINE_LIMIT]]
+        trimmed_lines: list[str] = []
+        for line in normalized_lines[:QUIET_DISCORD_LINE_LIMIT]:
+            if line.startswith("HUMAN:"):
+                human_body = self._normalize_thread_text(line[len("HUMAN:") :])
+                trimmed_lines.append(f"HUMAN: {human_body}" if human_body else "HUMAN:")
+                continue
+            trimmed_lines.append(self._trim_thread_text(line, 180))
         if len(normalized_lines) > QUIET_DISCORD_LINE_LIMIT:
             trimmed_lines.append("HUMAN: Additional detail omitted from the thread view.")
         compact = "\n".join(trimmed_lines)
         if len(compact) <= QUIET_DISCORD_CHAR_LIMIT:
+            return compact
+        if any(line.startswith("HUMAN:") for line in trimmed_lines):
             return compact
         return self._trim_thread_text(compact, QUIET_DISCORD_CHAR_LIMIT)
 
@@ -2416,6 +2423,10 @@ class SessionService:
         if limit <= len(marker):
             return normalized[:limit]
         return normalized[: limit - len(marker)].rstrip() + marker
+
+    @staticmethod
+    def _normalize_thread_text(text: str) -> str:
+        return " ".join(text.split())
 
     def _validate_session_start(
         self,
