@@ -33,6 +33,7 @@ TASK_STATUS_ORDER = [
     "failed",
 ]
 ACTIVE_CHILD_TASK_STATUSES = {"ready", "in_progress", "review", "handoff_queued"}
+PENDING_HANDOFF_TASK_STATUSES = {"ready", "handoff_queued"}
 
 
 def utcnow() -> datetime:
@@ -258,89 +259,191 @@ class SessionWorkspace:
         pending_jobs = int(summary.get("pending_jobs") or 0)
         active_jobs = int(summary.get("active_jobs") or 0)
         agent_rows = [agent for agent in (summary.get("agents") or []) if isinstance(agent, dict)]
-        active_agent_states = {
-            str(agent.get("status") or "").strip().lower()
+        busy_agents = [
+            str(agent.get("agent_name") or "").strip()
             for agent in agent_rows
-            if str(agent.get("status") or "").strip()
-        }
+            if str(agent.get("status") or "").strip().lower() == "busy"
+        ]
         settled = (
             session_status in {"ready", "paused", "closed", "failed_start"}
             and pending_jobs == 0
             and active_jobs == 0
-            and active_agent_states.isdisjoint({"busy", "starting", "restarting"})
+            and not busy_agents
         )
-        if not settled:
-            return False
-
+        index = self._load_task_index()
         updated_files: list[Path] = []
         changed = False
-        index = self._load_task_index()
-        transient_statuses = {"in_progress", "review", "handoff_queued"}
-        for card in index.values():
-            if card.status not in transient_statuses:
-                continue
-            card.status = "ready" if session_status in {"ready", "paused"} else "failed"
-            card.updated_at = utcnow().isoformat()
-            card.notes = (
-                "Reconciled from bridge session state after the session settled without active jobs."
+
+        if settled:
+            transient_statuses = {"in_progress", "review", "handoff_queued"}
+            for card in index.values():
+                if card.status not in transient_statuses:
+                    continue
+                card.status = "ready" if session_status in {"ready", "paused"} else "failed"
+                card.updated_at = utcnow().isoformat()
+                card.notes = (
+                    "Reconciled from bridge session state after the session settled without active jobs."
+                )
+                self._write_task_card(card)
+                updated_files.append(self.task_file(card.task_id))
+                changed = True
+
+            handoff_specs = self._pending_handoffs_from_task_index(index)
+            if handoff_specs:
+                self.handoffs_file.write_text(
+                    self._build_handoffs_text(agent_name=agent_name, handoffs=handoff_specs),
+                    encoding="utf-8",
+                )
+            else:
+                self.handoffs_file.write_text(self._build_handoffs_template(), encoding="utf-8")
+            updated_files.append(self.handoffs_file)
+
+            if changed:
+                self._save_task_index(index)
+            updated_files.append(self._refresh_task_board(index))
+
+            status_label = "paused" if desired_status == "paused" or session_status == "paused" else session_status
+            blocker_text = str(summary.get("pause_reason") or "none") if status_label == "paused" else "none"
+            next_action = self._bridge_next_action(
+                session_status=session_status,
+                desired_status=desired_status,
+                attached_workers=sum(1 for agent in agent_rows if agent.get("worker_id")),
+                total_agents=len(agent_rows),
             )
+            summary_text = self._bridge_summary_text(
+                session_status=session_status,
+                pending_jobs=pending_jobs,
+                active_jobs=active_jobs,
+            )
+
+            self.state_file.write_text(
+                self._build_state_text(
+                    status_label=status_label,
+                    agent_name=agent_name,
+                    summary=summary_text,
+                    next_action=next_action,
+                    blocker_text=blocker_text,
+                    updated_files=updated_files or [self.state_file],
+                ),
+                encoding="utf-8",
+            )
+            self.current_task_file.write_text(
+                self._build_current_task_summary(
+                    agent_name=agent_name,
+                    state_label=status_label,
+                    next_action=next_action,
+                    latest_brief_name=None,
+                    task_id=None,
+                    task_path=None,
+                    job_type="status_sync",
+                    current_message="No active job. Local artifacts were synchronized from the bridge session summary.",
+                ),
+                encoding="utf-8",
+            )
+            self.status_file.write_text(
+                self._build_status_text(
+                    agent_name=agent_name,
+                    report_text=summary_text,
+                    questions=[],
+                    handoff_lines=self._extract_handoff_lines(handoff_specs) if handoff_specs else ["none"],
+                    updated_files=updated_files or [self.state_file, self.current_task_file],
+                ),
+                encoding="utf-8",
+            )
+            return True
+
+        active_agent_name = busy_agents[0] if busy_agents else agent_name
+        active_task_id = self._resolve_active_task_id(index=index, active_agent_name=active_agent_name)
+        active_task_path: Path | None = None
+        if active_task_id:
+            card = index.get(active_task_id) or TaskCard(
+                task_id=active_task_id,
+                title=f"Active task {active_task_id}",
+                owner=active_agent_name,
+                status="in_progress",
+                source_agent=active_agent_name,
+                depends_on=None,
+                created_at=utcnow().isoformat(),
+                updated_at=utcnow().isoformat(),
+                latest_brief_name=None,
+                source_log_name=None,
+                goal="Continue the active task described by the bridge session summary.",
+                definition_of_done="Finish the active task and update the local session artifacts.",
+                notes="Synthesized from bridge session summary.",
+            )
+            card.owner = active_agent_name
+            card.status = "in_progress"
+            card.updated_at = utcnow().isoformat()
+            index[active_task_id] = card
             self._write_task_card(card)
-            updated_files.append(self.task_file(card.task_id))
+            active_task_path = self.task_file(active_task_id)
+            updated_files.append(active_task_path)
             changed = True
+
+        pending_handoffs = self._pending_handoffs_from_task_index(index, exclude_task_id=active_task_id)
+        if pending_handoffs:
+            self.handoffs_file.write_text(
+                self._build_handoffs_text(agent_name=active_agent_name, handoffs=pending_handoffs),
+                encoding="utf-8",
+            )
+        else:
+            self.handoffs_file.write_text(self._build_handoffs_template(), encoding="utf-8")
+        updated_files.append(self.handoffs_file)
+
         if changed:
             self._save_task_index(index)
         updated_files.append(self._refresh_task_board(index))
 
-        handoffs_needs_reset = self.handoffs_file.read_text(encoding="utf-8") != self._build_handoffs_template()
-        if handoffs_needs_reset:
-            self.handoffs_file.write_text(self._build_handoffs_template(), encoding="utf-8")
-            updated_files.append(self.handoffs_file)
-            changed = True
-
-        status_label = "paused" if desired_status == "paused" or session_status == "paused" else session_status
-        blocker_text = str(summary.get("pause_reason") or "none") if status_label == "paused" else "none"
         next_action = self._bridge_next_action(
             session_status=session_status,
             desired_status=desired_status,
             attached_workers=sum(1 for agent in agent_rows if agent.get("worker_id")),
             total_agents=len(agent_rows),
+            active_agent_name=active_agent_name,
         )
         summary_text = self._bridge_summary_text(
             session_status=session_status,
             pending_jobs=pending_jobs,
             active_jobs=active_jobs,
+            active_agent_name=active_agent_name,
+            active_task_id=active_task_id,
         )
 
         self.state_file.write_text(
             self._build_state_text(
-                status_label=status_label,
-                agent_name=agent_name,
+                status_label="in_progress",
+                agent_name=active_agent_name,
                 summary=summary_text,
                 next_action=next_action,
-                blocker_text=blocker_text,
+                blocker_text="none",
                 updated_files=updated_files or [self.state_file],
             ),
             encoding="utf-8",
         )
         self.current_task_file.write_text(
             self._build_current_task_summary(
-                agent_name=agent_name,
-                state_label=status_label,
+                agent_name=active_agent_name,
+                state_label="in_progress",
                 next_action=next_action,
                 latest_brief_name=None,
-                task_id=None,
-                task_path=None,
+                task_id=active_task_id,
+                task_path=active_task_path,
                 job_type="status_sync",
-                current_message="No active job. Local artifacts were synchronized from the bridge session summary.",
+                current_message=(
+                    f"Bridge session summary says `{active_agent_name}` is working on "
+                    f"`{active_task_id or 'the active task'}`. Read `TASKS/{active_task_id}.md` and `CURRENT_STATE.md` first."
+                    if active_task_id
+                    else f"Bridge session summary says `{active_agent_name}` is processing active work."
+                ),
             ),
             encoding="utf-8",
         )
         self.status_file.write_text(
             self._build_status_text(
-                agent_name=agent_name,
+                agent_name=active_agent_name,
                 report_text=summary_text,
                 questions=[],
-                handoff_lines=["none"],
+                handoff_lines=self._extract_handoff_lines(pending_handoffs) if pending_handoffs else ["none"],
                 updated_files=updated_files or [self.state_file, self.current_task_file],
             ),
             encoding="utf-8",
@@ -806,6 +909,43 @@ class SessionWorkspace:
             if display not in ordered:
                 ordered.append(display)
         return ",".join(ordered)
+
+    def _pending_handoffs_from_task_index(
+        self,
+        index: dict[str, TaskCard],
+        *,
+        exclude_task_id: str | None = None,
+    ) -> list[HandoffSpec]:
+        handoffs: list[HandoffSpec] = []
+        for card in sorted(index.values(), key=lambda item: item.task_id):
+            if exclude_task_id and card.task_id == exclude_task_id:
+                continue
+            if card.status not in PENDING_HANDOFF_TASK_STATUSES:
+                continue
+            handoffs.append(
+                HandoffSpec(
+                    target_agent=card.owner,
+                    body=card.goal or card.notes or card.title,
+                    task_id=card.task_id,
+                    title=card.title,
+                ),
+            )
+        return handoffs
+
+    def _resolve_active_task_id(self, *, index: dict[str, TaskCard], active_agent_name: str) -> str | None:
+        current_task_id = self._current_task_id_from_file()
+        if current_task_id:
+            current_card = index.get(current_task_id)
+            if current_card is not None and current_card.owner == active_agent_name:
+                return current_task_id
+        candidate_ids = [
+            card.task_id
+            for card in sorted(index.values(), key=lambda item: item.task_id)
+            if card.owner == active_agent_name and card.status in {"ready", "handoff_queued", "in_progress", "review"}
+        ]
+        if len(candidate_ids) == 1:
+            return candidate_ids[0]
+        return current_task_id
 
     def _build_protocol_text(self) -> str:
         agent_mentions = ", ".join(f"`{name}`" for name in self.agent_names)
@@ -1350,7 +1490,20 @@ class SessionWorkspace:
         session_status: str,
         pending_jobs: int,
         active_jobs: int,
+        active_agent_name: str | None = None,
+        active_task_id: str | None = None,
     ) -> str:
+        if active_jobs > 0:
+            active_agent = active_agent_name or "active worker"
+            if active_task_id:
+                return (
+                    f"Bridge session summary says `{active_agent}` is working on `{active_task_id}` "
+                    f"with {active_jobs} active job(s) and {pending_jobs} pending job(s)."
+                )
+            return (
+                f"Bridge session summary says `{active_agent}` is processing active work "
+                f"with {active_jobs} active job(s) and {pending_jobs} pending job(s)."
+            )
         if session_status == "ready":
             return "Bridge session summary says the session is ready and no jobs are active."
         if session_status == "paused":
@@ -1371,7 +1524,10 @@ class SessionWorkspace:
         desired_status: str,
         attached_workers: int,
         total_agents: int,
+        active_agent_name: str | None = None,
     ) -> str:
+        if active_agent_name:
+            return f"Wait for {active_agent_name} to finish the active task."
         if session_status == "waiting_for_workers":
             return f"Wait for workers to attach ({attached_workers}/{total_agents})."
         if session_status == "awaiting_launcher":
