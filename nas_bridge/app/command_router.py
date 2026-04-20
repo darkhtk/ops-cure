@@ -3,6 +3,7 @@ from __future__ import annotations
 import discord
 from discord import app_commands
 
+from .services.verification_service import VerificationService
 from .session_service import SessionService
 from .worker_registry import WorkerRegistry
 
@@ -11,12 +12,14 @@ def register_commands(
     tree: app_commands.CommandTree,
     *,
     session_service: SessionService,
+    verification_service: VerificationService,
     registry: WorkerRegistry,
 ) -> None:
     project_group = app_commands.Group(name="project", description="Manage project sessions")
     agent_group = app_commands.Group(name="agent", description="Manage individual agents")
     session_group = app_commands.Group(name="session", description="Manage the active session")
     policy_group = app_commands.Group(name="policy", description="Manage session policy overrides")
+    verify_group = app_commands.Group(name="verify", description="Run and review verification jobs")
 
     async def _current_thread_session(interaction: discord.Interaction):
         channel = interaction.channel
@@ -63,7 +66,7 @@ def register_commands(
         )
 
     @project_group.command(name="find", description="Search configured local roots and resume a matching project")
-    @app_commands.describe(query="Describe the project or folder to resume", preset="Optional worker preset from registered YAML")
+    @app_commands.describe(query="Describe the project or folder to resume", preset="Optional execution profile from registered YAML")
     async def project_find(interaction: discord.Interaction, query: str, preset: str | None = None) -> None:
         if interaction.guild_id is None or interaction.channel_id is None:
             await interaction.response.send_message(
@@ -176,7 +179,7 @@ def register_commands(
                 f"Session `{session_summary.id}`\n"
                 f"Session title: `{session_summary.project_name}`\n"
                 f"Target project: `{session_summary.target_project_name or session_summary.project_name}`\n"
-                f"Preset: `{session_summary.preset or 'unknown'}`\n"
+                f"Profile: `{session_summary.preset or 'unknown'}`\n"
                 f"Workdir: `{session_summary.workdir}`\n"
                 f"Status: `{session_summary.status}` (desired `{session_summary.desired_status}`)\n"
                 f"Launcher: `{session_summary.launcher_id or 'unclaimed'}`\n"
@@ -330,10 +333,110 @@ def register_commands(
             ephemeral=True,
         )
 
+    @verify_group.command(name="run", description="Queue a verification run for the current session")
+    @app_commands.describe(mode="Configured verification mode, for example smoke or qa")
+    async def verify_run(interaction: discord.Interaction, mode: str) -> None:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            summary = await _current_thread_session(interaction)
+            run = await verification_service.enqueue_run(
+                session_id=summary.id,
+                mode=mode,
+                requested_by=str(interaction.user.id),
+            )
+        except Exception as exc:  # noqa: BLE001
+            await interaction.followup.send(str(exc), ephemeral=True)
+            return
+        await interaction.followup.send(
+            (
+                f"Queued verification run `{run.id}` in mode `{run.mode}`.\n"
+                f"Profile: `{run.profile_name}`\n"
+                f"Artifacts: `{run.artifact_dir}`"
+            ),
+            ephemeral=True,
+        )
+
+    @verify_group.command(name="latest", description="Show the latest verification run for the current session")
+    async def verify_latest(interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            summary = await _current_thread_session(interaction)
+            run = await verification_service.latest_run(session_id=summary.id)
+        except Exception as exc:  # noqa: BLE001
+            await interaction.followup.send(str(exc), ephemeral=True)
+            return
+        if run is None:
+            await interaction.followup.send("No verification run has been recorded for this session yet.", ephemeral=True)
+            return
+        artifact_lines = "\n".join(
+            f"- `{artifact.label}` [{artifact.artifact_type}] `{artifact.path}`"
+            for artifact in run.artifacts[:8]
+        ) or "- none"
+        review_line = "none"
+        if run.latest_review is not None:
+            review_line = (
+                f"`{run.latest_review.decision}` by `{run.latest_review.reviewer}`"
+                f"{f' - {run.latest_review.note}' if run.latest_review.note else ''}"
+            )
+        await interaction.followup.send(
+            (
+                f"Verification `{run.id}`\n"
+                f"- Status: `{run.status}`\n"
+                f"- Mode: `{run.mode}`\n"
+                f"- Profile: `{run.profile_name}`\n"
+                f"- Summary: `{run.summary_text or run.error_text or 'n/a'}`\n"
+                f"- Review: {review_line}\n"
+                f"- Artifact dir: `{run.artifact_dir}`\n"
+                f"Artifacts:\n{artifact_lines}"
+            ),
+            ephemeral=True,
+        )
+
+    @verify_group.command(name="approve", description="Approve the latest verification run that needs review")
+    @app_commands.describe(note="Optional note for the review decision")
+    async def verify_approve(interaction: discord.Interaction, note: str | None = None) -> None:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            summary = await _current_thread_session(interaction)
+            run = await verification_service.review_latest(
+                session_id=summary.id,
+                decision="approved",
+                reviewer=str(interaction.user.id),
+                note=note,
+            )
+        except Exception as exc:  # noqa: BLE001
+            await interaction.followup.send(str(exc), ephemeral=True)
+            return
+        await interaction.followup.send(
+            f"Approved verification run `{run.id}` with status `{run.status}`.",
+            ephemeral=True,
+        )
+
+    @verify_group.command(name="reject", description="Reject the latest verification run that needs review")
+    @app_commands.describe(note="Optional reason or follow-up note")
+    async def verify_reject(interaction: discord.Interaction, note: str | None = None) -> None:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            summary = await _current_thread_session(interaction)
+            run = await verification_service.review_latest(
+                session_id=summary.id,
+                decision="rejected",
+                reviewer=str(interaction.user.id),
+                note=note,
+            )
+        except Exception as exc:  # noqa: BLE001
+            await interaction.followup.send(str(exc), ephemeral=True)
+            return
+        await interaction.followup.send(
+            f"Rejected verification run `{run.id}` with status `{run.status}`.",
+            ephemeral=True,
+        )
+
     tree.add_command(project_group)
     tree.add_command(agent_group)
     tree.add_command(session_group)
     tree.add_command(policy_group)
+    tree.add_command(verify_group)
 
 
 def _format_drift_suffix(agent) -> str:

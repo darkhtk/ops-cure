@@ -74,6 +74,26 @@ class ProjectPolicy(BaseModel):
         return max(0, min(value, 10))
 
 
+class VerificationCaptureConfig(BaseModel):
+    screenshots: bool = True
+    video: bool = False
+
+
+class VerificationReviewConfig(BaseModel):
+    require_operator_approval: bool = False
+
+
+class VerificationManifest(BaseModel):
+    enabled: bool = False
+    provider: str = "command"
+    artifact_dir: str = "_verification"
+    run_timeout_seconds: int = 300
+    auto_verify_on_handoff: bool = False
+    commands: dict[str, list[str]] = Field(default_factory=dict)
+    capture: VerificationCaptureConfig = Field(default_factory=VerificationCaptureConfig)
+    review: VerificationReviewConfig = Field(default_factory=VerificationReviewConfig)
+
+
 class ProjectManifest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -93,6 +113,7 @@ class ProjectManifest(BaseModel):
     power: PowerManifest = Field(default_factory=PowerManifest)
     execution: ExecutionManifest = Field(default_factory=ExecutionManifest)
     policy: ProjectPolicy = Field(default_factory=ProjectPolicy)
+    verification: VerificationManifest = Field(default_factory=VerificationManifest)
 
     @model_validator(mode="after")
     def validate_default_agent(self) -> "ProjectManifest":
@@ -175,7 +196,7 @@ class ExecutionTargetSummary(BaseModel):
 
 
 class SessionPolicyResponse(ProjectPolicy):
-    source: str = "preset"
+    source: str = "profile"
     version: int = 1
     updated_by: str = "system"
     updated_at: datetime | None = None
@@ -377,6 +398,94 @@ class SessionPauseResponse(BaseModel):
     status: str
     desired_status: str
     pause_reason: str | None = None
+
+
+class VerifyArtifactSummary(BaseModel):
+    id: str
+    artifact_type: str
+    label: str
+    path: str
+    created_at: datetime
+
+
+class ReviewDecisionSummary(BaseModel):
+    id: str
+    decision: str
+    reviewer: str
+    note: str | None = None
+    created_at: datetime
+
+
+class VerifyRunSummaryResponse(BaseModel):
+    id: str
+    session_id: str
+    project_name: str
+    target_project_name: str | None = None
+    profile_name: str
+    mode: str
+    provider: str
+    status: str
+    requested_by: str
+    launcher_id: str | None = None
+    review_required: bool = False
+    summary_text: str | None = None
+    error_text: str | None = None
+    artifact_dir: str
+    created_at: datetime
+    claimed_at: datetime | None = None
+    completed_at: datetime | None = None
+    reviewed_at: datetime | None = None
+    artifacts: list[VerifyArtifactSummary] = Field(default_factory=list)
+    latest_review: ReviewDecisionSummary | None = None
+
+
+class VerifyRunRequest(BaseModel):
+    mode: str
+    requested_by: str
+
+
+class VerifyClaimRequest(BaseModel):
+    launcher_id: str
+    capacity: int = 1
+
+    @field_validator("capacity")
+    @classmethod
+    def validate_capacity(cls, value: int) -> int:
+        return max(1, min(value, 10))
+
+
+class VerifyArtifactInput(BaseModel):
+    artifact_type: str
+    label: str
+    path: str
+
+
+class VerifyRunClaimResponse(BaseModel):
+    id: str
+    session_id: str
+    project_name: str
+    target_project_name: str | None = None
+    profile_name: str
+    mode: str
+    provider: str
+    workdir: str
+    artifact_dir: str
+    timeout_seconds: int
+    command: list[str]
+    created_at: datetime
+
+
+class VerifyRunCompleteRequest(BaseModel):
+    launcher_id: str
+    status: str
+    summary_text: str | None = None
+    error_text: str | None = None
+    artifacts: list[VerifyArtifactInput] = Field(default_factory=list)
+
+
+class VerifyReviewRequest(BaseModel):
+    reviewer: str
+    note: str | None = None
 
 
 class HealthResponse(BaseModel):

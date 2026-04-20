@@ -62,6 +62,26 @@ class FinderConfig(BaseModel):
     )
 
 
+class VerificationCaptureConfig(BaseModel):
+    screenshots: bool = True
+    video: bool = False
+
+
+class VerificationReviewConfig(BaseModel):
+    require_operator_approval: bool = False
+
+
+class VerificationConfig(BaseModel):
+    enabled: bool = False
+    provider: str = "command"
+    artifact_dir: str = "_verification"
+    run_timeout_seconds: int = 300
+    auto_verify_on_handoff: bool = False
+    commands: dict[str, list[str]] = Field(default_factory=dict)
+    capture: VerificationCaptureConfig = Field(default_factory=VerificationCaptureConfig)
+    review: VerificationReviewConfig = Field(default_factory=VerificationReviewConfig)
+
+
 class ProjectConfig(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -80,6 +100,7 @@ class ProjectConfig(BaseModel):
     startup: StartupConfig = Field(default_factory=StartupConfig)
     artifacts: ArtifactConfig = Field(default_factory=ArtifactConfig)
     finder: FinderConfig = Field(default_factory=FinderConfig)
+    verification: VerificationConfig = Field(default_factory=VerificationConfig)
 
     @model_validator(mode="after")
     def validate_defaults(self) -> "ProjectConfig":
@@ -120,6 +141,7 @@ class ProjectConfig(BaseModel):
             "agents": [agent.model_dump() for agent in self.agents],
             "startup": self.startup.model_dump(),
             "finder": self.finder.model_dump(),
+            "verification": self.verification.model_dump(),
         }
 
 

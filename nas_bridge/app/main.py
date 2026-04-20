@@ -8,7 +8,7 @@ import asyncio
 
 from fastapi import FastAPI
 
-from .api import health, sessions, workers
+from .api import health, sessions, verification, workers
 from .capabilities.execution.router import RoutedExecutionProvider
 from .capabilities.execution.windows_launcher import WindowsLauncherExecutionProvider
 from .capabilities.power.noop import NoopPowerProvider
@@ -20,6 +20,7 @@ from .discord_gateway import DiscordGateway
 from .drift_monitor import DriftMonitor
 from .services.policy_service import PolicyService
 from .services.recovery_service import RecoveryService
+from .services.verification_service import VerificationService
 from .session_service import SessionService
 from .thread_manager import ThreadManager
 from .transcript_service import TranscriptService
@@ -44,6 +45,7 @@ class ServiceContainer:
     thread_manager: ThreadManager
     policy_service: PolicyService
     recovery_service: RecoveryService
+    verification_service: VerificationService
     session_service: SessionService
     discord_gateway: DiscordGateway
     recovery_loop_task: asyncio.Task[None] | None = None
@@ -57,6 +59,11 @@ def build_services(settings: Settings) -> ServiceContainer:
     transcript_service = TranscriptService()
     thread_manager = ThreadManager(settings)
     policy_service = PolicyService()
+    verification_service = VerificationService(
+        registry=registry,
+        transcript_service=transcript_service,
+        thread_manager=thread_manager,
+    )
     power_provider = RoutedPowerProvider([NoopPowerProvider(), WakeOnLanPowerProvider()])
     execution_provider = RoutedExecutionProvider([WindowsLauncherExecutionProvider(registry)])
     recovery_service = RecoveryService(
@@ -97,6 +104,7 @@ def build_services(settings: Settings) -> ServiceContainer:
     discord_gateway = DiscordGateway(
         settings=settings,
         session_service=session_service,
+        verification_service=verification_service,
         registry=registry,
         thread_manager=thread_manager,
     )
@@ -107,6 +115,7 @@ def build_services(settings: Settings) -> ServiceContainer:
         thread_manager=thread_manager,
         policy_service=policy_service,
         recovery_service=recovery_service,
+        verification_service=verification_service,
         session_service=session_service,
         discord_gateway=discord_gateway,
     )
@@ -137,4 +146,5 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Ops-Cure Bridge", lifespan=lifespan)
 app.include_router(health.router)
 app.include_router(sessions.router)
+app.include_router(verification.router)
 app.include_router(workers.router)

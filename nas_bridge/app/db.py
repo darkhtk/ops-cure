@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import dataclass
 from typing import Iterator
 
 from sqlalchemy import create_engine, inspect, text
@@ -19,48 +20,102 @@ engine = create_engine(settings.database_url, future=True, connect_args=connect_
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
 
 
+@dataclass(frozen=True, slots=True)
+class NamedMigration:
+    name: str
+    statements: tuple[str, ...]
+
+
 def init_db() -> None:
     from . import models  # noqa: F401
 
     settings.sqlite_path.parent.mkdir(parents=True, exist_ok=True)
     Base.metadata.create_all(bind=engine)
-    _run_runtime_migrations()
+    _run_named_migrations()
 
 
-def _run_runtime_migrations() -> None:
+def _run_named_migrations() -> None:
     if not settings.database_url.startswith("sqlite"):
         return
-    migrations = {
-        "sessions": [
-            ("target_project_name", "TEXT"),
-            ("power_target_name", "TEXT"),
-            ("execution_target_name", "TEXT"),
-            ("desired_status", "TEXT NOT NULL DEFAULT 'ready'"),
-            ("power_state", "TEXT NOT NULL DEFAULT 'unknown'"),
-            ("execution_state", "TEXT NOT NULL DEFAULT 'unknown'"),
-            ("pause_reason", "TEXT"),
-            ("last_recovery_at", "DATETIME"),
-            ("last_recovery_reason", "TEXT"),
-            ("policy_version", "INTEGER NOT NULL DEFAULT 1"),
-        ],
-        "agents": [
-            ("desired_status", "TEXT NOT NULL DEFAULT 'ready'"),
-            ("paused_reason", "TEXT"),
-        ],
-    }
     with engine.begin() as connection:
-        inspector = inspect(connection)
-        for table_name, columns in migrations.items():
-            if table_name not in inspector.get_table_names():
+        _ensure_schema_migrations_table(connection)
+        applied = {
+            row[0]
+            for row in connection.execute(text("SELECT name FROM schema_migrations"))
+        }
+        for migration in _named_migrations(connection):
+            if migration.name in applied:
                 continue
-            existing_columns = {
-                column_info["name"]
-                for column_info in inspector.get_columns(table_name)
-            }
-            for column_name, column_sql in columns:
-                if column_name in existing_columns:
-                    continue
-                connection.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_sql}"))
+            for statement in migration.statements:
+                connection.execute(text(statement))
+            connection.execute(
+                text(
+                    "INSERT INTO schema_migrations (name, applied_at) "
+                    "VALUES (:name, CURRENT_TIMESTAMP)",
+                ),
+                {"name": migration.name},
+            )
+
+
+def _ensure_schema_migrations_table(connection) -> None:
+    connection.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                name TEXT PRIMARY KEY,
+                applied_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL
+            )
+            """,
+        ),
+    )
+
+
+def _named_migrations(connection) -> tuple[NamedMigration, ...]:
+    inspector = inspect(connection)
+
+    def missing_columns(table_name: str, column_specs: list[tuple[str, str]]) -> tuple[str, ...]:
+        if table_name not in inspector.get_table_names():
+            return ()
+        existing_columns = {
+            column_info["name"]
+            for column_info in inspector.get_columns(table_name)
+        }
+        return tuple(
+            f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_sql}"
+            for column_name, column_sql in column_specs
+            if column_name not in existing_columns
+        )
+
+    return (
+        NamedMigration(
+            name="20260420_session_orchestration_fields",
+            statements=missing_columns(
+                "sessions",
+                [
+                    ("target_project_name", "TEXT"),
+                    ("power_target_name", "TEXT"),
+                    ("execution_target_name", "TEXT"),
+                    ("desired_status", "TEXT NOT NULL DEFAULT 'ready'"),
+                    ("power_state", "TEXT NOT NULL DEFAULT 'unknown'"),
+                    ("execution_state", "TEXT NOT NULL DEFAULT 'unknown'"),
+                    ("pause_reason", "TEXT"),
+                    ("last_recovery_at", "DATETIME"),
+                    ("last_recovery_reason", "TEXT"),
+                    ("policy_version", "INTEGER NOT NULL DEFAULT 1"),
+                ],
+            ),
+        ),
+        NamedMigration(
+            name="20260420_agent_pause_fields",
+            statements=missing_columns(
+                "agents",
+                [
+                    ("desired_status", "TEXT NOT NULL DEFAULT 'ready'"),
+                    ("paused_reason", "TEXT"),
+                ],
+            ),
+        ),
+    )
 
 
 @contextmanager

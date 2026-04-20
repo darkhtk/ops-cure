@@ -8,6 +8,7 @@ import discord
 from .command_router import register_commands
 from .config import Settings
 from .message_router import MessageRouter
+from .services.verification_service import VerificationService
 from .session_service import SessionService
 from .thread_manager import ThreadManager
 from .worker_registry import WorkerRegistry
@@ -21,6 +22,7 @@ class DiscordBridgeClient(discord.Client):
         *,
         settings: Settings,
         session_service: SessionService,
+        verification_service: VerificationService,
         registry: WorkerRegistry,
         thread_manager: ThreadManager,
     ) -> None:
@@ -33,6 +35,7 @@ class DiscordBridgeClient(discord.Client):
         self.tree = discord.app_commands.CommandTree(self)
         self.message_router = MessageRouter(session_service)
         self._session_service = session_service
+        self._verification_service = verification_service
         self._registry = registry
         self._thread_manager = thread_manager
 
@@ -41,6 +44,7 @@ class DiscordBridgeClient(discord.Client):
         register_commands(
             self.tree,
             session_service=self._session_service,
+            verification_service=self._verification_service,
             registry=self._registry,
         )
         if self.settings.discord_sync_guild_ids:
@@ -68,11 +72,13 @@ class DiscordGateway:
         *,
         settings: Settings,
         session_service: SessionService,
+        verification_service: VerificationService,
         registry: WorkerRegistry,
         thread_manager: ThreadManager,
     ) -> None:
         self.settings = settings
         self.session_service = session_service
+        self.verification_service = verification_service
         self.registry = registry
         self.thread_manager = thread_manager
         self.client: DiscordBridgeClient | None = None
@@ -94,6 +100,7 @@ class DiscordGateway:
         self.client = DiscordBridgeClient(
             settings=self.settings,
             session_service=self.session_service,
+            verification_service=self.verification_service,
             registry=self.registry,
             thread_manager=self.thread_manager,
         )

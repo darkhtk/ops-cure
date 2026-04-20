@@ -69,6 +69,33 @@ class BridgeClient:
             },
         )
 
+    def claim_verification_runs(self, *, launcher_id: str, capacity: int = 1) -> list[dict[str, Any]]:
+        return self._post(
+            "/api/verification/claim",
+            {"launcher_id": launcher_id, "capacity": capacity},
+        )
+
+    def complete_verification_run(
+        self,
+        *,
+        run_id: str,
+        launcher_id: str,
+        status: str,
+        summary_text: str | None,
+        error_text: str | None,
+        artifacts: list[dict[str, object]],
+    ) -> dict[str, Any]:
+        return self._post(
+            f"/api/verification/runs/{run_id}/complete",
+            {
+                "launcher_id": launcher_id,
+                "status": status,
+                "summary_text": summary_text,
+                "error_text": error_text,
+                "artifacts": artifacts,
+            },
+        )
+
     def register_worker(
         self,
         *,

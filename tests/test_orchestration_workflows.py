@@ -118,7 +118,12 @@ def test_pause_resume_and_policy_override(app_env):
 def test_start_reuses_existing_session_when_launcher_is_offline(app_env):
     first_summary = __import__("asyncio").run(_start_session(app_env))
 
-    app_env.registry._launchers.clear()
+    from app.models import LauncherRecordModel
+
+    with app_env.db.session_scope() as db:
+        launcher = db.scalar(select(LauncherRecordModel))
+        assert launcher is not None
+        launcher.status = "stale"
 
     reused_summary = __import__("asyncio").run(
         app_env.session_service.create_session_from_project(
@@ -222,3 +227,142 @@ def test_start_prefers_requested_target_over_profile_default(app_env, monkeypatc
     assert summary.execution_target is not None
     assert summary.power_target.name == "UlalaCheese:default"
     assert summary.execution_target.name == "UlalaCheese:default"
+
+
+def test_max_parallel_agents_policy_limits_claims(app_env):
+    summary = __import__("asyncio").run(_start_session(app_env))
+
+    __import__("asyncio").run(
+        app_env.session_service.register_worker(
+            session_id=summary.id,
+            agent_name="planner",
+            worker_id="worker-planner",
+            pid_hint=1001,
+        ),
+    )
+    __import__("asyncio").run(
+        app_env.session_service.register_worker(
+            session_id=summary.id,
+            agent_name="coder",
+            worker_id="worker-coder",
+            pid_hint=1002,
+        ),
+    )
+    __import__("asyncio").run(
+        app_env.session_service.set_policy(
+            session_id=summary.id,
+            key="max_parallel_agents",
+            value="1",
+            updated_by="user-1",
+        ),
+    )
+
+    from app.models import JobModel
+
+    with app_env.db.session_scope() as db:
+        db.add(
+            JobModel(
+                session_id=summary.id,
+                agent_name="planner",
+                job_type="message",
+                user_id="user-1",
+                input_text="planner work",
+            ),
+        )
+        db.add(
+            JobModel(
+                session_id=summary.id,
+                agent_name="coder",
+                job_type="message",
+                user_id="user-1",
+                input_text="coder work",
+            ),
+        )
+
+    planner_job = __import__("asyncio").run(
+        app_env.session_service.claim_next_job(
+            session_id=summary.id,
+            agent_name="planner",
+            worker_id="worker-planner",
+        ),
+    )
+    assert planner_job is not None
+
+    coder_job = __import__("asyncio").run(
+        app_env.session_service.claim_next_job(
+            session_id=summary.id,
+            agent_name="coder",
+            worker_id="worker-coder",
+        ),
+    )
+    assert coder_job is None
+
+
+def test_quiet_discord_policy_false_preserves_full_output(app_env):
+    summary = __import__("asyncio").run(_start_session(app_env))
+
+    __import__("asyncio").run(
+        app_env.session_service.register_worker(
+            session_id=summary.id,
+            agent_name="coder",
+            worker_id="worker-coder",
+            pid_hint=1002,
+        ),
+    )
+    __import__("asyncio").run(
+        app_env.session_service.register_worker(
+            session_id=summary.id,
+            agent_name="planner",
+            worker_id="worker-planner",
+            pid_hint=1001,
+        ),
+    )
+    __import__("asyncio").run(
+        app_env.session_service.set_policy(
+            session_id=summary.id,
+            key="quiet_discord",
+            value="false",
+            updated_by="user-1",
+        ),
+    )
+
+    from app.models import JobModel
+
+    with app_env.db.session_scope() as db:
+        job = JobModel(
+            session_id=summary.id,
+            agent_name="coder",
+            job_type="message",
+            user_id="user-1",
+            input_text="show detailed output",
+        )
+        db.add(job)
+        db.flush()
+        job_id = job.id
+
+    claimed = __import__("asyncio").run(
+        app_env.session_service.claim_next_job(
+            session_id=summary.id,
+            agent_name="coder",
+            worker_id="worker-coder",
+        ),
+    )
+    assert claimed is not None
+    assert claimed.id == job_id
+
+    full_output = "\n".join(f"line {index}" for index in range(1, 12))
+    __import__("asyncio").run(
+        app_env.session_service.complete_job(
+            job_id=job_id,
+            session_id=summary.id,
+            agent_name="coder",
+            worker_id="worker-coder",
+            output_text=full_output,
+            pid_hint=1002,
+        ),
+    )
+
+    assert app_env.thread_manager.messages
+    _, posted = app_env.thread_manager.messages[-1]
+    assert "line 1" in posted
+    assert "line 11" in posted

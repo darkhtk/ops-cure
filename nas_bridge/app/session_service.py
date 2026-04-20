@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Iterable
 
-from sqlalchemy import desc, select
+from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session, selectinload
 
 from .db import session_scope
@@ -303,7 +303,7 @@ class SessionService:
                 actor="bridge",
                 content=(
                     f"Session created with title {project_name} targeting {target_project_name} "
-                    f"using preset {selected_preset}."
+                f"using profile {selected_preset}."
                     f" Workdir: {resolved_workdir}"
                 ),
             )
@@ -312,7 +312,7 @@ class SessionService:
         await self.thread_manager.post_message(
             discord_thread_id,
             (
-                f"Session `{summary.id}` created for `{project_name}` using preset `{selected_preset}`.\n"
+                f"Session `{summary.id}` created for `{project_name}` using profile `{selected_preset}`.\n"
                 "Launcher claim is pending. Workers will join this thread when ready."
             ),
         )
@@ -369,7 +369,7 @@ class SessionService:
             parent_channel_id=parent_channel_id,
         )
         if not manifest.finder.roots:
-            raise ValueError(f"Preset `{selected_preset}` does not have any configured finder roots.")
+            raise ValueError(f"Profile `{selected_preset}` does not have any configured finder roots.")
 
         with session_scope() as db:
             find_row = ProjectFindModel(
@@ -836,6 +836,8 @@ class SessionService:
                 return None
 
             agent = self._require_agent(db, session_id=session_id, agent_name=agent_name)
+            policy = self._load_policy_summary(db, session_row)
+            max_parallel_agents = policy.max_parallel_agents if policy is not None else max(1, len(session_row.agents))
 
             active_job = db.scalar(
                 select(JobModel)
@@ -859,6 +861,19 @@ class SessionService:
 
             if active_job is not None:
                 agent.status = "busy"
+                return None
+
+            active_job_count = int(
+                db.scalar(
+                    select(func.count())
+                    .select_from(JobModel)
+                    .where(JobModel.session_id == session_id)
+                    .where(JobModel.status == "in_progress"),
+                )
+                or 0,
+            )
+            if active_job_count >= max_parallel_agents:
+                agent.status = "idle"
                 return None
 
             job = db.scalar(
@@ -905,6 +920,7 @@ class SessionService:
         thread_id = ""
         thread_message = ""
         visible_output = ""
+        quiet_discord = True
         with session_scope() as db:
             job = self._require_job(
                 db,
@@ -920,6 +936,8 @@ class SessionService:
                 .options(selectinload(SessionModel.agents))
                 .where(SessionModel.id == session_id),
             )
+            policy = self._load_policy_summary(db, session_row)
+            quiet_discord = policy.quiet_discord if policy is not None else True
             visible_output, handoffs, rejected_handoffs = self._extract_handoffs(
                 sanitized,
                 agents=session_row.agents,
@@ -955,6 +973,7 @@ class SessionService:
                 agent_name=agent_name,
                 visible_output=visible_output,
                 handoffs=handoffs,
+                quiet_discord=quiet_discord,
             )
 
         if thread_message:
@@ -979,6 +998,7 @@ class SessionService:
         sanitized = sanitize_text(error_text)
         thread_id = ""
         thread_message = ""
+        quiet_discord = True
         with session_scope() as db:
             job = self._require_job(
                 db,
@@ -994,6 +1014,8 @@ class SessionService:
                 .options(selectinload(SessionModel.agents))
                 .where(SessionModel.id == session_id),
             )
+            policy = self._load_policy_summary(db, session_row)
+            quiet_discord = policy.quiet_discord if policy is not None else True
 
             job.status = "failed"
             job.error_text = sanitized
@@ -1016,6 +1038,7 @@ class SessionService:
                 agent_name=agent_name,
                 sanitized_error=sanitized,
                 recovery_queued=recovery_queued,
+                quiet_discord=quiet_discord,
             )
 
         sent_chunks = await self.thread_manager.post_message(thread_id, thread_message)
@@ -1347,7 +1370,7 @@ class SessionService:
             if manifest is None:
                 available = ", ".join(sorted(available_presets)) or "(none)"
                 raise ValueError(
-                    f"Preset '{preset}' is not currently registered by any launcher. Available presets: {available}",
+                    f"Profile '{preset}' is not currently registered by any launcher. Available profiles: {available}",
                 )
             return manifest, preset
 
@@ -1359,7 +1382,7 @@ class SessionService:
 
         available = ", ".join(sorted(available_presets)) or "(none)"
         raise ValueError(
-            f"Multiple presets are registered. Please provide /project start preset:<name>. Available presets: {available}",
+            f"Multiple profiles are registered. Please provide /project start profile:<name>. Available profiles: {available}",
         )
 
     def _to_agent_response(self, agent: AgentModel) -> AgentStatusResponse:
@@ -1525,7 +1548,7 @@ class SessionService:
             "Session overview:",
             f"- Session title: {session_row.project_name}",
             f"- Target project: {session_row.target_project_name or session_row.project_name}",
-            f"- Preset: {session_row.preset or 'unknown'}",
+            f"- Profile: {session_row.preset or 'unknown'}",
             f"- Status: {session_row.status}",
             f"- Current agent: {current_agent}",
             f"- Workdir: {session_row.workdir}",
@@ -1881,9 +1904,10 @@ class SessionService:
         agent_name: str,
         visible_output: str,
         handoffs: list[HandoffRequest],
+        quiet_discord: bool,
     ) -> str:
         del handoffs
-        body = self._quiet_discord_text(visible_output)
+        body = self._quiet_discord_text(visible_output) if quiet_discord else visible_output.strip()
         if not body:
             return ""
         return f"**{agent_name}**\n{body}"
@@ -1894,8 +1918,10 @@ class SessionService:
         agent_name: str,
         sanitized_error: str,
         recovery_queued: bool,
+        quiet_discord: bool,
     ) -> str:
-        summary = self._quiet_discord_text(self._trim_context_text(sanitized_error, FAILURE_PREVIEW_LIMIT))
+        failure_preview = self._trim_context_text(sanitized_error, FAILURE_PREVIEW_LIMIT)
+        summary = self._quiet_discord_text(failure_preview) if quiet_discord else failure_preview
         if recovery_queued:
             return (
                 f"**{agent_name} error**\n"

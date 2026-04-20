@@ -63,6 +63,10 @@ class SessionModel(Base):
         back_populates="session",
         cascade="all, delete-orphan",
     )
+    verification_runs: Mapped[list["VerifyRunModel"]] = relationship(
+        back_populates="session",
+        cascade="all, delete-orphan",
+    )
 
 
 class AgentModel(Base):
@@ -186,6 +190,42 @@ class ExecutionTargetModel(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
+class LauncherRecordModel(Base):
+    __tablename__ = "launcher_records"
+
+    launcher_id: Mapped[str] = mapped_column(primary_key=True)
+    hostname: Mapped[str] = mapped_column(index=True)
+    status: Mapped[str] = mapped_column(index=True, default="online")
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+    catalog_entries: Mapped[list["LauncherCatalogEntryModel"]] = relationship(
+        back_populates="launcher",
+        cascade="all, delete-orphan",
+    )
+
+
+class LauncherCatalogEntryModel(Base):
+    __tablename__ = "launcher_catalog_entries"
+    __table_args__ = (
+        UniqueConstraint("launcher_id", "profile_name", name="uq_launcher_profile"),
+        Index("ix_launcher_catalog_profile", "profile_name"),
+    )
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=lambda: str(uuid.uuid4()))
+    launcher_id: Mapped[str] = mapped_column(
+        ForeignKey("launcher_records.launcher_id", ondelete="CASCADE"),
+        index=True,
+    )
+    profile_name: Mapped[str] = mapped_column(index=True)
+    manifest_json: Mapped[str] = mapped_column(Text())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+    launcher: Mapped[LauncherRecordModel] = relationship(back_populates="catalog_entries")
+
+
 class SessionPolicyModel(Base):
     __tablename__ = "session_policies"
     __table_args__ = (UniqueConstraint("session_id", name="uq_session_policy_session"),)
@@ -219,3 +259,80 @@ class SessionOperationModel(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     session: Mapped[SessionModel] = relationship(back_populates="operations")
+
+
+class SchemaMigrationModel(Base):
+    __tablename__ = "schema_migrations"
+
+    name: Mapped[str] = mapped_column(primary_key=True)
+    applied_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class VerifyRunModel(Base):
+    __tablename__ = "verify_runs"
+    __table_args__ = (
+        Index("ix_verify_runs_session_status_created", "session_id", "status", "created_at"),
+        Index("ix_verify_runs_launcher_status", "launcher_id", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=lambda: str(uuid.uuid4()))
+    session_id: Mapped[str] = mapped_column(ForeignKey("sessions.id", ondelete="CASCADE"), index=True)
+    requested_by: Mapped[str] = mapped_column(index=True)
+    launcher_id: Mapped[str | None] = mapped_column(index=True, nullable=True)
+    profile_name: Mapped[str] = mapped_column(index=True)
+    mode: Mapped[str] = mapped_column(index=True)
+    provider: Mapped[str] = mapped_column(index=True, default="command")
+    workdir: Mapped[str] = mapped_column(Text())
+    artifact_dir: Mapped[str] = mapped_column(Text())
+    timeout_seconds: Mapped[int] = mapped_column(Integer(), default=300)
+    command_json: Mapped[str] = mapped_column(Text())
+    status: Mapped[str] = mapped_column(index=True, default="pending")
+    review_required: Mapped[bool] = mapped_column(Boolean(), default=False)
+    summary_text: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    error_text: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    session: Mapped[SessionModel] = relationship(back_populates="verification_runs")
+    artifacts: Mapped[list["VerifyArtifactModel"]] = relationship(
+        back_populates="run",
+        cascade="all, delete-orphan",
+    )
+    review_decisions: Mapped[list["ReviewDecisionModel"]] = relationship(
+        back_populates="run",
+        cascade="all, delete-orphan",
+    )
+
+
+class VerifyArtifactModel(Base):
+    __tablename__ = "verify_artifacts"
+    __table_args__ = (
+        Index("ix_verify_artifacts_run_created", "run_id", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=lambda: str(uuid.uuid4()))
+    run_id: Mapped[str] = mapped_column(ForeignKey("verify_runs.id", ondelete="CASCADE"), index=True)
+    artifact_type: Mapped[str] = mapped_column(index=True)
+    label: Mapped[str] = mapped_column(Text())
+    path: Mapped[str] = mapped_column(Text())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    run: Mapped[VerifyRunModel] = relationship(back_populates="artifacts")
+
+
+class ReviewDecisionModel(Base):
+    __tablename__ = "review_decisions"
+    __table_args__ = (
+        Index("ix_review_decisions_run_created", "run_id", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=lambda: str(uuid.uuid4()))
+    run_id: Mapped[str] = mapped_column(ForeignKey("verify_runs.id", ondelete="CASCADE"), index=True)
+    decision: Mapped[str] = mapped_column(index=True)
+    reviewer: Mapped[str] = mapped_column(index=True)
+    note: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    run: Mapped[VerifyRunModel] = relationship(back_populates="review_decisions")

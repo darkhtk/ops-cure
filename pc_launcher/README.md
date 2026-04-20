@@ -28,9 +28,13 @@ python -m pip install -r requirements.txt
 python launcher.py daemon --projects-dir .\projects
 ```
 
+Ops-Cure now enforces a single launcher instance per `launcher_id` with a lock file under the projects directory.
+For normal use, run it from Windows Task Scheduler `At startup` or `At logon` so the execution plane comes back automatically after reboot.
+
 ## BAT bootstrap
 
 The included `scripts/start_project.bat` starts the launcher daemon without interactive setup.
+It is suitable for Task Scheduler, Start Menu Startup, or a hidden auto-start wrapper.
 
 ## Local development mode
 

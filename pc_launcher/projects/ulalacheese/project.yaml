@@ -59,3 +59,15 @@ finder:
   max_depth: 4
   max_candidates: 8
   analysis_timeout_seconds: 120
+
+verification:
+  enabled: false
+  provider: command
+  artifact_dir: _verification
+  run_timeout_seconds: 300
+  commands: {}
+  capture:
+    screenshots: true
+    video: false
+  review:
+    require_operator_approval: true

@@ -62,6 +62,7 @@ def app_env(tmp_path, monkeypatch):
     import app.session_service as session_service
     import app.services.policy_service as policy_service
     import app.services.recovery_service as recovery_service
+    import app.services.verification_service as verification_service
     import app.transcript_service as transcript_service
     import app.worker_registry as worker_registry
     import app.workflows.pause_workflow as pause_workflow
@@ -93,6 +94,11 @@ def app_env(tmp_path, monkeypatch):
         execution_provider=execution_provider,
         worker_stale_after_seconds=90,
     )
+    verification_svc = verification_service.VerificationService(
+        registry=registry,
+        transcript_service=transcript,
+        thread_manager=thread_manager,
+    )
     start_wf = start_workflow.StartWorkflow(
         session_service=session_svc,
         policy_service=policy_svc,
@@ -123,5 +129,6 @@ def app_env(tmp_path, monkeypatch):
         session_service=session_svc,
         policy_service=policy_svc,
         recovery_service=recovery_svc,
+        verification_service=verification_svc,
         thread_manager=thread_manager,
     )
