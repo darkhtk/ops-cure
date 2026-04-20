@@ -18,6 +18,7 @@ class SessionModel(Base):
 
     id: Mapped[str] = mapped_column(primary_key=True, default=lambda: str(uuid.uuid4()))
     project_name: Mapped[str] = mapped_column(index=True)
+    target_project_name: Mapped[str | None] = mapped_column(index=True, nullable=True)
     preset: Mapped[str | None] = mapped_column(nullable=True)
     power_target_name: Mapped[str | None] = mapped_column(index=True, nullable=True)
     execution_target_name: Mapped[str | None] = mapped_column(index=True, nullable=True)

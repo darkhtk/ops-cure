@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
@@ -33,12 +34,14 @@ class StartWorkflow:
         self,
         *,
         project_name: str,
+        target_project_name: str | None,
         preset: str | None,
         user_id: str,
         guild_id: str,
         parent_channel_id: str,
         workdir_override: str | None = None,
     ) -> SessionSummaryResponse:
+        requested_target = (target_project_name or project_name).strip()
         manifest = None
         selected_preset = preset
         resolve_error: Exception | None = None
@@ -55,6 +58,7 @@ class StartWorkflow:
 
         existing_session_id = self._find_existing_session_id(
             project_name=project_name,
+            target_project_name=requested_target,
             selected_preset=selected_preset,
             guild_id=guild_id,
             parent_channel_id=parent_channel_id,
@@ -77,14 +81,25 @@ class StartWorkflow:
             assert resolve_error is not None
             raise resolve_error
 
+        resolved_target_name, resolved_workdir = await self._resolve_target_workdir(
+            manifest=manifest,
+            selected_preset=selected_preset,
+            requested_target=requested_target,
+            user_id=user_id,
+            guild_id=guild_id,
+            parent_channel_id=parent_channel_id,
+            workdir_override=workdir_override,
+        )
+
         summary = await self.session_service._create_session_with_manifest(
             project_name=project_name,
+            target_project_name=resolved_target_name,
             selected_preset=selected_preset,
             manifest=manifest,
             user_id=user_id,
             guild_id=guild_id,
             parent_channel_id=parent_channel_id,
-            workdir_override=workdir_override,
+            workdir_override=resolved_workdir,
         )
         self._ensure_session_capabilities(
             session_id=summary.id,
@@ -103,6 +118,7 @@ class StartWorkflow:
         self,
         *,
         project_name: str,
+        target_project_name: str,
         selected_preset: str | None,
         guild_id: str,
         parent_channel_id: str,
@@ -111,6 +127,7 @@ class StartWorkflow:
             statement = (
                 select(SessionModel)
                 .where(SessionModel.project_name == project_name)
+                .where(SessionModel.target_project_name == target_project_name)
                 .where(SessionModel.guild_id == guild_id)
                 .where(SessionModel.parent_channel_id == parent_channel_id)
                 .where(SessionModel.closed_at.is_(None))
@@ -122,6 +139,65 @@ class StartWorkflow:
             if session_row is None:
                 return None
             return session_row.id
+
+    async def _resolve_target_workdir(
+        self,
+        *,
+        manifest: ProjectManifest,
+        selected_preset: str,
+        requested_target: str,
+        user_id: str,
+        guild_id: str,
+        parent_channel_id: str,
+        workdir_override: str | None,
+    ) -> tuple[str, str | None]:
+        if workdir_override:
+            return requested_target, workdir_override
+
+        if self._matches_manifest_default_target(manifest, requested_target):
+            return manifest.project_name, manifest.workdir
+
+        if not manifest.finder.roots:
+            raise ValueError(
+                f"Target `{requested_target}` does not match profile `{selected_preset}` and this profile "
+                "does not expose any finder roots for resolution."
+            )
+
+        find_summary = await self.session_service.enqueue_project_find(
+            query_text=requested_target,
+            preset=selected_preset,
+            user_id=user_id,
+            guild_id=guild_id,
+            parent_channel_id=parent_channel_id,
+        )
+        resolved = await self.session_service.wait_for_project_find(find_id=find_summary.id)
+        if resolved is None:
+            raise ValueError(
+                f"Target resolution for `{requested_target}` is still running on the PC launcher. "
+                "Try `/project start` again in a moment."
+            )
+        if resolved.status != "selected" or not resolved.selected_path:
+            reason = resolved.reason or "no matching project path was selected"
+            raise ValueError(
+                f"Ops-Cure could not safely resolve `{requested_target}` with profile `{selected_preset}`: {reason}"
+            )
+        default_workdir = Path(manifest.workdir).resolve()
+        selected_path = Path(resolved.selected_path).resolve()
+        if requested_target.casefold() != manifest.project_name.casefold() and selected_path == default_workdir:
+            raise ValueError(
+                f"Target `{requested_target}` resolved back to the profile default workdir `{manifest.workdir}`. "
+                "Refusing to start because the requested target and profile default still look mismatched."
+            )
+        return resolved.selected_name or requested_target, str(selected_path)
+
+    @staticmethod
+    def _matches_manifest_default_target(manifest: ProjectManifest, requested_target: str) -> bool:
+        normalized = requested_target.casefold()
+        return normalized in {
+            manifest.project_name.casefold(),
+            Path(manifest.workdir).name.casefold(),
+            str(Path(manifest.workdir).resolve()).casefold(),
+        }
 
     def _ensure_session_capabilities(
         self,
@@ -192,7 +268,9 @@ class StartWorkflow:
                     requested_by=requested_by,
                     input_json=json.dumps(
                         {
-                            "preset": manifest.project_name,
+                            "profile": session_row.preset or manifest.project_name,
+                            "session_title": session_row.project_name,
+                            "target_project_name": session_row.target_project_name or session_row.project_name,
                             "workdir": session_row.workdir,
                         },
                         ensure_ascii=False,

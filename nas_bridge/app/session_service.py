@@ -142,6 +142,7 @@ class SessionService:
         self,
         *,
         project_name: str,
+        target_project_name: str | None = None,
         preset: str | None,
         user_id: str,
         guild_id: str,
@@ -151,6 +152,7 @@ class SessionService:
         if self.start_workflow is not None:
             return await self.start_workflow.run(
                 project_name=project_name,
+                target_project_name=target_project_name,
                 preset=preset,
                 user_id=user_id,
                 guild_id=guild_id,
@@ -167,6 +169,7 @@ class SessionService:
 
         return await self._create_session_with_manifest(
             project_name=project_name,
+            target_project_name=target_project_name or project_name,
             selected_preset=selected_preset,
             manifest=manifest,
             user_id=user_id,
@@ -229,6 +232,7 @@ class SessionService:
         self,
         *,
         project_name: str,
+        target_project_name: str,
         selected_preset: str,
         manifest: ProjectManifest,
         user_id: str,
@@ -252,6 +256,7 @@ class SessionService:
         with session_scope() as db:
             session_row = SessionModel(
                 project_name=project_name,
+                target_project_name=target_project_name,
                 preset=selected_preset,
                 discord_thread_id=discord_thread_id,
                 guild_id=manifest.guild_id,
@@ -297,7 +302,8 @@ class SessionService:
                 direction="system",
                 actor="bridge",
                 content=(
-                    f"Session created for project {project_name} using preset {selected_preset}."
+                    f"Session created with title {project_name} targeting {target_project_name} "
+                    f"using preset {selected_preset}."
                     f" Workdir: {resolved_workdir}"
                 ),
             )
@@ -1202,6 +1208,7 @@ class SessionService:
         return SessionLaunchResponse(
             session_id=session_row.id,
             project_name=session_row.project_name,
+            target_project_name=session_row.target_project_name,
             preset=session_row.preset or "",
             workdir=session_row.workdir,
             status=session_row.status,
@@ -1212,6 +1219,7 @@ class SessionService:
         return SessionSummaryResponse(
             id=session_row.id,
             project_name=session_row.project_name,
+            target_project_name=session_row.target_project_name,
             preset=session_row.preset,
             discord_thread_id=session_row.discord_thread_id,
             guild_id=session_row.guild_id,
@@ -1436,7 +1444,9 @@ class SessionService:
             job_type=job.job_type,
             input_text=job.input_text,
             user_id=job.user_id,
-            project_name=session_row.project_name,
+            project_name=session_row.target_project_name or session_row.project_name,
+            session_title=session_row.project_name,
+            target_project_name=session_row.target_project_name,
             preset=session_row.preset,
             session_status=session_row.status,
             session_summary=session_summary,
@@ -1513,7 +1523,8 @@ class SessionService:
 
         lines = [
             "Session overview:",
-            f"- Session name: {session_row.project_name}",
+            f"- Session title: {session_row.project_name}",
+            f"- Target project: {session_row.target_project_name or session_row.project_name}",
             f"- Preset: {session_row.preset or 'unknown'}",
             f"- Status: {session_row.status}",
             f"- Current agent: {current_agent}",

@@ -173,6 +173,7 @@ class SessionOperationResponse(BaseModel):
 class SessionLaunchResponse(BaseModel):
     session_id: str
     project_name: str
+    target_project_name: str | None = None
     preset: str
     workdir: str
     status: str
@@ -215,6 +216,8 @@ class JobPayload(BaseModel):
     input_text: str
     user_id: str
     project_name: str
+    session_title: str | None = None
+    target_project_name: str | None = None
     preset: str | None = None
     session_status: str
     session_summary: str | None = None
@@ -314,6 +317,7 @@ class ProjectFindSummaryResponse(BaseModel):
 class SessionSummaryResponse(BaseModel):
     id: str
     project_name: str
+    target_project_name: str | None = None
     preset: str | None = None
     discord_thread_id: str
     guild_id: str

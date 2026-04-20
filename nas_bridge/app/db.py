@@ -32,6 +32,7 @@ def _run_runtime_migrations() -> None:
         return
     migrations = {
         "sessions": [
+            ("target_project_name", "TEXT"),
             ("power_target_name", "TEXT"),
             ("execution_target_name", "TEXT"),
             ("desired_status", "TEXT NOT NULL DEFAULT 'ready'"),

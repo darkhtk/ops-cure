@@ -25,8 +25,17 @@ def register_commands(
         return await session_service.get_session_summary_by_thread(str(channel.id))
 
     @project_group.command(name="start", description="Start a new project session")
-    @app_commands.describe(name="New session name", preset="Optional worker preset from registered YAML")
-    async def project_start(interaction: discord.Interaction, name: str, preset: str | None = None) -> None:
+    @app_commands.describe(
+        target="Project to open and work on",
+        profile="Optional execution profile from registered YAML",
+        session="Optional Discord thread title override",
+    )
+    async def project_start(
+        interaction: discord.Interaction,
+        target: str,
+        profile: str | None = None,
+        session: str | None = None,
+    ) -> None:
         if interaction.guild_id is None or interaction.channel_id is None:
             await interaction.response.send_message(
                 "Project sessions can only be started from a guild channel.",
@@ -37,8 +46,9 @@ def register_commands(
         await interaction.response.defer(ephemeral=True, thinking=True)
         try:
             summary = await session_service.create_session_from_project(
-                project_name=name,
-                preset=preset,
+                project_name=session or target,
+                target_project_name=target,
+                preset=profile,
                 user_id=str(interaction.user.id),
                 guild_id=str(interaction.guild_id),
                 parent_channel_id=str(interaction.channel_id),
@@ -88,6 +98,7 @@ def register_commands(
             try:
                 summary = await session_service.create_session_from_project(
                     project_name=session_name,
+                    target_project_name=resolved.selected_name or query.strip() or session_name,
                     preset=resolved.preset,
                     user_id=str(interaction.user.id),
                     guild_id=str(interaction.guild_id),
@@ -163,8 +174,10 @@ def register_commands(
         await interaction.followup.send(
             (
                 f"Session `{session_summary.id}`\n"
-                f"Project: `{session_summary.project_name}`\n"
+                f"Session title: `{session_summary.project_name}`\n"
+                f"Target project: `{session_summary.target_project_name or session_summary.project_name}`\n"
                 f"Preset: `{session_summary.preset or 'unknown'}`\n"
+                f"Workdir: `{session_summary.workdir}`\n"
                 f"Status: `{session_summary.status}` (desired `{session_summary.desired_status}`)\n"
                 f"Launcher: `{session_summary.launcher_id or 'unclaimed'}`\n"
                 f"Power: {power_line}\n"

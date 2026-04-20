@@ -28,10 +28,21 @@ def build_manifest(schemas, *, project_name: str = "UlalaCheese"):
                 default=True,
             ),
         ],
+        finder=schemas.FinderManifest(
+            roots=[r"C:\Users\darkh\Projects"],
+            analyze_agent="planner",
+            prompt_file="prompts/finder.md",
+        ),
     )
 
 
-async def _start_session(app_env, *, name: str = "UlalaCheese", register_launcher: bool = True):
+async def _start_session(
+    app_env,
+    *,
+    name: str = "UlalaCheese",
+    target: str | None = None,
+    register_launcher: bool = True,
+):
     manifest = build_manifest(app_env.schemas, project_name="UlalaCheese")
     if register_launcher:
         app_env.registry.register_projects(
@@ -41,6 +52,7 @@ async def _start_session(app_env, *, name: str = "UlalaCheese", register_launche
         )
     summary = await app_env.session_service.create_session_from_project(
         project_name=name,
+        target_project_name=target or name,
         preset="UlalaCheese",
         user_id="user-1",
         guild_id="guild-1",
@@ -53,6 +65,7 @@ def test_start_workflow_creates_targets_and_policy(app_env):
     summary = __import__("asyncio").run(_start_session(app_env))
 
     assert summary.status == "waiting_for_workers"
+    assert summary.target_project_name == "UlalaCheese"
     assert summary.power_target is not None
     assert summary.execution_target is not None
     assert summary.policy is not None
@@ -151,3 +164,56 @@ def test_recovery_service_handles_naive_heartbeat_timestamps(app_env):
         )
         assert refreshed is not None
         assert refreshed.worker_id is None
+
+
+def test_start_prefers_requested_target_over_profile_default(app_env, monkeypatch):
+    manifest = build_manifest(app_env.schemas, project_name="UlalaCheese")
+    app_env.registry.register_projects("launcher-1", "host-1", [manifest])
+
+    async def fake_enqueue_project_find(**kwargs):
+        del kwargs
+        return app_env.schemas.ProjectFindSummaryResponse(
+            id="find-1",
+            preset="UlalaCheese",
+            query_text="GenWorld",
+            status="pending",
+            requested_by="user-1",
+            guild_id="guild-1",
+            parent_channel_id="parent-1",
+            created_at=datetime.now(timezone.utc),
+        )
+
+    async def fake_wait_for_project_find(*, find_id: str, **kwargs):
+        del find_id, kwargs
+        return app_env.schemas.ProjectFindSummaryResponse(
+            id="find-1",
+            preset="UlalaCheese",
+            query_text="GenWorld",
+            status="selected",
+            requested_by="user-1",
+            guild_id="guild-1",
+            parent_channel_id="parent-1",
+            selected_path=r"C:\Users\darkh\Projects\GenWorld",
+            selected_name="GenWorld",
+            reason="Exact folder match",
+            confidence=0.99,
+            created_at=datetime.now(timezone.utc),
+        )
+
+    monkeypatch.setattr(app_env.session_service, "enqueue_project_find", fake_enqueue_project_find)
+    monkeypatch.setattr(app_env.session_service, "wait_for_project_find", fake_wait_for_project_find)
+
+    summary = __import__("asyncio").run(
+        app_env.session_service.create_session_from_project(
+            project_name="GenWorld session",
+            target_project_name="GenWorld",
+            preset="UlalaCheese",
+            user_id="user-1",
+            guild_id="guild-1",
+            parent_channel_id="parent-1",
+        ),
+    )
+
+    assert summary.project_name == "GenWorld session"
+    assert summary.target_project_name == "GenWorld"
+    assert summary.workdir == r"C:\Users\darkh\Projects\GenWorld"
