@@ -134,22 +134,16 @@ class ProjectFinder:
         roots = [Path(root).resolve() for root in self.finder.roots]
         exclude = {name.lower() for name in self.finder.exclude_dirs}
         candidates: list[CandidateSummary] = []
-        walked = 0
 
         for root in roots:
             if not root.exists() or not root.is_dir():
                 continue
 
-            for directory in self._walk_directories(root=root, max_depth=self.finder.max_depth, exclude=exclude):
-                walked += 1
-                if walked > MAX_WALKED_DIRECTORIES:
-                    break
+            for directory in self._list_top_level_directories(root=root, exclude=exclude):
                 candidate = self._build_candidate(directory=directory, query_tokens=query_tokens)
                 if candidate is None:
                     continue
                 candidates.append(candidate)
-            if walked > MAX_WALKED_DIRECTORIES:
-                break
 
         candidates.sort(key=lambda item: (-item.heuristic_score, item.display_name.lower(), str(item.path).lower()))
         deduped: list[CandidateSummary] = []
@@ -164,29 +158,25 @@ class ProjectFinder:
                 break
         return deduped
 
-    def _walk_directories(self, *, root: Path, max_depth: int, exclude: set[str]) -> list[Path]:
+    def _list_top_level_directories(self, *, root: Path, exclude: set[str]) -> list[Path]:
+        try:
+            children = sorted(
+                [child for child in root.iterdir() if child.is_dir()],
+                key=lambda path: path.name.lower(),
+            )
+        except OSError:
+            return []
+
         results: list[Path] = []
-        stack: list[tuple[Path, int]] = [(root, 0)]
-        while stack:
-            current, depth = stack.pop()
-            results.append(current)
-            if depth >= max_depth:
+        for child in children:
+            lowered = child.name.lower()
+            if lowered in exclude:
                 continue
-            try:
-                children = sorted(
-                    [child for child in current.iterdir() if child.is_dir()],
-                    key=lambda path: path.name.lower(),
-                    reverse=True,
-                )
-            except OSError:
+            if lowered.startswith(".") and lowered not in {".config", ".github"}:
                 continue
-            for child in children:
-                lowered = child.name.lower()
-                if lowered in exclude:
-                    continue
-                if lowered.startswith(".") and lowered not in {".config", ".github"}:
-                    continue
-                stack.append((child, depth + 1))
+            results.append(child)
+            if len(results) >= MAX_WALKED_DIRECTORIES:
+                break
         return results
 
     def _build_candidate(self, *, directory: Path, query_tokens: list[str]) -> CandidateSummary | None:

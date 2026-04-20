@@ -1,7 +1,7 @@
-profile_name: UlalaCheese
-default_target_name: UlalaCheese
+profile_name: sample
+default_target_name: sample
 # Default target project directory for this execution profile.
-default_workdir: C:\Users\darkh\Projects\UlalaCheese
+default_workdir: C:\Users\darkh\Projects\
 guild_id: "1494848853441253416"
 parent_channel_id: "1494851246480298125"
 allowed_user_ids:
@@ -53,10 +53,9 @@ artifacts:
 finder:
   roots:
     - C:\Users\darkh\Projects
-    - C:\sourcetree
   analyze_agent: planner
   prompt_file: prompts/finder.md
-  max_depth: 4
+  max_depth: 1
   max_candidates: 8
   analysis_timeout_seconds: 120
 
