@@ -30,6 +30,14 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def ensure_aware_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 class RecoveryService:
     def __init__(
         self,
@@ -165,12 +173,13 @@ class RecoveryService:
     def _clear_stale_workers(self, agents: list[AgentModel]) -> None:
         now = utcnow()
         for agent in agents:
-            if agent.last_heartbeat_at is None:
+            heartbeat_at = ensure_aware_utc(agent.last_heartbeat_at)
+            if heartbeat_at is None:
                 agent.worker_id = None
                 if agent.status != "busy":
                     agent.status = "starting"
                 continue
-            if agent.last_heartbeat_at + self.worker_stale_after < now:
+            if heartbeat_at + self.worker_stale_after < now:
                 agent.worker_id = None
                 agent.pid_hint = None
                 if agent.status != "busy":

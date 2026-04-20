@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 from sqlalchemy import select
 
 
@@ -115,3 +117,37 @@ def test_start_reuses_existing_session_when_launcher_is_offline(app_env):
     )
     assert reused_summary.id == first_summary.id
     assert reused_summary.status in {"awaiting_launcher", "waking_execution_plane"}
+
+
+def test_recovery_service_handles_naive_heartbeat_timestamps(app_env):
+    summary = __import__("asyncio").run(_start_session(app_env))
+
+    with app_env.db.session_scope() as db:
+        from app.models import AgentModel
+
+        agent = db.scalar(
+            select(AgentModel)
+            .where(AgentModel.session_id == summary.id)
+            .where(AgentModel.agent_name == "planner"),
+        )
+        assert agent is not None
+        agent.worker_id = "worker-1"
+        agent.last_heartbeat_at = (datetime.now(timezone.utc) - timedelta(minutes=10)).replace(tzinfo=None)
+
+    __import__("asyncio").run(
+        app_env.recovery_service.recover_session(
+            session_id=summary.id,
+            reason="naive-heartbeat-test",
+        ),
+    )
+
+    with app_env.db.session_scope() as db:
+        from app.models import AgentModel
+
+        refreshed = db.scalar(
+            select(AgentModel)
+            .where(AgentModel.session_id == summary.id)
+            .where(AgentModel.agent_name == "planner"),
+        )
+        assert refreshed is not None
+        assert refreshed.worker_id is None
