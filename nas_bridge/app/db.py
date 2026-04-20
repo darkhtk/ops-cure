@@ -118,6 +118,17 @@ def _named_migrations(connection) -> tuple[NamedMigration, ...]:
                 ],
             ),
         ),
+        NamedMigration(
+            name="20260420_session_announcement_fields",
+            statements=missing_columns(
+                "sessions",
+                [
+                    ("status_message_id", "TEXT"),
+                    ("last_announced_state_hash", "TEXT"),
+                    ("last_announced_at", "DATETIME"),
+                ],
+            ),
+        ),
     )
 
 
