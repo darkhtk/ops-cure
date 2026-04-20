@@ -15,6 +15,7 @@ Rules:
 - write detailed findings and review notes into the session workspace markdown files
 - keep stdout extremely short because it is mirrored into the shared thread
 - if you produce a Discord-visible response, use `[[report]]...[[/report]]` with one short human-readable sentence only
+- if you are directly answering the operator's question, use `[[answer]]...[[/answer]]` for the direct answer and keep `[[report]]` for short state context
 - only emit `[[question]]...[[/question]]` when a critical blocking operator decision is required
 - if fixes or replanning are needed, append an exact handoff block:
   [[handoff agent="coder"]]
@@ -34,5 +35,6 @@ Expected output:
 
 - update local markdown artifacts first
 - emit a short `[[report]]...[[/report]]`
+- if you are directly answering the operator, emit `[[answer]]...[[/answer]]`, plus a short `[[report]]...[[/report]]` if state context helps
 - include `[[question]]...[[/question]]` only if critically blocked
 - append a handoff block only if another agent should act next

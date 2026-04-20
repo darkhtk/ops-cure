@@ -12,6 +12,7 @@ except ImportError:  # pragma: no cover - script mode support
     from config_loader import ArtifactConfig
 
 REPORT_BLOCK_RE = re.compile(r"\[\[report\]\]\s*(?P<body>.*?)\s*\[\[/report\]\]", re.IGNORECASE | re.DOTALL)
+ANSWER_BLOCK_RE = re.compile(r"\[\[answer\]\]\s*(?P<body>.*?)\s*\[\[/answer\]\]", re.IGNORECASE | re.DOTALL)
 QUESTION_BLOCK_RE = re.compile(r"\[\[question\]\]\s*(?P<body>.*?)\s*\[\[/question\]\]", re.IGNORECASE | re.DOTALL)
 HANDOFF_BLOCK_RE = re.compile(
     r"\[\[handoff\s+agent=(?P<quote>['\"]?)(?P<agent>[A-Za-z0-9_-]+)(?P=quote)\s*\]\]\s*"
@@ -19,7 +20,7 @@ HANDOFF_BLOCK_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 CONTROL_BLOCKS_RE = re.compile(
-    r"\[\[(?:report|question)\]\].*?\[\[/(?:report|question)\]\]",
+    r"\[\[(?:report|answer|question)\]\].*?\[\[/(?:report|answer|question)\]\]",
     re.IGNORECASE | re.DOTALL,
 )
 TASK_ID_RE = re.compile(r"\b(T-\d{3})\b", re.IGNORECASE)
@@ -79,6 +80,7 @@ class HandoffSpec:
 class ParsedCliOutput:
     raw_output: str
     report_blocks: list[str]
+    answer_blocks: list[str]
     question_blocks: list[str]
     handoffs: list[HandoffSpec]
     fallback_summary: str
@@ -525,7 +527,12 @@ class SessionWorkspace:
 
         current_task_id = self._extract_task_id(user_text) or self._current_task_id_from_file()
         updated_files: list[Path] = [raw_log_path]
-        report_text = parsed.report_blocks[-1] if parsed.report_blocks else parsed.fallback_summary
+        answer_text = parsed.answer_blocks[-1] if parsed.answer_blocks else None
+        report_text = (
+            parsed.report_blocks[-1]
+            if parsed.report_blocks
+            else answer_text or parsed.fallback_summary
+        )
 
         handoffs, handoff_files = self._materialize_handoffs(
             source_agent=agent_name,
@@ -659,6 +666,7 @@ class SessionWorkspace:
                 agent_name=agent_name,
                 task_id=current_task_id,
                 report_text=report_text,
+                answer_text=answer_text,
                 question_blocks=parsed.question_blocks,
                 handoffs=handoffs if preserve_handoffs else [],
                 updated_files=updated_files,
@@ -799,6 +807,7 @@ class SessionWorkspace:
     def _parse_cli_output(self, raw_output: str) -> ParsedCliOutput:
         normalized = raw_output.strip()
         reports = [match.group("body").strip() for match in REPORT_BLOCK_RE.finditer(normalized) if match.group("body").strip()]
+        answers = [match.group("body").strip() for match in ANSWER_BLOCK_RE.finditer(normalized) if match.group("body").strip()]
         questions = [match.group("body").strip() for match in QUESTION_BLOCK_RE.finditer(normalized) if match.group("body").strip()]
         handoffs: list[HandoffSpec] = []
         for match in HANDOFF_BLOCK_RE.finditer(normalized):
@@ -815,10 +824,16 @@ class SessionWorkspace:
             )
         without_controls = CONTROL_BLOCKS_RE.sub("", normalized)
         without_handoffs = HANDOFF_BLOCK_RE.sub("", without_controls)
-        fallback = trim_text(without_handoffs.strip() or normalized or "(no output)")
+        visible_fallback = without_handoffs.strip()
+        if not visible_fallback and answers:
+            visible_fallback = answers[-1]
+        elif not visible_fallback and reports:
+            visible_fallback = reports[-1]
+        fallback = trim_text(visible_fallback or normalized or "(no output)")
         return ParsedCliOutput(
             raw_output=normalized,
             report_blocks=reports,
+            answer_blocks=answers,
             question_blocks=questions,
             handoffs=handoffs,
             fallback_summary=fallback,
@@ -840,12 +855,14 @@ class SessionWorkspace:
         agent_name: str,
         task_id: str | None,
         report_text: str,
+        answer_text: str | None,
         question_blocks: list[str],
         handoffs: list[HandoffSpec],
         updated_files: list[Path],
     ) -> str:
         del updated_files
         human_text = self._compose_human_summary(report_text)
+        answer_summary = self._compose_answer_summary(answer_text)
         if question_blocks:
             read_pointer = self._compose_read_pointer(
                 task_id=task_id,
@@ -872,7 +889,24 @@ class SessionWorkspace:
                 )
                 for handoff in handoffs
             ]
-            return "\n".join([*ops_lines, f"HUMAN: {human_text}"])
+            lines = [*ops_lines]
+            if answer_summary:
+                lines.append(f"ANSWER: {answer_summary}")
+            lines.append(f"HUMAN: {human_text}")
+            return "\n".join(lines)
+
+        if answer_summary:
+            read_pointer = self._compose_read_pointer(task_id=task_id, extra_paths=[self.state_file, self.report_file])
+            return "\n".join(
+                [
+                    (
+                        f"OPS: type=answer | actor={agent_name} | task={task_id or 'none'} | "
+                        f"state=answered | read={read_pointer}"
+                    ),
+                    f"ANSWER: {answer_summary}",
+                    f"HUMAN: {human_text}",
+                ],
+            )
 
         read_pointer = self._compose_read_pointer(task_id=task_id, extra_paths=[self.state_file, self.report_file])
         done_line = f"DONE: task={task_id}" if task_id else "DONE: state=idle"
@@ -889,6 +923,15 @@ class SessionWorkspace:
 
     def _compose_human_summary(self, report_text: str) -> str:
         normalized = " ".join((report_text or "(no update)").split()) or "(no update)"
+        limit = 420 if not self.quiet_discord else 220
+        return trim_thread_text(normalized, limit)
+
+    def _compose_answer_summary(self, answer_text: str | None) -> str | None:
+        if not answer_text:
+            return None
+        normalized = " ".join(answer_text.split()).strip()
+        if not normalized:
+            return None
         limit = 420 if not self.quiet_discord else 220
         return trim_thread_text(normalized, limit)
 
@@ -966,6 +1009,7 @@ class SessionWorkspace:
             "- `CURRENT_STATE.md` remains the single-source summary for the operator.\n\n"
             "## Required stdout blocks\n\n"
             "[[report]]\nOne short human-readable sentence.\n[[/report]]\n\n"
+            "[[answer]]\nDirect answer to the operator's question.\n[[/answer]]\n\n"
             "[[question]]\nOnly if a critical blocking decision is needed.\n[[/question]]\n\n"
             "[[handoff agent=\"coder\"]]\n"
             "T-002\n"
@@ -980,6 +1024,8 @@ class SessionWorkspace:
             "- Every thread event should contain at least one `OPS:` line and one `HUMAN:` line.\n"
             "- `OPS:` is the async event bus line for agents and the bridge. Keep it terse and structured.\n"
             "- `HUMAN:` is a short sentence for operator observability.\n"
+            "- `ANSWER:` is used when an agent directly answers the operator's question.\n"
+            "- Emit `[[answer]]...[[/answer]]` when the primary thread-visible output should be a direct answer.\n"
             "- Use `ISSUE:` only when blocked or failed, and `DONE:` when work completes without a handoff.\n\n"
             "## Key files\n\n"
             "- `CURRENT_STATE.md`: single-source summary of status, blocker, and next action.\n"

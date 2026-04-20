@@ -80,6 +80,32 @@ def test_record_cli_failure_emits_async_bus_protocol(tmp_path):
     assert "ISSUE: planner_recovery_expected" in message
 
 
+def test_record_cli_result_emits_answer_line_for_direct_operator_reply(tmp_path):
+    project_root = tmp_path / "GenWorld"
+    project_root.mkdir(parents=True, exist_ok=True)
+    workspace = SessionWorkspace.create(
+        project_workdir=project_root,
+        artifacts=ArtifactConfig(sessions_dir="_discord_sessions", quiet_discord=True),
+        session_name="GenWorld",
+        session_id="session-12345678",
+        agent_names=["planner", "coder", "reviewer"],
+    )
+
+    payload = workspace.record_cli_result(
+        agent_name="planner",
+        job_type="message",
+        user_text="worker 상태 어때?",
+        raw_output=(
+            "[[answer]]지금 worker 3개가 모두 붙어 있고 planner가 첫 routing 작업을 처리 중이다.[[/answer]]\n"
+            "[[report]]GenWorld 세션이 정상 시작됐고 에이전트들이 준비된 상태다.[[/report]]"
+        ),
+    )
+
+    assert "OPS: type=answer" in payload.thread_text
+    assert "ANSWER: 지금 worker 3개가 모두 붙어 있고 planner가 첫 routing 작업을 처리 중이다." in payload.thread_text
+    assert "HUMAN: GenWorld 세션이 정상 시작됐고 에이전트들이 준비된 상태다." in payload.thread_text
+
+
 def test_reconcile_from_bridge_summary_clears_stale_handoff_state(tmp_path):
     project_root = tmp_path / "GenWorld"
     project_root.mkdir(parents=True, exist_ok=True)

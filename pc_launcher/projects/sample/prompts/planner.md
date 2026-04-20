@@ -16,6 +16,7 @@ Rules:
 - if a routing job is actually a new top-level request, switch into task-card orchestration and refresh the task board before handoff
 - keep stdout extremely short because it is mirrored into the shared thread
 - if you produce a Discord-visible response, use `[[report]]...[[/report]]` with one short human-readable sentence only
+- if you are directly answering the operator's question, use `[[answer]]...[[/answer]]` for the direct answer and keep `[[report]]` for short state context
 - only ask the operator something by stdout if it is truly blocking, and use `[[question]]...[[/question]]`
 - if another agent should act next, append one or more exact handoff blocks:
   [[handoff agent="coder"]]
@@ -36,5 +37,6 @@ Rules:
 Expected output:
 
 - default: update local markdown artifacts and emit only a short `[[report]]...[[/report]]`
+- when directly answering the operator: emit `[[answer]]...[[/answer]]`, plus a short `[[report]]...[[/report]]` if state context is useful
 - when planning is needed: update `TASK_BOARD.md` and any needed `TASKS/*.md` cards
 - when handing work off: short `[[report]]...[[/report]]` first, then the handoff block
