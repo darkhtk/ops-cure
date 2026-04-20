@@ -14,13 +14,17 @@ except ImportError:  # pragma: no cover - script mode support
 REPORT_BLOCK_RE = re.compile(r"\[\[report\]\]\s*(?P<body>.*?)\s*\[\[/report\]\]", re.IGNORECASE | re.DOTALL)
 ANSWER_BLOCK_RE = re.compile(r"\[\[answer\]\]\s*(?P<body>.*?)\s*\[\[/answer\]\]", re.IGNORECASE | re.DOTALL)
 QUESTION_BLOCK_RE = re.compile(r"\[\[question\]\]\s*(?P<body>.*?)\s*\[\[/question\]\]", re.IGNORECASE | re.DOTALL)
+DISCUSS_BLOCK_RE = re.compile(
+    r"\[\[discuss(?P<attrs>[^\]]*)\]\]\s*(?P<body>.*?)\s*\[\[/discuss\]\]",
+    re.IGNORECASE | re.DOTALL,
+)
 HANDOFF_BLOCK_RE = re.compile(
     r"\[\[handoff\s+agent=(?P<quote>['\"]?)(?P<agent>[A-Za-z0-9_-]+)(?P=quote)\s*\]\]\s*"
     r"(?P<body>.*?)\s*\[\[/handoff\]\]",
     re.IGNORECASE | re.DOTALL,
 )
 CONTROL_BLOCKS_RE = re.compile(
-    r"\[\[(?:report|answer|question)\]\].*?\[\[/(?:report|answer|question)\]\]",
+    r"\[\[(?:report|answer|question|discuss)(?:[^\]]*)\]\].*?\[\[/(?:report|answer|question|discuss)\]\]",
     re.IGNORECASE | re.DOTALL,
 )
 TASK_ID_RE = re.compile(r"\b(T-\d{3})\b", re.IGNORECASE)
@@ -77,11 +81,22 @@ class HandoffSpec:
 
 
 @dataclass(slots=True)
+class DiscussSpec:
+    discuss_type: str
+    body: str
+    task_id: str | None = None
+    anomaly_id: str | None = None
+    ask_agents: list[str] | None = None
+    to_agent: str | None = None
+
+
+@dataclass(slots=True)
 class ParsedCliOutput:
     raw_output: str
     report_blocks: list[str]
     answer_blocks: list[str]
     question_blocks: list[str]
+    discuss_blocks: list[DiscussSpec]
     handoffs: list[HandoffSpec]
     fallback_summary: str
 
@@ -528,10 +543,11 @@ class SessionWorkspace:
         current_task_id = self._extract_task_id(user_text) or self._current_task_id_from_file()
         updated_files: list[Path] = [raw_log_path]
         answer_text = parsed.answer_blocks[-1] if parsed.answer_blocks else None
+        discuss_text = parsed.discuss_blocks[-1].body if parsed.discuss_blocks else None
         report_text = (
             parsed.report_blocks[-1]
             if parsed.report_blocks
-            else answer_text or parsed.fallback_summary
+            else answer_text or discuss_text or parsed.fallback_summary
         )
 
         handoffs, handoff_files = self._materialize_handoffs(
@@ -668,6 +684,7 @@ class SessionWorkspace:
                 report_text=report_text,
                 answer_text=answer_text,
                 question_blocks=parsed.question_blocks,
+                discuss_blocks=parsed.discuss_blocks,
                 handoffs=handoffs if preserve_handoffs else [],
                 updated_files=updated_files,
             ),
@@ -809,6 +826,27 @@ class SessionWorkspace:
         reports = [match.group("body").strip() for match in REPORT_BLOCK_RE.finditer(normalized) if match.group("body").strip()]
         answers = [match.group("body").strip() for match in ANSWER_BLOCK_RE.finditer(normalized) if match.group("body").strip()]
         questions = [match.group("body").strip() for match in QUESTION_BLOCK_RE.finditer(normalized) if match.group("body").strip()]
+        discusses: list[DiscussSpec] = []
+        for match in DISCUSS_BLOCK_RE.finditer(normalized):
+            body = match.group("body").strip()
+            if not body:
+                continue
+            attrs = self._parse_discuss_attrs(match.group("attrs") or "")
+            discuss_type = (attrs.get("type") or "open").strip().lower()
+            ask_raw = (attrs.get("ask") or attrs.get("with") or "").strip()
+            ask_agents = [item.strip() for item in ask_raw.split(",") if item.strip()] or None
+            to_agent = (attrs.get("to") or "").strip() or None
+            anomaly_id = (attrs.get("anomaly") or attrs.get("id") or "").strip() or None
+            discusses.append(
+                DiscussSpec(
+                    discuss_type=discuss_type,
+                    body=body,
+                    task_id=self._extract_task_id(body),
+                    anomaly_id=anomaly_id,
+                    ask_agents=ask_agents,
+                    to_agent=to_agent,
+                ),
+            )
         handoffs: list[HandoffSpec] = []
         for match in HANDOFF_BLOCK_RE.finditer(normalized):
             body = match.group("body").strip()
@@ -824,9 +862,12 @@ class SessionWorkspace:
             )
         without_controls = CONTROL_BLOCKS_RE.sub("", normalized)
         without_handoffs = HANDOFF_BLOCK_RE.sub("", without_controls)
-        visible_fallback = without_handoffs.strip()
+        without_discuss = DISCUSS_BLOCK_RE.sub("", without_handoffs)
+        visible_fallback = without_discuss.strip()
         if not visible_fallback and answers:
             visible_fallback = answers[-1]
+        elif not visible_fallback and discusses:
+            visible_fallback = discusses[-1].body
         elif not visible_fallback and reports:
             visible_fallback = reports[-1]
         fallback = trim_text(visible_fallback or normalized or "(no output)")
@@ -835,6 +876,7 @@ class SessionWorkspace:
             report_blocks=reports,
             answer_blocks=answers,
             question_blocks=questions,
+            discuss_blocks=discusses,
             handoffs=handoffs,
             fallback_summary=fallback,
         )
@@ -857,12 +899,18 @@ class SessionWorkspace:
         report_text: str,
         answer_text: str | None,
         question_blocks: list[str],
+        discuss_blocks: list[DiscussSpec],
         handoffs: list[HandoffSpec],
         updated_files: list[Path],
     ) -> str:
         del updated_files
         human_text = self._compose_human_summary(report_text)
         answer_summary = self._compose_answer_summary(answer_text)
+        discuss_lines = self._compose_discuss_lines(
+            agent_name=agent_name,
+            task_id=task_id,
+            discuss_blocks=discuss_blocks,
+        )
         if question_blocks:
             read_pointer = self._compose_read_pointer(
                 task_id=task_id,
@@ -879,6 +927,13 @@ class SessionWorkspace:
                     f"ISSUE: {issue_text}",
                 ],
             )
+
+        if discuss_lines:
+            lines = [*discuss_lines]
+            if answer_summary:
+                lines.append(f"ANSWER: {answer_summary}")
+            lines.append(f"HUMAN: {human_text}")
+            return "\n".join(lines)
 
         if handoffs:
             ops_lines = [
@@ -921,6 +976,41 @@ class SessionWorkspace:
             ],
         )
 
+    def _compose_discuss_lines(
+        self,
+        *,
+        agent_name: str,
+        task_id: str | None,
+        discuss_blocks: list[DiscussSpec],
+    ) -> list[str]:
+        lines: list[str] = []
+        for discuss in discuss_blocks:
+            effective_task_id = discuss.task_id or task_id
+            read_pointer = self._compose_read_pointer(
+                task_id=effective_task_id,
+                extra_paths=[self.state_file, self.task_file(effective_task_id)] if effective_task_id else [self.state_file],
+            )
+            anomaly = discuss.anomaly_id or "none"
+            if discuss.discuss_type == "open":
+                ask = ",".join(discuss.ask_agents or []) or "none"
+                lines.append(
+                    f"OPS: type=discuss_open | anomaly={anomaly} | actor={agent_name} | ask={ask} | read={read_pointer}"
+                )
+            elif discuss.discuss_type == "reply":
+                target = discuss.to_agent or "none"
+                lines.append(
+                    f"OPS: type=discuss_reply | anomaly={anomaly} | actor={agent_name} | to={target} | read={read_pointer}"
+                )
+            elif discuss.discuss_type == "resolve":
+                lines.append(
+                    f"OPS: type=discuss_resolve | anomaly={anomaly} | actor={agent_name} | read={read_pointer}"
+                )
+            elif discuss.discuss_type == "escalate":
+                lines.append(
+                    f"OPS: type=discuss_escalate | anomaly={anomaly} | actor={agent_name} | read={read_pointer}"
+                )
+        return lines
+
     def _compose_human_summary(self, report_text: str) -> str:
         normalized = " ".join((report_text or "(no update)").split()) or "(no update)"
         limit = 420 if not self.quiet_discord else 220
@@ -934,6 +1024,12 @@ class SessionWorkspace:
             return None
         limit = 420 if not self.quiet_discord else 220
         return trim_thread_text(normalized, limit)
+
+    def _parse_discuss_attrs(self, attrs_text: str) -> dict[str, str]:
+        attrs: dict[str, str] = {}
+        for match in re.finditer(r"([A-Za-z_][A-Za-z0-9_-]*)\s*=\s*(['\"])(.*?)\2", attrs_text):
+            attrs[match.group(1).strip().lower()] = match.group(3).strip()
+        return attrs
 
     def _compose_read_pointer(
         self,

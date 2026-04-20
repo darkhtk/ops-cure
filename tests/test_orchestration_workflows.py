@@ -624,6 +624,100 @@ def test_bridge_queues_handoff_from_control_payload_while_posting_thread_payload
     assert coder_job.input_text.startswith("T-002\n")
 
 
+def test_bridge_queues_discussion_jobs_from_control_payload(app_env):
+    summary = __import__("asyncio").run(_start_session(app_env))
+
+    __import__("asyncio").run(
+        app_env.session_service.register_worker(
+            session_id=summary.id,
+            agent_name="planner",
+            worker_id="worker-planner",
+            pid_hint=1001,
+        ),
+    )
+    __import__("asyncio").run(
+        app_env.session_service.register_worker(
+            session_id=summary.id,
+            agent_name="coder",
+            worker_id="worker-coder",
+            pid_hint=1002,
+        ),
+    )
+
+    from app.models import JobModel
+
+    with app_env.db.session_scope() as db:
+        db.add(
+            JobModel(
+                session_id=summary.id,
+                agent_name="reviewer",
+                job_type="message",
+                user_id="user-1",
+                input_text="inspect the stale state",
+            ),
+        )
+        job = JobModel(
+            session_id=summary.id,
+            agent_name="planner",
+            job_type="discussion",
+            user_id="user-1",
+            input_text="open anomaly discussion",
+        )
+        db.add(job)
+        db.flush()
+        job_id = job.id
+
+    claimed = __import__("asyncio").run(
+        app_env.session_service.claim_next_job(
+            session_id=summary.id,
+            agent_name="planner",
+            worker_id="worker-planner",
+        ),
+    )
+    assert claimed is not None
+    assert claimed.id == job_id
+
+    raw_output = (
+        "[[discuss type=\"open\" ask=\"coder\" anomaly=\"A-001\"]]\n"
+        "Task state and board disagree. Inspect CURRENT_TASK.md, TASK_BOARD.md, and failed task roll-up.\n"
+        "[[/discuss]]\n"
+        "[[report]]planner started a short anomaly discussion.[[/report]]"
+    )
+    thread_output = (
+        "OPS: type=discuss_open | anomaly=A-001 | actor=planner | ask=coder | "
+        "read=CURRENT_STATE.md,TASKS/T-021.md\n"
+        "HUMAN: planner started a short anomaly discussion."
+    )
+
+    __import__("asyncio").run(
+        app_env.session_service.complete_job(
+            job_id=job_id,
+            session_id=summary.id,
+            agent_name="planner",
+            worker_id="worker-planner",
+            output_text=raw_output,
+            thread_output_text=thread_output,
+            pid_hint=1001,
+        ),
+    )
+
+    _, posted = app_env.thread_manager.messages[-1]
+    assert posted == thread_output
+
+    coder_job = __import__("asyncio").run(
+        app_env.session_service.claim_next_job(
+            session_id=summary.id,
+            agent_name="coder",
+            worker_id="worker-coder",
+        ),
+    )
+
+    assert coder_job is not None
+    assert coder_job.job_type == "discussion"
+    assert "Discussion requested by `planner` for anomaly `A-001`." in coder_job.input_text
+    assert "[[discuss type=\"reply\" to=\"planner\" anomaly=\"A-001\"]]" in coder_job.input_text
+
+
 def test_start_workflow_keeps_windows_paths_stable_for_nas_bridge(app_env):
     manifest = build_manifest_for_profile(app_env.schemas, profile_name="sample", project_name="SampleProject")
     workflow = app_env.session_service.start_workflow

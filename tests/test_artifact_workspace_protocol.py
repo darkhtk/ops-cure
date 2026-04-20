@@ -244,3 +244,33 @@ def test_record_cli_result_thread_summary_uses_explicit_truncation_marker(tmp_pa
     assert "HUMAN:" in payload.thread_text
     assert "..." not in payload.thread_text
     assert "[truncated]" in payload.thread_text
+
+
+def test_record_cli_result_emits_discuss_open_event_lines(tmp_path):
+    project_root = tmp_path / "GenWorld"
+    project_root.mkdir(parents=True, exist_ok=True)
+    workspace = SessionWorkspace.create(
+        project_workdir=project_root,
+        artifacts=ArtifactConfig(sessions_dir="_discord_sessions", quiet_discord=True),
+        session_name="GenWorld",
+        session_id="session-12345678",
+        agent_names=["planner", "coder", "reviewer"],
+    )
+
+    payload = workspace.record_cli_result(
+        agent_name="planner",
+        job_type="discussion",
+        user_text="T-021 inspect the anomaly",
+        raw_output=(
+            "[[discuss type=\"open\" ask=\"reviewer,coder\" anomaly=\"A-001\"]]"
+            "Task state and board disagree. Check CURRENT_TASK.md, TASK_BOARD.md, and failed task roll-up."
+            "[[/discuss]]\n"
+            "[[report]]planner started a short anomaly discussion.[[/report]]"
+        ),
+    )
+
+    assert "[[discuss type=\"open\"" in payload.control_text
+    assert "OPS: type=discuss_open" in payload.thread_text
+    assert "anomaly=A-001" in payload.thread_text
+    assert "ask=reviewer,coder" in payload.thread_text
+    assert "HUMAN: planner started a short anomaly discussion." in payload.thread_text

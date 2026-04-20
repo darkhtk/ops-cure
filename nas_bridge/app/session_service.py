@@ -66,10 +66,15 @@ HANDOFF_RE = re.compile(
     r"(?P<body>.*?)\s*\[\[/handoff\]\]",
     re.IGNORECASE | re.DOTALL,
 )
+DISCUSS_RE = re.compile(
+    r"\[\[discuss(?P<attrs>[^\]]*)\]\]\s*(?P<body>.*?)\s*\[\[/discuss\]\]",
+    re.IGNORECASE | re.DOTALL,
+)
 RECENT_TRANSCRIPT_LIMIT = 12
 RECENT_TRANSCRIPT_ENTRY_LIMIT = 800
 HANDOFF_PREVIEW_LIMIT = 240
 MAX_HANDOFFS_PER_COMPLETION = 4
+MAX_DISCUSSIONS_PER_COMPLETION = 4
 SESSION_SUMMARY_INBOUND_LIMIT = 8
 SESSION_SUMMARY_OUTBOUND_LIMIT = 6
 SESSION_SUMMARY_SYSTEM_LIMIT = 6
@@ -87,6 +92,16 @@ class HandoffRequest:
     target_agent: str
     body: str
     task_id: str | None = None
+
+
+@dataclass(slots=True)
+class DiscussRequest:
+    discuss_type: str
+    body: str
+    anomaly_id: str | None = None
+    task_id: str | None = None
+    ask_agents: list[str] | None = None
+    to_agent: str | None = None
 
 
 @dataclass(slots=True)
@@ -982,7 +997,7 @@ class SessionService:
             )
             policy = self._load_policy_summary(db, session_row)
             quiet_discord = policy.quiet_discord if policy is not None else True
-            visible_output, handoffs, rejected_handoffs = self._extract_handoffs(
+            visible_output, handoffs, rejected_handoffs, discussions, rejected_discussions = self._extract_control_updates(
                 sanitized,
                 agents=session_row.agents,
                 source_agent=agent_name,
@@ -1006,6 +1021,13 @@ class SessionService:
                 source_job=job,
                 handoffs=handoffs,
             )
+            self._queue_discussions(
+                db,
+                session_id=session_id,
+                source_agent=agent_name,
+                source_job=job,
+                discussions=discussions,
+            )
             if rejected_handoffs:
                 self._record_handoff_rejections(
                     db,
@@ -1013,6 +1035,14 @@ class SessionService:
                     source_agent=agent_name,
                     source_job=job,
                     rejections=rejected_handoffs,
+                )
+            if rejected_discussions:
+                self._record_discussion_rejections(
+                    db,
+                    session_id=session_id,
+                    source_agent=agent_name,
+                    source_job=job,
+                    rejections=rejected_discussions,
                 )
             thread_message = self._format_agent_thread_message(
                 agent_name=agent_name,
@@ -1683,25 +1713,27 @@ class SessionService:
         entries.reverse()
         return entries
 
-    def _extract_handoffs(
+    def _extract_control_updates(
         self,
         output_text: str,
         *,
         agents: Iterable[AgentModel],
         source_agent: str,
-    ) -> tuple[str, list[HandoffRequest], list[str]]:
+    ) -> tuple[str, list[HandoffRequest], list[str], list[DiscussRequest], list[str]]:
         available_agents = {agent.agent_name.lower(): agent.agent_name for agent in agents}
         handoffs: list[HandoffRequest] = []
-        rejections: list[str] = []
+        handoff_rejections: list[str] = []
+        discussions: list[DiscussRequest] = []
+        discussion_rejections: list[str] = []
 
-        def replace(match: re.Match[str]) -> str:
+        def replace_handoff(match: re.Match[str]) -> str:
             if len(handoffs) >= MAX_HANDOFFS_PER_COMPLETION:
                 LOGGER.warning(
                     "Ignoring extra handoff emitted by %s after reaching limit %s",
                     source_agent,
                     MAX_HANDOFFS_PER_COMPLETION,
                 )
-                rejections.append("extra handoff ignored after reaching the per-completion limit")
+                handoff_rejections.append("extra handoff ignored after reaching the per-completion limit")
                 return ""
 
             requested_name = match.group("agent").strip()
@@ -1710,15 +1742,15 @@ class SessionService:
 
             if target_agent is None:
                 LOGGER.warning("Ignoring handoff from %s to unknown agent %s", source_agent, requested_name)
-                rejections.append(f"handoff to unknown agent `{requested_name}`")
+                handoff_rejections.append(f"handoff to unknown agent `{requested_name}`")
                 return ""
             if target_agent.lower() == source_agent.lower():
                 LOGGER.warning("Ignoring self-handoff emitted by %s", source_agent)
-                rejections.append("self-handoff is not allowed")
+                handoff_rejections.append("self-handoff is not allowed")
                 return ""
             if not body:
                 LOGGER.warning("Ignoring empty handoff emitted by %s to %s", source_agent, target_agent)
-                rejections.append(f"empty handoff for `{target_agent}`")
+                handoff_rejections.append(f"empty handoff for `{target_agent}`")
                 return ""
 
             task_id = self._extract_task_id(body)
@@ -1730,14 +1762,75 @@ class SessionService:
                     target_agent,
                     validation_error,
                 )
-                rejections.append(f"handoff for `{target_agent}` rejected: {validation_error}")
+                handoff_rejections.append(f"handoff for `{target_agent}` rejected: {validation_error}")
                 return ""
 
             handoffs.append(HandoffRequest(target_agent=target_agent, body=body, task_id=task_id))
             return ""
 
-        visible_output = HANDOFF_RE.sub(replace, output_text).strip()
-        return visible_output, handoffs, rejections
+        def replace_discuss(match: re.Match[str]) -> str:
+            if len(discussions) >= MAX_DISCUSSIONS_PER_COMPLETION:
+                LOGGER.warning(
+                    "Ignoring extra discuss block emitted by %s after reaching limit %s",
+                    source_agent,
+                    MAX_DISCUSSIONS_PER_COMPLETION,
+                )
+                discussion_rejections.append("extra discuss block ignored after reaching the per-completion limit")
+                return ""
+
+            body = match.group("body").strip()
+            attrs = self._parse_discuss_attrs(match.group("attrs") or "")
+            discuss_type = (attrs.get("type") or "open").strip().lower()
+            anomaly_id = (attrs.get("anomaly") or attrs.get("id") or "").strip() or None
+            task_id = self._extract_task_id(body)
+
+            if discuss_type not in {"open", "reply", "resolve", "escalate"}:
+                discussion_rejections.append(f"unsupported discuss type `{discuss_type or 'none'}`")
+                return ""
+            if not body:
+                discussion_rejections.append(f"empty discuss block for `{discuss_type}`")
+                return ""
+
+            ask_raw = (attrs.get("ask") or attrs.get("with") or "").strip()
+            ask_names = [item.strip() for item in ask_raw.split(",") if item.strip()]
+            resolved_ask = [available_agents[name.lower()] for name in ask_names if name.lower() in available_agents]
+            invalid_ask = [name for name in ask_names if name.lower() not in available_agents]
+            if invalid_ask:
+                discussion_rejections.append(
+                    f"discussion references unknown agent(s): {', '.join(f'`{name}`' for name in invalid_ask)}"
+                )
+                return ""
+
+            to_name = (attrs.get("to") or "").strip()
+            target_agent = available_agents.get(to_name.lower()) if to_name else None
+            if to_name and target_agent is None:
+                discussion_rejections.append(f"discussion target unknown agent `{to_name}`")
+                return ""
+
+            if discuss_type == "open":
+                resolved_ask = [name for name in resolved_ask if name.lower() != source_agent.lower()]
+                if not resolved_ask:
+                    discussion_rejections.append("discussion_open requires at least one other agent in `ask=`")
+                    return ""
+            if discuss_type == "reply" and not target_agent:
+                discussion_rejections.append("discussion_reply requires a valid `to=` target")
+                return ""
+
+            discussions.append(
+                DiscussRequest(
+                    discuss_type=discuss_type,
+                    body=body,
+                    anomaly_id=anomaly_id,
+                    task_id=task_id,
+                    ask_agents=resolved_ask or None,
+                    to_agent=target_agent,
+                ),
+            )
+            return ""
+
+        visible_output = HANDOFF_RE.sub(replace_handoff, output_text)
+        visible_output = DISCUSS_RE.sub(replace_discuss, visible_output).strip()
+        return visible_output, handoffs, handoff_rejections, discussions, discussion_rejections
 
     def _queue_handoffs(
         self,
@@ -1772,6 +1865,74 @@ class SessionService:
                 ),
                 source_discord_message_id=source_job.source_discord_message_id,
             )
+
+    def _queue_discussions(
+        self,
+        db: Session,
+        *,
+        session_id: str,
+        source_agent: str,
+        source_job: JobModel,
+        discussions: list[DiscussRequest],
+    ) -> None:
+        for discuss in discussions:
+            if discuss.discuss_type == "open":
+                for target_agent in discuss.ask_agents or []:
+                    db.add(
+                        JobModel(
+                            session_id=session_id,
+                            agent_name=target_agent,
+                            job_type="discussion",
+                            source_discord_message_id=source_job.source_discord_message_id,
+                            user_id=f"agent:{source_agent}",
+                            input_text=self._build_discussion_prompt(
+                                source_agent=source_agent,
+                                target_agent=target_agent,
+                                discuss=discuss,
+                            ),
+                            status="pending",
+                        ),
+                    )
+                    self.transcript_service.add_entry(
+                        db,
+                        session_id=session_id,
+                        direction="system",
+                        actor=source_agent,
+                        content=(
+                            f"Discussion queued to {target_agent}"
+                            f"{f' ({discuss.anomaly_id})' if discuss.anomaly_id else ''}: "
+                            f"{self._trim_context_text(discuss.body, HANDOFF_PREVIEW_LIMIT)}"
+                        ),
+                        source_discord_message_id=source_job.source_discord_message_id,
+                    )
+            elif discuss.discuss_type == "reply" and discuss.to_agent:
+                db.add(
+                    JobModel(
+                        session_id=session_id,
+                        agent_name=discuss.to_agent,
+                        job_type="discussion",
+                        source_discord_message_id=source_job.source_discord_message_id,
+                        user_id=f"agent:{source_agent}",
+                        input_text=self._build_discussion_prompt(
+                            source_agent=source_agent,
+                            target_agent=discuss.to_agent,
+                            discuss=discuss,
+                        ),
+                        status="pending",
+                    ),
+                )
+                self.transcript_service.add_entry(
+                    db,
+                    session_id=session_id,
+                    direction="system",
+                    actor=source_agent,
+                    content=(
+                        f"Discussion reply queued to {discuss.to_agent}"
+                        f"{f' ({discuss.anomaly_id})' if discuss.anomaly_id else ''}: "
+                        f"{self._trim_context_text(discuss.body, HANDOFF_PREVIEW_LIMIT)}"
+                    ),
+                    source_discord_message_id=source_job.source_discord_message_id,
+                )
 
     def _record_handoff_rejections(
         self,
@@ -1857,6 +2018,25 @@ class SessionService:
             source_discord_message_id=failed_job.source_discord_message_id,
         )
         return True
+
+    def _record_discussion_rejections(
+        self,
+        db: Session,
+        *,
+        session_id: str,
+        source_agent: str,
+        source_job: JobModel,
+        rejections: list[str],
+    ) -> None:
+        for rejection in rejections:
+            self.transcript_service.add_entry(
+                db,
+                session_id=session_id,
+                direction="system",
+                actor="bridge",
+                content=f"Discussion update rejected from {source_agent}: {rejection}",
+                source_discord_message_id=source_job.source_discord_message_id,
+            )
 
     def _queue_planner_handoff_repair(
         self,
@@ -2063,6 +2243,40 @@ class SessionService:
             f"Source agent: `{source_agent}`\n"
             f"Original work summary: {failed_work}\n"
         )
+
+    def _build_discussion_prompt(
+        self,
+        *,
+        source_agent: str,
+        target_agent: str,
+        discuss: DiscussRequest,
+    ) -> str:
+        anomaly_text = discuss.anomaly_id or "unspecified"
+        task_text = discuss.task_id or "none"
+        if discuss.discuss_type == "open":
+            return (
+                f"Discussion requested by `{source_agent}` for anomaly `{anomaly_text}`.\n\n"
+                "Read `CURRENT_STATE.md`, `TASK_BOARD.md`, and the relevant `TASKS/*.md` card first.\n"
+                "Keep the thread-visible response short.\n"
+                f"Reply to `{source_agent}` with `[[discuss type=\"reply\" to=\"{source_agent}\" anomaly=\"{anomaly_text}\"]]...[[/discuss]]`.\n\n"
+                f"Current task reference: `{task_text}`\n"
+                f"Target agent: `{target_agent}`\n"
+                f"Discussion request:\n{discuss.body}\n"
+            )
+        return (
+            f"Discussion reply received from `{source_agent}` for anomaly `{anomaly_text}`.\n\n"
+            "Read `CURRENT_STATE.md`, `TASK_BOARD.md`, and the relevant `TASKS/*.md` card first.\n"
+            "Decide the next action. If the anomaly is resolved, emit `[[discuss type=\"resolve\" ...]]`. "
+            "If it still needs broader attention, emit `[[discuss type=\"escalate\" ...]]` or hand work off explicitly.\n\n"
+            f"Current task reference: `{task_text}`\n"
+            f"Discussion reply:\n{discuss.body}\n"
+        )
+
+    def _parse_discuss_attrs(self, attrs_text: str) -> dict[str, str]:
+        attrs: dict[str, str] = {}
+        for match in re.finditer(r"([A-Za-z_][A-Za-z0-9_-]*)\s*=\s*(['\"])(.*?)\2", attrs_text):
+            attrs[match.group(1).strip().lower()] = match.group(3).strip()
+        return attrs
 
     def _build_planner_orchestration_prompt(self, user_text: str) -> str:
         request = user_text.strip() or "(empty message)"

@@ -17,6 +17,9 @@ Rules:
 - keep stdout extremely short because it is mirrored into the shared thread
 - if you produce a Discord-visible response, use `[[report]]...[[/report]]` with one short human-readable sentence only
 - if you are directly answering the operator's question, use `[[answer]]...[[/answer]]` for the direct answer and keep `[[report]]` for short state context
+- if something looks inconsistent and you need other agents to inspect it, use a short `[[discuss type="open" ask="reviewer,coder" anomaly="A-001"]]...[[/discuss]]` block and keep the detailed evidence in markdown files
+- when another agent opens a discussion you should answer with `[[discuss type="reply" to="planner" anomaly="A-001"]]...[[/discuss]]` unless a different target is more appropriate
+- once the anomaly is understood, close it with `[[discuss type="resolve" anomaly="A-001"]]...[[/discuss]]` or `[[discuss type="escalate" anomaly="A-001"]]...[[/discuss]]`
 - only ask the operator something by stdout if it is truly blocking, and use `[[question]]...[[/question]]`
 - if another agent should act next, append one or more exact handoff blocks:
   [[handoff agent="coder"]]
