@@ -1958,7 +1958,7 @@ class SessionService:
         body = self._quiet_discord_text(visible_output) if quiet_discord else visible_output.strip()
         if not body:
             return ""
-        return f"**{agent_name}**\n{body}"
+        return body
 
     def _format_failure_thread_message(
         self,
@@ -1968,15 +1968,19 @@ class SessionService:
         recovery_queued: bool,
         quiet_discord: bool,
     ) -> str:
+        if "OPS:" in sanitized_error and "HUMAN:" in sanitized_error:
+            return self._quiet_discord_text(sanitized_error) if quiet_discord else sanitized_error.strip()
         failure_preview = self._trim_context_text(sanitized_error, FAILURE_PREVIEW_LIMIT)
-        summary = self._quiet_discord_text(failure_preview) if quiet_discord else failure_preview
-        if recovery_queued:
-            return (
-                f"**{agent_name} error**\n"
-                f"{summary}\n\n"
-                "Planner recovery has been queued to summarize the failure and decide the next step."
-            )
-        return f"**{agent_name} error**\n{summary}"
+        human_text = self._trim_context_text(failure_preview, 220 if quiet_discord else 420)
+        issue_text = "planner_recovery_queued" if recovery_queued else "triage_required"
+        message = "\n".join(
+            [
+                f"OPS: type=failed | actor={agent_name} | task=none | state=failed | read=CURRENT_STATE.md | reason=bridge_failure",
+                f"HUMAN: {human_text}",
+                f"ISSUE: {issue_text}",
+            ],
+        )
+        return self._quiet_discord_text(message) if quiet_discord else message
 
     def _quiet_discord_text(self, text: str) -> str:
         normalized_lines = [line.strip() for line in text.strip().splitlines() if line.strip()]

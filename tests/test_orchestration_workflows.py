@@ -401,6 +401,63 @@ def test_quiet_discord_policy_false_preserves_full_output(app_env):
     assert "line 11" in posted
 
 
+def test_bridge_preserves_async_event_protocol_without_agent_wrapper(app_env):
+    summary = __import__("asyncio").run(_start_session(app_env))
+
+    __import__("asyncio").run(
+        app_env.session_service.register_worker(
+            session_id=summary.id,
+            agent_name="coder",
+            worker_id="worker-coder",
+            pid_hint=1002,
+        ),
+    )
+
+    from app.models import JobModel
+
+    with app_env.db.session_scope() as db:
+        job = JobModel(
+            session_id=summary.id,
+            agent_name="coder",
+            job_type="message",
+            user_id="user-1",
+            input_text="T-002 continue implementation",
+        )
+        db.add(job)
+        db.flush()
+        job_id = job.id
+
+    claimed = __import__("asyncio").run(
+        app_env.session_service.claim_next_job(
+            session_id=summary.id,
+            agent_name="coder",
+            worker_id="worker-coder",
+        ),
+    )
+    assert claimed is not None
+    assert claimed.id == job_id
+
+    __import__("asyncio").run(
+        app_env.session_service.complete_job(
+            job_id=job_id,
+            session_id=summary.id,
+            agent_name="coder",
+            worker_id="worker-coder",
+            output_text=(
+                "OPS: type=done | actor=coder | task=T-002 | state=idle | read=CURRENT_STATE.md,TASKS/T-002.md\n"
+                "HUMAN: coder가 T-002를 마무리했다.\n"
+                "DONE: task=T-002"
+            ),
+            pid_hint=1002,
+        ),
+    )
+
+    _, posted = app_env.thread_manager.messages[-1]
+    assert posted.startswith("OPS: type=done")
+    assert "HUMAN: coder가 T-002를 마무리했다." in posted
+    assert "**coder**" not in posted
+
+
 def test_start_defaults_to_sample_profile_when_omitted(app_env):
     sample_manifest = build_manifest_for_profile(app_env.schemas, profile_name="sample", project_name="SampleProject")
     extra_manifest = build_manifest_for_profile(app_env.schemas, profile_name="other", project_name="OtherProject")

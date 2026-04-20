@@ -437,10 +437,11 @@ class SessionWorkspace:
 
         return self._compose_bridge_output(
             agent_name=agent_name,
+            task_id=current_task_id,
             report_text=report_text,
             question_blocks=parsed.question_blocks,
+            handoffs=handoffs if preserve_handoffs else [],
             updated_files=updated_files,
-            handoff_blocks=self._compact_handoff_blocks(handoffs) if preserve_handoffs else [],
         )
 
     def record_cli_failure(
@@ -557,14 +558,21 @@ class SessionWorkspace:
             encoding="utf-8",
         )
 
-        return (
-            f"Agent `{agent_name}` failed.\n"
-            f"{summary}\n\n"
-            f"Local workspace: `{self.relative_root.as_posix()}`\n"
-            "Key files:\n"
-            f"- `{self._display_path(raw_log_path)}`\n"
-            f"- `{self._display_path(self.state_file)}`\n"
-            f"- `{self._display_path(self.status_file)}`"
+        read_pointer = self._compose_read_pointer(
+            task_id=current_task_id,
+            extra_paths=[raw_log_path, self.state_file, self.status_file],
+        )
+        human_text = self._compose_human_summary(summary)
+        issue_text = "planner_recovery_expected" if planner_recovery_expected else "triage_required"
+        return "\n".join(
+            [
+                (
+                    f"OPS: type=failed | actor={agent_name} | task={current_task_id or 'none'} | "
+                    f"state=failed | read={read_pointer} | reason=cli_failure"
+                ),
+                f"HUMAN: {human_text}",
+                f"ISSUE: {issue_text}",
+            ],
         )
 
     def _parse_cli_output(self, raw_output: str) -> ParsedCliOutput:
@@ -599,47 +607,88 @@ class SessionWorkspace:
         self,
         *,
         agent_name: str,
+        task_id: str | None,
         report_text: str,
         question_blocks: list[str],
+        handoffs: list[HandoffSpec],
         updated_files: list[Path],
-        handoff_blocks: list[str],
     ) -> str:
-        display_files = [self._display_path(path) for path in updated_files if path.name != "CRITICAL_QUESTIONS.md"]
-        ordered_files: list[str] = []
-        for path in display_files:
-            if path not in ordered_files:
-                ordered_files.append(path)
-        artifact_lines = "\n".join(f"- `{path}`" for path in ordered_files[:5]) or "- `(none)`"
-
+        del updated_files
+        human_text = self._compose_human_summary(report_text)
         if question_blocks:
-            message = (
-                f"Critical question from `{agent_name}`.\n"
-                f"{question_blocks[0]}\n\n"
-                f"Local artifacts updated in `{self.relative_root.as_posix()}`.\n"
-                f"Key files:\n{artifact_lines}"
+            read_pointer = self._compose_read_pointer(
+                task_id=task_id,
+                extra_paths=[self.questions_file, self.state_file],
             )
-        else:
-            quiet_intro = "Updated local markdown artifacts." if self.quiet_discord else "Agent update."
-            message = (
-                f"{quiet_intro}\n"
-                f"Report: {trim_text(report_text, 320)}\n\n"
-                f"Local workspace: `{self.relative_root.as_posix()}`\n"
-                f"Key files:\n{artifact_lines}"
+            issue_text = trim_text(" ".join(question_blocks[0].split()), 220)
+            return "\n".join(
+                [
+                    (
+                        f"OPS: type=blocked | actor={agent_name} | task={task_id or 'none'} | "
+                        f"state=blocked | read={read_pointer} | reason=operator_input_required"
+                    ),
+                    f"HUMAN: {human_text}",
+                    f"ISSUE: {issue_text}",
+                ],
             )
 
-        if handoff_blocks:
-            message = message + "\n\n" + "\n\n".join(handoff_blocks)
-        return message
+        if handoffs:
+            ops_lines = [
+                (
+                    f"OPS: type=handoff | task={handoff.task_id or 'none'} | from={agent_name} | "
+                    f"to={handoff.target_agent} | state=ready | "
+                    f"read={self._compose_read_pointer(task_id=handoff.task_id, extra_paths=[self.state_file])}"
+                )
+                for handoff in handoffs
+            ]
+            return "\n".join([*ops_lines, f"HUMAN: {human_text}"])
+
+        read_pointer = self._compose_read_pointer(task_id=task_id, extra_paths=[self.state_file, self.report_file])
+        done_line = f"DONE: task={task_id}" if task_id else "DONE: state=idle"
+        return "\n".join(
+            [
+                (
+                    f"OPS: type=done | actor={agent_name} | task={task_id or 'none'} | "
+                    f"state=idle | read={read_pointer}"
+                ),
+                f"HUMAN: {human_text}",
+                done_line,
+            ],
+        )
+
+    def _compose_human_summary(self, report_text: str) -> str:
+        normalized = " ".join((report_text or "(no update)").split()) or "(no update)"
+        limit = 420 if not self.quiet_discord else 220
+        return trim_text(normalized, limit)
+
+    def _compose_read_pointer(
+        self,
+        *,
+        task_id: str | None,
+        extra_paths: list[Path] | None = None,
+    ) -> str:
+        ordered: list[str] = []
+        paths: list[Path] = [self.state_file]
+        if task_id:
+            paths.append(self.task_file(task_id))
+        if extra_paths:
+            paths.extend(extra_paths)
+        for path in paths:
+            display = self._display_path(path)
+            if display not in ordered:
+                ordered.append(display)
+        return ",".join(ordered)
 
     def _build_protocol_text(self) -> str:
         agent_mentions = ", ".join(f"`{name}`" for name in self.agent_names)
         return (
             "# Session Protocol\n\n"
             "This workspace is the source of truth for long-form collaboration artifacts.\n\n"
-            "## Discord Is The Control Room\n\n"
-            "- Use Discord only for work directives, short reports, critical questions, and control commands.\n"
-            "- Keep Discord reports short and operator-facing.\n"
-            "- Do not dump long plans, long reviews, or logs into Discord.\n\n"
+            "## Discord Is The Async Event Bus\n\n"
+            "- Treat the shared thread as a compact async event bus for agent collaboration.\n"
+            "- Use thread messages to announce ownership changes, next readers, blockers, and completion.\n"
+            "- Keep detailed payloads, checklists, logs, and reasoning in local markdown files.\n"
+            "- Thread-visible updates should stay short and point to the markdown files that matter.\n\n"
             "## Task-Card Workflow\n\n"
             f"- The agents in this session are: {agent_mentions}.\n"
             "- `TASK_BOARD.md` is the overview of ready, active, blocked, and done work.\n"
@@ -648,7 +697,7 @@ class SessionWorkspace:
             "- Independent tasks may be handed to multiple agents in parallel only when the file scope does not overlap.\n"
             "- `CURRENT_STATE.md` remains the single-source summary for the operator.\n\n"
             "## Required stdout blocks\n\n"
-            "[[report]]\nShort operator-facing progress report.\n[[/report]]\n\n"
+            "[[report]]\nOne short human-readable sentence.\n[[/report]]\n\n"
             "[[question]]\nOnly if a critical blocking decision is needed.\n[[/question]]\n\n"
             "[[handoff agent=\"coder\"]]\n"
             "T-002\n"
@@ -658,6 +707,12 @@ class SessionWorkspace:
             "Done condition: concrete finish state.\n"
             "[[/handoff]]\n\n"
             "- Every handoff body must include a `T-###` id, `Target summary:`, and the `Read CURRENT_STATE.md and TASK_BOARD.md first.` reminder or the bridge will reject it.\n\n"
+            "## Thread-visible protocol\n\n"
+            "- The runtime turns stdout plus handoff metadata into compact thread events.\n"
+            "- Every thread event should contain at least one `OPS:` line and one `HUMAN:` line.\n"
+            "- `OPS:` is the async event bus line for agents and the bridge. Keep it terse and structured.\n"
+            "- `HUMAN:` is a short sentence for operator observability.\n"
+            "- Use `ISSUE:` only when blocked or failed, and `DONE:` when work completes without a handoff.\n\n"
             "## Key files\n\n"
             "- `CURRENT_STATE.md`: single-source summary of status, blocker, and next action.\n"
             "- `TASK_BOARD.md`: session-wide task queue snapshot.\n"
