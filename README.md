@@ -1,39 +1,198 @@
 # Ops-Cure
 
-Ops-Cure는 Discord를 제어 인터페이스로 사용하고, 로컬 AI CLI를 실행 평면으로 사용하는 2-플레인 오케스트레이션 프레임워크입니다.
+Ops-Cure is a Discord-first orchestration framework for local AI CLI work.
 
-- `nas_bridge/`는 Ops-Cure Bridge입니다. Discord 연동, SQLite 상태 관리, 스레드 라우팅, 워커 등록, heartbeat, job, transcript를 담당하는 항상 켜져 있는 제어 평면입니다.
-- `pc_launcher/`는 Ops-Cure Launcher입니다. Windows PC에서 YAML 프로젝트 설정을 읽고 bridge에 등록한 뒤, 에이전트별 worker를 실행하고 허용된 CLI adapter를 subprocess로 구동하는 실행 평면입니다.
-- Discord `thread_id`가 세션 키이고, 로컬 CLI는 Discord 세부사항을 모른 채 불투명한 `session_id`만 받습니다.
+It uses a two-plane architecture:
 
-## 구현 계획
+- `nas_bridge/` is the control plane that owns Discord, session state, tasks, handoffs, jobs, transcripts, and recovery.
+- `pc_launcher/` is the execution plane that runs on a Windows machine with local AI CLIs, discovers project profiles, launches workers, and executes verification commands.
 
-1. NAS 쪽 bridge를 FastAPI, Discord slash command, SQLite 모델, 안전한 worker API로 구성합니다.
-2. launcher가 프로젝트 manifest를 등록하도록 만들어 bridge가 미리 정의된 YAML 프로젝트만 허용하게 합니다.
-3. Windows 쪽은 outbound polling만 사용해 launcher의 세션 claim과 worker의 job pull을 처리합니다.
-4. Codex, Claude 같은 CLI는 고정 adapter 뒤에 감싸서 Discord 메시지가 raw shell command가 되지 않도록 합니다.
-5. session, agent, job, transcript 상태를 SQLite에 저장하고, 그 라이프사이클을 Discord thread에 드러냅니다.
-6. NAS용 Docker, PC용 sample YAML/prompt, 설치 문서, local development mode까지 함께 제공합니다.
+The current default runtime model is:
 
-## 저장소 구조
+- `planner` for request interpretation and high-level task decomposition
+- `curator` for queue hygiene, handoff flow, and projection cleanup
+- `coder` for implementation
+- `verifier` for build/run/capture/log evidence generation
+- `reviewer` for evidence-based pass/fail/replan decisions
+
+## At A Glance
+
+Ops-Cure keeps orchestration state on the bridge, runs AI workers on a Windows machine, and uses Discord as the operator-facing control surface.
+
+If you want the deeper version, see [docs/architecture.md](docs/architecture.md).
+
+## Framework Diagram
+
+```mermaid
+flowchart LR
+    user["User<br/>Discord Channel / Thread"]
+
+    subgraph control["Control Plane (NAS / Bridge)"]
+        discord["Discord Bot<br/>slash commands + thread routing"]
+        bridge["Ops-Cure Bridge<br/>session orchestration"]
+        state["Canonical State<br/>sessions / tasks / handoffs / jobs / events"]
+        queue["Ready Queue<br/>self-claim scheduling"]
+        announce["Thread Rendering<br/>OPS / ANSWER / HUMAN / ISSUE"]
+    end
+
+    subgraph execution["Execution Plane (Windows PC)"]
+        launcher["Launcher<br/>profile discovery + worker supervision"]
+
+        subgraph agents["Role Workers"]
+            planner["planner<br/>intent + decomposition"]
+            curator["curator<br/>flow + projection hygiene"]
+            coder["coder<br/>implementation"]
+            verifier["verifier<br/>run + capture + logs"]
+            reviewer["reviewer<br/>pass / fail / replan"]
+        end
+    end
+
+    subgraph outputs["Local Outputs"]
+        artifacts["Artifacts<br/>logs / screenshots / result.json"]
+        projections["Markdown Projections<br/>CURRENT_STATE / CURRENT_TASK / HANDOFFS / TASK_BOARD"]
+    end
+
+    user --> discord
+    discord --> bridge
+    bridge --> state
+    state --> queue
+    bridge --> announce
+    announce --> discord
+
+    launcher --> queue
+    queue --> planner
+    queue --> curator
+    queue --> coder
+    queue --> verifier
+    queue --> reviewer
+
+    planner --> state
+    curator --> state
+    coder --> state
+    verifier --> state
+    reviewer --> state
+
+    planner --> projections
+    curator --> projections
+    verifier --> artifacts
+    reviewer --> artifacts
+
+    state -. rebuild .-> projections
+    artifacts -. evidence .-> reviewer
+    state -. render .-> announce
+    bridge -. register / heartbeat / completion .-> launcher
+
+    classDef user fill:#fff4d6,stroke:#c68a00,color:#4a3300,stroke-width:1.5px;
+    classDef control fill:#e8f3ff,stroke:#3b82f6,color:#0f2f57,stroke-width:1.5px;
+    classDef execution fill:#edfdf3,stroke:#16a34a,color:#0f3b22,stroke-width:1.5px;
+    classDef output fill:#f6efff,stroke:#8b5cf6,color:#3c1f66,stroke-width:1.5px;
+
+    class user user;
+    class discord,bridge,state,queue,announce control;
+    class launcher,planner,curator,coder,verifier,reviewer execution;
+    class artifacts,projections output;
+```
+
+This is the intended flow:
+
+1. A user speaks in Discord.
+2. The bridge translates that into canonical tasks, handoffs, jobs, and events.
+3. Windows workers self-claim ready work that matches their role.
+4. Local execution produces code, logs, screenshots, and review evidence.
+5. The bridge renders concise thread updates while keeping the database as the source of truth.
+
+## What Ops-Cure Is Trying To Solve
+
+Ops-Cure is built for this workflow:
+
+1. You talk to a Discord channel or thread.
+2. The bridge turns that into canonical tasks and handoffs.
+3. Windows workers self-claim ready work that matches their role.
+4. The local machine produces code changes, logs, screenshots, and reports.
+5. Discord remains the control surface, not the place where arbitrary shell commands run.
+
+The framework is designed so that:
+
+- Discord threads map to sessions.
+- SQLite and task events are the source of truth.
+- local markdown files are projections, not authoritative state.
+- thread messages are an async collaboration bus, not the scheduler itself.
+
+## Core Model
+
+### Canonical State
+
+Ops-Cure now treats the bridge database as the only source of truth for orchestration state.
+
+Important concepts:
+
+- `sessions`: top-level Discord-thread-backed work sessions
+- `agents`: per-session agent registrations and worker heartbeats
+- `tasks`: canonical units of work with state, scope, revision, and lease metadata
+- `handoffs`: explicit queued, claimed, consumed, superseded, or failed transfers between roles
+- `task_events`: append-style task history
+- `jobs`: concrete units claimed by workers
+- `verification_runs`: execution evidence runs and review outcomes
+
+The key safety features are:
+
+- `session_epoch` to reject stale worker updates after resets or recovery
+- `task_revision` to reject outdated completions
+- `lease_token` to prevent concurrent claim collisions
+- `idempotency_key` to make duplicate completion/failure callbacks safe
+
+### Self-Claim Scheduling
+
+Ops-Cure is moving away from pure push-style handoff and toward canonical ready queues.
+
+The bridge decides which tasks are ready based on:
+
+- role match
+- dependency readiness
+- file scope
+- semantic scope
+- priority and retry policy
+
+Idle agents claim matching work instead of waiting for every next step to be directly pushed by the planner.
+
+### Thread Protocol
+
+Discord thread messages are rendered views over structured internal events.
+
+Visible line types:
+
+- `OPS:` machine-friendly async collaboration updates
+- `ANSWER:` direct answers to user questions
+- `HUMAN:` short human-readable progress lines
+- `ISSUE:` explicit blockers or escalation points
+
+`discuss` messages are reserved for short, structured anomaly or ambiguity handling, for example:
+
+- feature intent mismatch
+- review interpretation mismatch
+- runtime anomaly triage
+
+## Repository Layout
 
 ```text
-repo/
+ops-cure/
   README.md
   nas_bridge/
-    .env.example
-    Dockerfile
     README.md
+    Dockerfile
     docker-compose.yml
     requirements.txt
-    data/
     app/
-      __init__.py
+      api/
+      capabilities/
+      services/
+      workflows/
       auth.py
       command_router.py
       config.py
       db.py
       discord_gateway.py
+      drift_monitor.py
       main.py
       message_router.py
       models.py
@@ -42,99 +201,162 @@ repo/
       thread_manager.py
       transcript_service.py
       worker_registry.py
-      api/
-        __init__.py
-        health.py
-        sessions.py
-        workers.py
   pc_launcher/
-    .env.example
     README.md
-    __init__.py
+    requirements.txt
+    artifact_workspace.py
     bridge_client.py
     cli_adapters.py
     cli_worker.py
     config_loader.py
     launcher.py
-    requirements.txt
+    process_io.py
+    project_finder.py
+    verification_runner.py
     worker_runtime.py
     scripts/
-      start_project.bat
     projects/
-      sample_project/
+      sample/
         project.yaml
         prompts/
-          coder.md
-          finder.md
           planner.md
+          curator.md
+          coder.md
+          verifier.md
           reviewer.md
+          finder.md
+  tests/
 ```
 
-## SQLite 스키마
+## Current Execution Profile Model
 
-### `sessions`
+Profiles live under `pc_launcher/projects/<profile-name>/project.yaml`.
 
-- `id` TEXT PRIMARY KEY
-- `project_name` TEXT NOT NULL
-- `preset` TEXT NULL
-- `discord_thread_id` TEXT UNIQUE NOT NULL
-- `guild_id` TEXT NOT NULL
-- `parent_channel_id` TEXT NOT NULL
-- `workdir` TEXT NOT NULL
-- `status` TEXT NOT NULL
-- `created_by` TEXT NOT NULL
-- `launcher_id` TEXT NULL
-- `send_ready_message` BOOLEAN NOT NULL
-- `created_at` TIMESTAMP NOT NULL
-- `closed_at` TIMESTAMP NULL
+The sample profile currently includes:
 
-### `agents`
+- one default top-level finder root: `C:\Users\darkh\Projects`
+- five roles: `planner`, `curator`, `coder`, `verifier`, `reviewer`
+- verification modes:
+  - `smoke`
+  - `play_capture`
+  - `repro_bug`
+- policy defaults such as:
+  - `max_parallel_agents`
+  - `auto_retry`
+  - `quiet_discord`
+  - `approval_mode`
+  - `allow_cross_agent_handoff`
 
-- `id` TEXT PRIMARY KEY
-- `session_id` TEXT NOT NULL REFERENCES `sessions(id)`
-- `agent_name` TEXT NOT NULL
-- `cli_type` TEXT NOT NULL
-- `role` TEXT NOT NULL
-- `is_default` BOOLEAN NOT NULL
-- `status` TEXT NOT NULL
-- `last_heartbeat_at` TIMESTAMP NULL
-- `pid_hint` INTEGER NULL
-- `worker_id` TEXT NULL
-- `last_error` TEXT NULL
+The long-term goal is for project-specific variation to live only in:
 
-### `jobs`
+- `project.yaml`
+- prompt files
+- local scripts or wrapper commands
 
-- `id` TEXT PRIMARY KEY
-- `session_id` TEXT NOT NULL REFERENCES `sessions(id)`
-- `agent_name` TEXT NOT NULL
-- `job_type` TEXT NOT NULL
-- `source_discord_message_id` TEXT NULL
-- `user_id` TEXT NOT NULL
-- `input_text` TEXT NOT NULL
-- `status` TEXT NOT NULL
-- `worker_id` TEXT NULL
-- `result_text` TEXT NULL
-- `error_text` TEXT NULL
-- `created_at` TIMESTAMP NOT NULL
-- `claimed_at` TIMESTAMP NULL
-- `completed_at` TIMESTAMP NULL
+## Quick Start
 
-### `transcripts`
+### 1. Start the Bridge
 
-- `id` TEXT PRIMARY KEY
-- `session_id` TEXT NOT NULL REFERENCES `sessions(id)`
-- `direction` TEXT NOT NULL
-- `actor` TEXT NOT NULL
-- `content` TEXT NOT NULL
-- `source_discord_message_id` TEXT NULL
-- `created_at` TIMESTAMP NOT NULL
+See the bridge-specific guide:
 
-## 핵심 동작 흐름
+- [C:\Users\darkh\Projects\ops-cure\nas_bridge\README.md](C:/Users/darkh/Projects/ops-cure/nas_bridge/README.md)
 
-1. Windows launcher가 `project.yaml` 파일들을 스캔해 bridge에 프로젝트 manifest를 등록합니다.
-2. Discord 사용자가 `/project start name:<session-name> preset:<optional-preset>`를 실행합니다.
-3. Bridge가 등록된 YAML manifest에서 preset을 해석하고, guild/channel/allowed user를 검증한 뒤, SQLite session row를 만들고 사용자가 지정한 이름으로 Discord thread를 엽니다.
-4. Launcher가 pending launch를 claim하고, 설정된 agent마다 worker process를 하나씩 띄웁니다.
-5. Worker는 bridge에 등록하고, heartbeat를 보내며, pending job을 pull합니다.
-6. Thread 메시지는 `@agentname` prefix로 라우팅되며, 단일 agent 세션일 때만 자동 라우팅됩니다.
-7. Worker 결과는 sanitize된 뒤 transcript에 저장되고, 동일한 Discord thread로 다시 게시됩니다.
+Typical local start:
+
+```bash
+cd nas_bridge
+python -m pip install -r requirements.txt
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8080
+```
+
+Typical Docker start:
+
+```bash
+cd nas_bridge
+docker compose up --build -d
+```
+
+### 2. Start the Launcher on Windows
+
+See the launcher-specific guide:
+
+- [C:\Users\darkh\Projects\ops-cure\pc_launcher\README.md](C:/Users/darkh/Projects/ops-cure/pc_launcher/README.md)
+
+Typical local start:
+
+```bash
+cd pc_launcher
+python -m pip install -r requirements.txt
+python launcher.py daemon --projects-dir .\projects
+```
+
+If no launcher is registered, `/project start` will now tell you to start the PC launcher first instead of showing a misleading profile error.
+
+### 3. Start a Session from Discord
+
+Typical command:
+
+```text
+/project start target:MyProject
+```
+
+If the default `sample` profile is registered, `profile` can be omitted.
+
+Other useful commands:
+
+- `/project find query:<name>`
+- `/project status`
+- `/project pause`
+- `/project resume`
+- `/project close`
+- `/project cleanup`
+- `/policy show`
+- `/policy set`
+- `/verify run mode:smoke`
+- `/verify latest`
+
+## Verification Lane
+
+The verifier role exists to keep execution evidence separate from implementation.
+
+Expected outputs from a verification run include:
+
+- `stdout.log`
+- `stderr.log`
+- `stdout.bin`
+- `stderr.bin`
+- `result.json`
+- screenshots such as `desktop.png`
+
+The intended flow is:
+
+```text
+planner -> coder -> verifier -> reviewer
+```
+
+This reduces the amount of runtime capture work done directly by the coder and gives the reviewer concrete evidence to inspect.
+
+## Current Design Direction
+
+The framework is currently converging on these rules:
+
+- bridge database and task events are authoritative
+- markdown files are rebuildable projections
+- thread text is rendered from structured internal events
+- self-claim is preferred over excessive push-style handoff
+- `planner` owns interpretation
+- `curator` owns flow hygiene and projection hygiene
+- `reviewer` owns decision, not implementation
+- `verifier` owns execution evidence
+
+## Notes
+
+- The current sample profile uses Claude locally because that CLI is confirmed working in this Windows environment.
+- Verification commands in the sample profile are still generic placeholders until replaced with project-specific scripts.
+- Existing session artifacts under project `_discord_sessions/` folders are useful for debugging, but they should never be treated as canonical scheduler state.
+
+## Additional Documentation
+
+- Architecture guide: [docs/architecture.md](docs/architecture.md)
+- Bridge details: [C:\Users\darkh\Projects\ops-cure\nas_bridge\README.md](C:/Users/darkh/Projects/ops-cure/nas_bridge/README.md)
+- Launcher details: [C:\Users\darkh\Projects\ops-cure\pc_launcher\README.md](C:/Users/darkh/Projects/ops-cure/pc_launcher/README.md)
