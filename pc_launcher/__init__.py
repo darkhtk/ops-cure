@@ -1,1 +1,1 @@
-"""Ops-Cure Launcher and worker runtime package."""
+"""Opscure Launcher and worker runtime package."""

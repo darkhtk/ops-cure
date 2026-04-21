@@ -894,7 +894,7 @@ def test_recovery_service_cleans_up_stalled_start_session(app_env):
     assert refreshed.desired_status == "closed"
     assert refreshed.closed_at is not None
     assert app_env.thread_manager.cleaned_threads == [
-        (summary.discord_thread_id, "Ops-Cure cleaned up a stalled startup session."),
+        (summary.discord_thread_id, "Opscure cleaned up a stalled startup session."),
     ]
 
     with app_env.db.session_scope() as db:

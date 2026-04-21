@@ -1,6 +1,6 @@
-# Ops-Cure Bridge
+# Opscure Bridge
 
-The bridge is the control plane for Ops-Cure.
+The bridge is the control plane for Opscure.
 
 It is responsible for:
 
@@ -121,7 +121,7 @@ The bridge currently supports commands such as:
 
 ## Scheduling Model
 
-Ops-Cure is converging on canonical ready queues plus self-claim.
+Opscure is converging on canonical ready queues plus self-claim.
 
 That means:
 

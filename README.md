@@ -1,6 +1,6 @@
-# Ops-Cure
+# Opscure
 
-Ops-Cure is a Discord-first orchestration framework for local AI CLI work.
+Opscure is a Discord-first orchestration framework for local AI CLI work.
 
 It uses a two-plane architecture:
 
@@ -17,7 +17,7 @@ The current default runtime model is:
 
 ## At A Glance
 
-Ops-Cure keeps orchestration state on the bridge, runs AI workers on a Windows machine, and uses Discord as the operator-facing control surface.
+Opscure keeps orchestration state on the bridge, runs AI workers on a Windows machine, and uses Discord as the operator-facing control surface.
 
 If you want the deeper version, see [docs/architecture.md](docs/architecture.md).
 
@@ -29,7 +29,7 @@ flowchart LR
 
     subgraph control["Control Plane (NAS / Bridge)"]
         discord["Discord Bot<br/>slash commands + thread routing"]
-        bridge["Ops-Cure Bridge<br/>session orchestration"]
+        bridge["Opscure Bridge<br/>session orchestration"]
         state["Canonical State<br/>sessions / tasks / handoffs / jobs / events"]
         queue["Ready Queue<br/>self-claim scheduling"]
         announce["Thread Rendering<br/>OPS / ANSWER / HUMAN / ISSUE"]
@@ -102,9 +102,9 @@ This is the intended flow:
 5. The bridge renders concise thread updates while keeping the database as the source of truth.
 6. The status card shows only busy workers, plus each worker's latest live activity line when available.
 
-## What Ops-Cure Is Trying To Solve
+## What Opscure Is Trying To Solve
 
-Ops-Cure is built for this workflow:
+Opscure is built for this workflow:
 
 1. You talk to a Discord channel or thread.
 2. The bridge turns that into canonical tasks and handoffs.
@@ -123,7 +123,7 @@ The framework is designed so that:
 
 ### Canonical State
 
-Ops-Cure now treats the bridge database as the only source of truth for orchestration state.
+Opscure now treats the bridge database as the only source of truth for orchestration state.
 
 Important concepts:
 
@@ -144,7 +144,7 @@ The key safety features are:
 
 ### Self-Claim Scheduling
 
-Ops-Cure is moving away from pure push-style handoff and toward canonical ready queues.
+Opscure is moving away from pure push-style handoff and toward canonical ready queues.
 
 The bridge decides which tasks are ready based on:
 
@@ -175,7 +175,7 @@ Visible line types:
 
 ### Live Worker Activity
 
-Ops-Cure tracks the latest live output line from each busy worker.
+Opscure tracks the latest live output line from each busy worker.
 
 The launcher reads the current CLI stdout or stderr line for a worker, sends that line in worker heartbeats, and the bridge stores only the latest value.
 

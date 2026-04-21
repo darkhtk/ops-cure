@@ -1,1 +1,1 @@
-"""Ops-Cure Bridge application package."""
+"""Opscure Bridge application package."""

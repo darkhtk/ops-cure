@@ -1,10 +1,10 @@
-# Ops-Cure Architecture
+# Opscure Architecture
 
-This document explains how Ops-Cure is structured today and how the main runtime flow is supposed to work.
+This document explains how Opscure is structured today and how the main runtime flow is supposed to work.
 
 ## Overview
 
-Ops-Cure is a two-plane system:
+Opscure is a two-plane system:
 
 - The **control plane** lives in `nas_bridge/`.
 - The **execution plane** lives in `pc_launcher/`.
@@ -96,7 +96,7 @@ The launcher is responsible for:
 
 ## Canonical State Model
 
-Ops-Cure is moving toward a strict rule:
+Opscure is moving toward a strict rule:
 
 - the database is the source of truth
 - markdown files are rebuildable projections
@@ -152,7 +152,7 @@ These fields exist so that stale workers, duplicate callbacks, and late completi
 
 ## Scheduling Model
 
-Ops-Cure is converging on **ready queue + self-claim** scheduling.
+Opscure is converging on **ready queue + self-claim** scheduling.
 
 That means:
 
@@ -217,7 +217,7 @@ discuss_open -> discuss_reply -> discuss_escalate
 
 ## Live Activity Rendering
 
-Ops-Cure also maintains a lightweight live-activity layer for active workers.
+Opscure also maintains a lightweight live-activity layer for active workers.
 
 The execution plane reads the latest stdout or stderr line from each running CLI process and includes only the latest sanitized line in worker heartbeats.
 

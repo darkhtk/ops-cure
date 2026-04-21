@@ -282,7 +282,7 @@ class RecoveryService:
                 ensure_ascii=False,
             ),
         )
-        return session_row.discord_thread_id, "Ops-Cure cleaned up a stalled startup session."
+        return session_row.discord_thread_id, "Opscure cleaned up a stalled startup session."
 
     def _close_missing_thread_session(
         self,
@@ -317,7 +317,7 @@ class RecoveryService:
             direction="system",
             actor="bridge",
             content=(
-                "Discord thread is missing. Ops-Cure automatically closed the session "
+                "Discord thread is missing. Opscure automatically closed the session "
                 f"during {reason} recovery."
             ),
         )

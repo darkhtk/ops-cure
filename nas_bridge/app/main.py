@@ -142,7 +142,7 @@ async def lifespan(app: FastAPI):
         services.recovery_service.run_forever(
             interval_seconds=settings.recovery_loop_interval_seconds,
         ),
-        name="ops-cure-recovery-loop",
+        name="opscure-recovery-loop",
     )
     await services.discord_gateway.start()
     try:
@@ -155,7 +155,7 @@ async def lifespan(app: FastAPI):
         await services.discord_gateway.stop()
 
 
-app = FastAPI(title="Ops-Cure Bridge", lifespan=lifespan)
+app = FastAPI(title="Opscure Bridge", lifespan=lifespan)
 app.include_router(health.router)
 app.include_router(sessions.router)
 app.include_router(verification.router)

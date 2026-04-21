@@ -212,7 +212,7 @@ class StartWorkflow:
         if resolved.status != "selected" or not resolved.selected_path:
             reason = resolved.reason or "no matching project path was selected"
             raise ValueError(
-                f"Ops-Cure could not safely resolve `{requested_target}` with profile `{selected_preset}`: {reason}"
+                f"Opscure could not safely resolve `{requested_target}` with profile `{selected_preset}`: {reason}"
             )
         default_workdir = self._normalize_path_for_comparison(manifest.default_workdir)
         selected_path = self._normalize_path_for_comparison(resolved.selected_path)

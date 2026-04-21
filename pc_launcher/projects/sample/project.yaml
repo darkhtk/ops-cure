@@ -91,17 +91,17 @@ verification:
       - powershell
       - -NoProfile
       - -Command
-      - Write-Output 'Ops-Cure smoke verification'
+      - Write-Output 'Opscure smoke verification'
     play_capture:
       - powershell
       - -NoProfile
       - -Command
-      - Write-Output 'Ops-Cure play capture placeholder'
+      - Write-Output 'Opscure play capture placeholder'
     repro_bug:
       - powershell
       - -NoProfile
       - -Command
-      - Write-Output 'Ops-Cure repro bug placeholder'
+      - Write-Output 'Opscure repro bug placeholder'
   capture:
     screenshots: true
     video: false

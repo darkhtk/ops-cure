@@ -17,7 +17,7 @@ class WindowsLauncherExecutionProvider(ExecutionProvider):
                 state="offline",
                 detail=(
                     "No active launcher is registered for this project. "
-                    "Ops-Cure is waiting for the Windows launcher auto-start path to reconnect."
+                    "Opscure is waiting for the Windows launcher auto-start path to reconnect."
                 ),
             )
         if target.launcher_id_hint and record.launcher_id != target.launcher_id_hint:
@@ -43,7 +43,7 @@ class WindowsLauncherExecutionProvider(ExecutionProvider):
             return ExecutionStatus(
                 state="awaiting_launcher",
                 detail=(
-                    "Launcher is offline. Ops-Cure expects Windows auto-start to bring it back "
+                    "Launcher is offline. Opscure expects Windows auto-start to bring it back "
                     "and will keep the session in recovery until then."
                 ),
             )

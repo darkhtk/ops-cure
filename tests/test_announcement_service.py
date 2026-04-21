@@ -17,7 +17,7 @@ def test_start_creates_status_card(app_env):
         message = app_env.thread_manager.message_store[session_row.status_message_id]
 
     assert message[0] == summary.discord_thread_id
-    assert "**Ops-Cure Status**" in message[1]
+    assert "**Opscure Status**" in message[1]
     assert "Target: `UlalaCheese`" in message[1]
     assert "Profile: `UlalaCheese`" in message[1]
     assert "State: `waiting_for_workers`" in message[1]
@@ -64,6 +64,6 @@ def test_render_session_status_text_uses_status_card_format(app_env):
         app_env.session_service.render_session_status_text(summary.id),
     )
 
-    assert "**Ops-Cure Status**" in text
+    assert "**Opscure Status**" in text
     assert "Queue: pending=0, active=0" in text
     assert "Policy: parallel=1, auto_retry=True" in text

@@ -1,6 +1,6 @@
-# Ops-Cure Launcher
+# Opscure Launcher
 
-The launcher is the Windows-side execution plane for Ops-Cure.
+The launcher is the Windows-side execution plane for Opscure.
 
 It is responsible for:
 
@@ -105,7 +105,7 @@ Recommended production setup:
 
 ## Single-Instance Protection
 
-Ops-Cure enforces one launcher instance per `launcher_id`.
+Opscure enforces one launcher instance per `launcher_id`.
 
 A lock file is created under the projects directory so that:
 

@@ -313,7 +313,7 @@ class AnnouncementService:
     def _render_status_card(snapshot: SessionStatusSnapshot) -> str:
         active_workers = "\n".join(snapshot.active_worker_lines) if snapshot.active_worker_lines else "- none"
         return (
-            "**Ops-Cure Status**\n"
+            "**Opscure Status**\n"
             f"Session: `{snapshot.session_title}`\n"
             f"Target: `{snapshot.target_project_name}`\n"
             f"Profile: `{snapshot.profile_name}`\n"
