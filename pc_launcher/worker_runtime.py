@@ -17,12 +17,14 @@ try:
     from .cli_adapters import AdapterContext, get_adapter
     from .config_loader import AgentConfig, ProjectConfig, find_agent, load_project
     from .process_io import build_utf8_subprocess_env, text_subprocess_kwargs
+    from .verification_runner import CommandVerificationRunner
 except ImportError:  # pragma: no cover - script mode support
     from artifact_workspace import BridgeCompletionPayload, SessionWorkspace
     from bridge_client import BridgeClient, BridgeClientError
     from cli_adapters import AdapterContext, get_adapter
     from config_loader import AgentConfig, ProjectConfig, find_agent, load_project
     from process_io import build_utf8_subprocess_env, text_subprocess_kwargs
+    from verification_runner import CommandVerificationRunner
 
 LOGGER = logging.getLogger(__name__)
 HANDOFF_TIMEOUT_CAP_SECONDS = 900
@@ -69,6 +71,7 @@ class WorkerRuntime:
         self._session_preset = self.project.profile_name
         self._workspace: SessionWorkspace | None = None
         self._last_workspace_reconcile_at = 0.0
+        self._verification_runner = CommandVerificationRunner()
 
     @property
     def pid_hint(self) -> int:
@@ -211,7 +214,10 @@ class WorkerRuntime:
             user_text=str(job.get("input_text") or ""),
             session_summary=str(job["session_summary"]) if job.get("session_summary") is not None else None,
             recent_transcript=list(job.get("recent_transcript") or []),
+            task_id=str(job.get("task_id") or "").strip().upper() or None,
         )
+        if job_type == "verification":
+            return self._run_verification_job(job=job, workspace=workspace)
         context = AdapterContext(
             session_id=self.session_id,
             project_name=str(job.get("project_name") or self._session_name),
@@ -271,7 +277,8 @@ class WorkerRuntime:
                 ),
                 stdout_text=stdout,
                 stderr_text=stderr,
-                planner_recovery_expected=(job_type == "handoff" and self.agent_name.lower() != "planner"),
+                task_id=str(job.get("task_id") or "").strip().upper() or None,
+                planner_recovery_expected=(job_type in {"handoff", "verification"} and self.agent_name.lower() != "planner"),
             )
             raise TimeoutError(failure_summary) from exc
         finally:
@@ -289,7 +296,8 @@ class WorkerRuntime:
                 ),
                 stdout_text=stdout,
                 stderr_text=stderr,
-                planner_recovery_expected=(job_type == "handoff" and self.agent_name.lower() != "planner"),
+                task_id=str(job.get("task_id") or "").strip().upper() or None,
+                planner_recovery_expected=(job_type in {"handoff", "verification"} and self.agent_name.lower() != "planner"),
             )
             raise RuntimeError(failure_summary)
         return workspace.record_cli_result(
@@ -297,7 +305,117 @@ class WorkerRuntime:
             job_type=job_type,
             user_text=str(job.get("input_text") or ""),
             raw_output=combined_output,
+            task_id=str(job.get("task_id") or "").strip().upper() or None,
         )
+
+    def _run_verification_job(
+        self,
+        *,
+        job: dict[str, object],
+        workspace: SessionWorkspace,
+    ) -> BridgeCompletionPayload:
+        if not self.project.verification.enabled:
+            raise RuntimeError(f"Verification is disabled for profile `{self.project.profile_name}`.")
+
+        task_id = str(job.get("task_id") or "").strip().upper() or None
+        mode = self._resolve_verification_mode(str(job.get("input_text") or ""))
+        command = self.project.verification.commands.get(mode)
+        if not command:
+            available = ", ".join(sorted(self.project.verification.commands)) or "none"
+            raise RuntimeError(
+                f"Verification mode `{mode}` is not configured for profile `{self.project.profile_name}`. "
+                f"Available modes: {available}."
+            )
+
+        run_slug = task_id or str(job.get("id") or uuid.uuid4())
+        artifact_dir = (
+            Path(self.project.default_workdir).resolve()
+            / self.project.verification.artifact_dir
+            / self.session_id
+            / run_slug
+        )
+        result = self._run_verification_runner(
+            job=job,
+            mode=mode,
+            command=command,
+            artifact_dir=artifact_dir,
+        )
+        if result.status != "completed":
+            failure_message = result.error_text or f"Verification `{mode}` failed."
+            stderr_text = "\n".join(
+                artifact["path"]
+                for artifact in result.artifacts
+                if str(artifact.get("label") or "").lower() == "stderr.log"
+            )
+            raise RuntimeError(f"{failure_message}\nArtifacts: {artifact_dir}\n{stderr_text}".strip())
+
+        report_text = result.summary_text or (
+            f"Verification `{mode}` completed for profile `{self.project.profile_name}`."
+        )
+        review_handoff = self._build_review_handoff(task_id=task_id, mode=mode, artifact_dir=artifact_dir)
+        synthetic_output = "\n\n".join(
+            [
+                f"[[report]]\n{report_text}\n[[/report]]",
+                f"[[handoff agent=\"reviewer\"]]\n{review_handoff}\n[[/handoff]]",
+            ],
+        )
+        return workspace.record_cli_result(
+            agent_name=self.agent_name,
+            job_type="verification",
+            user_text=str(job.get("input_text") or ""),
+            raw_output=synthetic_output,
+            task_id=task_id,
+        )
+
+    def _run_verification_runner(
+        self,
+        *,
+        job: dict[str, object],
+        mode: str,
+        command: list[str],
+        artifact_dir: Path,
+    ):
+        run_payload = {
+            "id": str(job.get("id") or uuid.uuid4()),
+            "session_id": self.session_id,
+            "mode": mode,
+            "workdir": str(self.project.default_workdir),
+            "artifact_dir": str(artifact_dir),
+            "timeout_seconds": self.project.verification.run_timeout_seconds,
+            "command": command,
+        }
+        return self._verification_runner.run(
+            run_payload=run_payload,
+            project=self.project,
+        )
+
+    def _resolve_verification_mode(self, body: str) -> str:
+        explicit = self._extract_prefixed_line(body, "Verification mode:") or self._extract_prefixed_line(body, "Mode:")
+        if explicit:
+            return explicit
+        commands = sorted(self.project.verification.commands)
+        return commands[0] if commands else "smoke"
+
+    def _build_review_handoff(self, *, task_id: str | None, mode: str, artifact_dir: Path) -> str:
+        task_label = task_id or "T-VERIFY"
+        try:
+            artifact_pointer = artifact_dir.relative_to(Path(self.project.default_workdir).resolve()).as_posix()
+        except ValueError:
+            artifact_pointer = str(artifact_dir)
+        return (
+            f"{task_label}\n"
+            f"Target summary: Review verification artifacts for `{task_label}` after `{mode}`.\n"
+            "Read CURRENT_STATE.md and TASK_BOARD.md first.\n"
+            f"Files: {artifact_pointer}\n"
+            "Done condition: Record pass, fail, or replan based on the verification evidence."
+        )
+
+    @staticmethod
+    def _extract_prefixed_line(text: str, prefix: str) -> str | None:
+        for raw_line in text.splitlines():
+            if raw_line.strip().lower().startswith(prefix.lower()):
+                return raw_line.split(":", 1)[1].strip() if ":" in raw_line else raw_line.strip()
+        return None
 
     def _restart_runtime(self) -> None:
         self._terminate_current_process()
@@ -370,6 +488,8 @@ class WorkerRuntime:
             return min(base_timeout, ROUTING_TIMEOUT_CAP_SECONDS)
         if job_type == "handoff":
             return min(base_timeout, HANDOFF_TIMEOUT_CAP_SECONDS)
+        if job_type == "verification":
+            return max(base_timeout, self.project.verification.run_timeout_seconds)
         return base_timeout
 
     @staticmethod

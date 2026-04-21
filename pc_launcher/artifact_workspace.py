@@ -502,6 +502,7 @@ class SessionWorkspace:
         user_text: str,
         session_summary: str | None,
         recent_transcript: list[dict[str, object]],
+        task_id: str | None = None,
     ) -> Path:
         self.ensure_structure()
         stamp = timestamp_slug()
@@ -525,13 +526,13 @@ class SessionWorkspace:
             encoding="utf-8",
         )
 
-        task_id = self._extract_task_id(user_text)
-        if task_id is None and job_type == "orchestration":
-            task_id = self._allocate_task_id(self._load_task_index())
+        resolved_task_id = task_id or self._extract_task_id(user_text)
+        if resolved_task_id is None and job_type == "orchestration":
+            resolved_task_id = self._allocate_task_id(self._load_task_index())
         task_path: Path | None = None
-        if task_id:
+        if resolved_task_id:
             task_path = self._claim_task_for_job(
-                task_id=task_id,
+                task_id=resolved_task_id,
                 agent_name=agent_name,
                 user_text=user_text,
                 brief_name=brief_path.name,
@@ -543,7 +544,7 @@ class SessionWorkspace:
                 state_label="in_progress",
                 next_action="Work the current brief and update markdown artifacts before responding.",
                 latest_brief_name=brief_path.name,
-                task_id=task_id,
+                task_id=resolved_task_id,
                 task_path=task_path,
                 job_type=job_type,
                 current_message=user_text,
@@ -559,6 +560,7 @@ class SessionWorkspace:
         job_type: str,
         user_text: str,
         raw_output: str,
+        task_id: str | None = None,
         preserve_handoffs: bool = True,
     ) -> BridgeCompletionPayload:
         self.ensure_structure()
@@ -567,7 +569,7 @@ class SessionWorkspace:
         raw_log_path = self.logs_dir / f"{stamp}_{agent_name}.md"
         raw_log_path.write_text(parsed.raw_output or "(no output)", encoding="utf-8")
 
-        current_task_id = self._extract_task_id(user_text) or self._current_task_id_from_file()
+        current_task_id = task_id or self._extract_task_id(user_text)
         updated_files: list[Path] = [raw_log_path]
         answer_text = parsed.answer_blocks[-1] if parsed.answer_blocks else None
         discuss_text = parsed.discuss_blocks[-1].body if parsed.discuss_blocks else None
@@ -726,6 +728,7 @@ class SessionWorkspace:
         summary: str,
         stdout_text: str = "",
         stderr_text: str = "",
+        task_id: str | None = None,
         planner_recovery_expected: bool = False,
     ) -> str:
         self.ensure_structure()
@@ -769,7 +772,7 @@ class SessionWorkspace:
         )
 
         self.questions_file.write_text(self._build_questions_template(), encoding="utf-8")
-        current_task_id = self._extract_task_id(user_text) or self._current_task_id_from_file()
+        current_task_id = task_id or self._extract_task_id(user_text)
         task_files = self._mark_task_failed(
             task_id=current_task_id,
             agent_name=agent_name,
@@ -1149,11 +1152,6 @@ class SessionWorkspace:
         return index
 
     def _resolve_active_task_id(self, *, index: dict[str, TaskCard], active_agent_name: str) -> str | None:
-        current_task_id = self._current_task_id_from_file()
-        if current_task_id:
-            current_card = index.get(current_task_id)
-            if current_card is not None and current_card.owner == active_agent_name:
-                return current_task_id
         candidate_ids = [
             card.task_id
             for card in sorted(index.values(), key=lambda item: item.task_id)
@@ -1161,7 +1159,7 @@ class SessionWorkspace:
         ]
         if len(candidate_ids) == 1:
             return candidate_ids[0]
-        return current_task_id
+        return None
 
     def _remove_stale_task_files(self, index: dict[str, TaskCard]) -> None:
         keep = {self.task_file(task_id).resolve() for task_id in index}
@@ -1700,18 +1698,6 @@ class SessionWorkspace:
     def _extract_task_id(text: str) -> str | None:
         match = TASK_ID_RE.search(text or "")
         return match.group(1).upper() if match else None
-
-    def _current_task_id_from_file(self) -> str | None:
-        if not self.current_task_file.exists():
-            return None
-        match = re.search(
-            r"^- Task ID: `(?P<task_id>T-\d{3})`$",
-            self.current_task_file.read_text(encoding="utf-8"),
-            re.MULTILINE,
-        )
-        if match is None:
-            return None
-        return match.group("task_id").upper()
 
     def _display_path(self, path: Path) -> str:
         try:

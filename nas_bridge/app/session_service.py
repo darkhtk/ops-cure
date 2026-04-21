@@ -2235,7 +2235,7 @@ class SessionService:
         job = JobModel(
             session_id=session_row.id,
             agent_name=agent.agent_name,
-            job_type="handoff",
+            job_type=self._job_type_for_task(task),
             source_discord_message_id=None,
             user_id=f"agent:{handoff.source_agent}",
             input_text=handoff.body_text,
@@ -2288,6 +2288,12 @@ class SessionService:
             session_summary=session_summary,
             recent_transcript=recent_transcript,
         )
+
+    @staticmethod
+    def _job_type_for_task(task: TaskModel) -> str:
+        if task.role == "verification":
+            return "verification"
+        return "handoff"
 
     def _can_self_claim_task(self, db: Session, *, session_row: SessionModel, task: TaskModel) -> bool:
         active_tasks = list(
@@ -2578,7 +2584,7 @@ class SessionService:
     ) -> bool:
         if failed_agent.lower() == "planner":
             return False
-        if failed_job.job_type != "handoff":
+        if failed_job.job_type not in {"handoff", "verification"}:
             return False
 
         planner_agent = self._find_planner_agent(session_row.agents)
