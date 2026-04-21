@@ -222,6 +222,111 @@ def test_reconcile_from_bridge_summary_marks_active_task_and_consumes_handoff(tm
     assert "`T-011` | owner=`coder`" in task_board_text
 
 
+def test_reconcile_from_bridge_summary_rebuilds_projection_from_canonical_tasks(tmp_path):
+    project_root = tmp_path / "UlalaCheese"
+    project_root.mkdir(parents=True, exist_ok=True)
+    workspace = SessionWorkspace.create(
+        project_workdir=project_root,
+        artifacts=ArtifactConfig(sessions_dir="_discord_sessions", quiet_discord=True),
+        session_name="UlalaCheese",
+        session_id="session-12345678",
+        agent_names=["planner", "curator", "coder", "reviewer", "verifier"],
+    )
+
+    changed = workspace.reconcile_from_bridge_summary(
+        {
+            "status": "resuming_jobs",
+            "desired_status": "ready",
+            "pending_jobs": 0,
+            "active_jobs": 1,
+            "agents": [
+                {"agent_name": "planner", "status": "idle", "worker_id": "worker-planner"},
+                {"agent_name": "curator", "status": "idle", "worker_id": "worker-curator"},
+                {"agent_name": "coder", "status": "busy", "worker_id": "worker-coder"},
+                {"agent_name": "reviewer", "status": "idle", "worker_id": "worker-reviewer"},
+                {"agent_name": "verifier", "status": "idle", "worker_id": "worker-verifier"},
+            ],
+            "tasks": [
+                {
+                    "id": "task-1",
+                    "task_key": "T-101",
+                    "title": "Refresh capture gap inventory",
+                    "role": "coding",
+                    "assigned_agent": "coder",
+                    "source_agent": "planner",
+                    "depends_on_task_key": None,
+                    "semantic_scope": "capture-gaps",
+                    "file_scope": ["CAPTURE_GAPS.md", "docs/captures.md"],
+                    "state": "in_progress",
+                    "revision": 3,
+                    "session_epoch": 1,
+                    "summary_text": "Refresh the capture gap inventory from the latest screenshots.",
+                    "body_text": "T-101\nTarget summary: Refresh the capture gap inventory.\nRead CURRENT_STATE.md and TASK_BOARD.md first.\nFiles: CAPTURE_GAPS.md, docs/captures.md\nDone condition: CAPTURE_GAPS.md reflects the latest artifacts.",
+                    "latest_brief_name": None,
+                    "latest_log_name": "run.log",
+                    "created_at": "2026-04-21T00:00:00+00:00",
+                    "updated_at": "2026-04-21T00:01:00+00:00",
+                    "last_transition_at": "2026-04-21T00:01:00+00:00",
+                },
+                {
+                    "id": "task-2",
+                    "task_key": "T-102",
+                    "title": "Review capture evidence",
+                    "role": "review",
+                    "assigned_agent": "reviewer",
+                    "source_agent": "verifier",
+                    "depends_on_task_key": "T-101",
+                    "semantic_scope": "capture-review",
+                    "file_scope": ["_verification"],
+                    "state": "ready",
+                    "revision": 1,
+                    "session_epoch": 1,
+                    "summary_text": "Review the refreshed capture evidence.",
+                    "body_text": "T-102\nTarget summary: Review the refreshed capture evidence.\nRead CURRENT_STATE.md and TASK_BOARD.md first.\nFiles: _verification/\nDone condition: pass, fail, or replan is recorded.",
+                    "latest_brief_name": None,
+                    "latest_log_name": None,
+                    "created_at": "2026-04-21T00:02:00+00:00",
+                    "updated_at": "2026-04-21T00:02:00+00:00",
+                    "last_transition_at": "2026-04-21T00:02:00+00:00",
+                },
+            ],
+            "queued_handoffs": [
+                {
+                    "id": "handoff-1",
+                    "task_id": "task-2",
+                    "task_key": "T-102",
+                    "source_agent": "verifier",
+                    "target_agent": "reviewer",
+                    "target_role": "review",
+                    "state": "queued",
+                    "revision": 1,
+                    "session_epoch": 1,
+                    "body_text": "T-102\nTarget summary: Review the refreshed capture evidence.\nRead CURRENT_STATE.md and TASK_BOARD.md first.\nFiles: _verification/\nDone condition: pass, fail, or replan is recorded.",
+                    "created_at": "2026-04-21T00:02:00+00:00",
+                    "claimed_at": None,
+                    "consumed_at": None,
+                },
+            ],
+        },
+        agent_name="curator",
+    )
+
+    assert changed is True
+    state_text = workspace.state_file.read_text(encoding="utf-8")
+    current_task_text = workspace.current_task_file.read_text(encoding="utf-8")
+    handoffs_text = workspace.handoffs_file.read_text(encoding="utf-8")
+    task_board_text = workspace.task_board_file.read_text(encoding="utf-8")
+
+    assert "- Status: `in_progress`" in state_text
+    assert "- Last owner: `coder`" in state_text
+    assert "- Task ID: `T-101`" in current_task_text
+    assert "`T-102` -> `reviewer`" in handoffs_text
+    assert "## in_progress" in task_board_text
+    assert "## ready" in task_board_text
+    assert "`T-101` | owner=`coder`" in task_board_text
+    assert "`T-102` | owner=`reviewer`" in task_board_text
+
+
 def test_record_cli_result_keeps_human_line_untruncated(tmp_path):
     project_root = tmp_path / "GenWorld"
     project_root.mkdir(parents=True, exist_ok=True)

@@ -67,6 +67,9 @@ async def complete_job(job_id: str, payload: JobCompleteRequest, request: Reques
             worker_id=payload.worker_id,
             output_text=payload.output_text,
             thread_output_text=payload.thread_output_text,
+            lease_token=payload.lease_token,
+            task_revision=payload.task_revision,
+            session_epoch=payload.session_epoch,
             pid_hint=payload.pid_hint,
         )
     except PermissionError as exc:
@@ -84,6 +87,9 @@ async def fail_job(job_id: str, payload: JobFailRequest, request: Request) -> di
             agent_name=payload.agent_name,
             worker_id=payload.worker_id,
             error_text=payload.error_text,
+            lease_token=payload.lease_token,
+            task_revision=payload.task_revision,
+            session_epoch=payload.session_epoch,
             pid_hint=payload.pid_hint,
         )
     except PermissionError as exc:

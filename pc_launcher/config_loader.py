@@ -63,6 +63,15 @@ class FinderConfig(BaseModel):
     )
 
 
+class ProjectPolicy(BaseModel):
+    max_parallel_agents: int = 1
+    auto_retry: bool = True
+    max_retries: int = 1
+    quiet_discord: bool = True
+    approval_mode: str = "critical_only"
+    allow_cross_agent_handoff: bool = True
+
+
 class VerificationCaptureConfig(BaseModel):
     screenshots: bool = True
     video: bool = False
@@ -101,6 +110,7 @@ class ProjectConfig(BaseModel):
     startup: StartupConfig = Field(default_factory=StartupConfig)
     artifacts: ArtifactConfig = Field(default_factory=ArtifactConfig)
     finder: FinderConfig = Field(default_factory=FinderConfig)
+    policy: ProjectPolicy = Field(default_factory=ProjectPolicy)
     verification: VerificationConfig = Field(default_factory=VerificationConfig)
 
     @model_validator(mode="after")
@@ -144,6 +154,7 @@ class ProjectConfig(BaseModel):
             "agents": [agent.model_dump() for agent in self.agents],
             "startup": self.startup.model_dump(),
             "finder": self.finder.model_dump(),
+            "policy": self.policy.model_dump(),
             "verification": self.verification.model_dump(),
         }
 

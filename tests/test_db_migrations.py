@@ -11,3 +11,4 @@ def test_init_db_records_named_migrations(app_env):
 
     assert "20260420_agent_pause_fields" in applied
     assert "20260420_session_orchestration_fields" in applied
+    assert "20260421_state_kernel_columns" in applied

@@ -7,6 +7,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Iterable
+from uuid import uuid4
 
 from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session, selectinload
@@ -16,18 +17,22 @@ from .drift_monitor import ArtifactSnapshot, DriftEvaluation, DriftMonitor
 from .models import (
     AgentModel,
     ExecutionTargetModel,
+    HandoffModel,
     JobModel,
     PowerTargetModel,
     ProjectFindModel,
     SessionModel,
     SessionOperationModel,
     SessionPolicyModel,
+    TaskEventModel,
+    TaskModel,
     TranscriptModel,
 )
 from .schemas import (
     AgentStatusResponse,
     ArtifactHeartbeatSnapshot,
     ExecutionTargetSummary,
+    HandoffStateSummary,
     JobPayload,
     PolicySetResponse,
     PowerTargetSummary,
@@ -41,6 +46,7 @@ from .schemas import (
     SessionLaunchResponse,
     ProjectFindSummaryResponse,
     SessionSummaryResponse,
+    TaskStateSummary,
     TranscriptContextEntry,
 )
 from .thread_manager import ThreadManager
@@ -85,6 +91,9 @@ FAILURE_PREVIEW_LIMIT = 260
 QUIET_DISCORD_CHAR_LIMIT = 520
 QUIET_DISCORD_LINE_LIMIT = 7
 MIN_HANDOFF_BODY_LENGTH = 40
+TERMINAL_JOB_STATES = {"completed", "failed", "cancelled"}
+READY_TASK_STATES = {"ready", "review", "verify"}
+TERMINAL_HANDOFF_STATES = {"consumed", "superseded", "failed"}
 
 
 @dataclass(slots=True)
@@ -631,6 +640,8 @@ class SessionService:
                 user_id=requested_by,
                 input_text=f"Restart requested by {requested_by}",
                 status="pending",
+                session_epoch=session_row.session_epoch,
+                idempotency_key=f"restart:{session_row.id}:{agent_name}:{requested_by}",
             )
             db.add(job)
             self.transcript_service.add_entry(
@@ -674,6 +685,7 @@ class SessionService:
                 .where(SessionModel.id == session_id),
             )
             thread_id = session_row.discord_thread_id
+            session_row.session_epoch += 1
 
             for job in db.scalars(
                 select(JobModel)
@@ -683,6 +695,29 @@ class SessionService:
                 job.status = "cancelled"
                 job.completed_at = utcnow()
                 job.error_text = "Cancelled by session reset."
+            for job in db.scalars(
+                select(JobModel)
+                .where(JobModel.session_id == session_row.id)
+                .where(JobModel.status == "in_progress"),
+            ):
+                job.status = "cancelled"
+                job.completed_at = utcnow()
+                job.error_text = "Cancelled by session reset."
+
+            for task in db.scalars(select(TaskModel).where(TaskModel.session_id == session_row.id)):
+                task.current_lease_token = None
+                task.current_worker_id = None
+                task.session_epoch = session_row.session_epoch
+                if task.state in {"in_progress", "review", "verify", "ready"}:
+                    task.state = "ready"
+                task.updated_at = utcnow()
+                task.last_transition_at = utcnow()
+
+            for handoff in db.scalars(select(HandoffModel).where(HandoffModel.session_id == session_row.id)):
+                if handoff.state == "claimed":
+                    handoff.state = "queued"
+                handoff.session_epoch = session_row.session_epoch
+                handoff.updated_at = utcnow()
 
             for agent in session_row.agents:
                 db.add(
@@ -693,6 +728,8 @@ class SessionService:
                         user_id=requested_by,
                         input_text=f"Reset requested by {requested_by}",
                         status="pending",
+                        session_epoch=session_row.session_epoch,
+                        idempotency_key=f"reset:{session_row.id}:{agent.agent_name}:{requested_by}:{session_row.session_epoch}",
                     ),
                 )
 
@@ -774,6 +811,8 @@ class SessionService:
                     user_id=user_id,
                     input_text=routing.job_input_text,
                     status="pending",
+                    session_epoch=session_row.session_epoch,
+                    idempotency_key=f"discord:{session_row.id}:{discord_message_id}:{routing.agent_name}",
                 ),
             )
             LOGGER.info(
@@ -937,12 +976,23 @@ class SessionService:
                 .order_by(JobModel.created_at.asc()),
             )
             if job is None:
-                agent.status = "idle"
-                return None
+                payload = self._claim_ready_task_job(
+                    db,
+                    session_row=session_row,
+                    agent=agent,
+                    worker_id=worker_id,
+                )
+                if payload is None:
+                    agent.status = "idle"
+                    return None
+                return payload
 
             job.status = "in_progress"
             job.claimed_at = utcnow()
             job.worker_id = worker_id
+            if not job.lease_token:
+                job.lease_token = str(uuid4())
+            job.session_epoch = session_row.session_epoch
             agent.status = "busy"
             db.flush()
             db.refresh(job)
@@ -971,6 +1021,9 @@ class SessionService:
         worker_id: str,
         output_text: str,
         thread_output_text: str | None = None,
+        lease_token: str | None = None,
+        task_revision: int | None = None,
+        session_epoch: int | None = None,
         pid_hint: int | None,
     ) -> None:
         sanitized = sanitize_text(output_text)
@@ -995,6 +1048,16 @@ class SessionService:
                 .options(selectinload(SessionModel.agents))
                 .where(SessionModel.id == session_id),
             )
+            if job.status in TERMINAL_JOB_STATES:
+                return
+            if not self._validate_job_concurrency(
+                job=job,
+                session_row=session_row,
+                lease_token=lease_token,
+                task_revision=task_revision,
+                session_epoch=session_epoch,
+            ):
+                return
             policy = self._load_policy_summary(db, session_row)
             quiet_discord = policy.quiet_discord if policy is not None else True
             visible_output, handoffs, rejected_handoffs, discussions, rejected_discussions = self._extract_control_updates(
@@ -1016,6 +1079,7 @@ class SessionService:
 
             self._queue_handoffs(
                 db,
+                session_row=session_row,
                 session_id=session_id,
                 source_agent=agent_name,
                 source_job=job,
@@ -1044,6 +1108,15 @@ class SessionService:
                     source_job=job,
                     rejections=rejected_discussions,
                 )
+            self._synchronize_completed_task(
+                db,
+                session_row=session_row,
+                job=job,
+                actor=agent_name,
+                report_text=visible_output,
+                question_present="[[question]]" in sanitized.lower(),
+                handoffs=handoffs,
+            )
             thread_message = self._format_agent_thread_message(
                 agent_name=agent_name,
                 visible_output=display_output,
@@ -1069,6 +1142,9 @@ class SessionService:
         agent_name: str,
         worker_id: str,
         error_text: str,
+        lease_token: str | None = None,
+        task_revision: int | None = None,
+        session_epoch: int | None = None,
         pid_hint: int | None,
     ) -> None:
         sanitized = sanitize_text(error_text)
@@ -1090,6 +1166,16 @@ class SessionService:
                 .options(selectinload(SessionModel.agents))
                 .where(SessionModel.id == session_id),
             )
+            if job.status in TERMINAL_JOB_STATES:
+                return
+            if not self._validate_job_concurrency(
+                job=job,
+                session_row=session_row,
+                lease_token=lease_token,
+                task_revision=task_revision,
+                session_epoch=session_epoch,
+            ):
+                return
             policy = self._load_policy_summary(db, session_row)
             quiet_discord = policy.quiet_discord if policy is not None else True
 
@@ -1102,6 +1188,13 @@ class SessionService:
             agent.last_heartbeat_at = utcnow()
             agent.last_error = sanitized
             thread_id = session_row.discord_thread_id
+            self._synchronize_failed_task(
+                db,
+                session_row=session_row,
+                job=job,
+                actor=agent_name,
+                error_text=sanitized,
+            )
 
             recovery_queued = self._queue_planner_recovery(
                 db,
@@ -1334,6 +1427,22 @@ class SessionService:
             )
             or 0,
         )
+        tasks = list(
+            db.scalars(
+                select(TaskModel)
+                .where(TaskModel.session_id == session_row.id)
+                .order_by(TaskModel.created_at.asc()),
+            ),
+        )
+        queued_handoffs = list(
+            db.scalars(
+                select(HandoffModel)
+                .options(selectinload(HandoffModel.task))
+                .where(HandoffModel.session_id == session_row.id)
+                .where(HandoffModel.state == "queued")
+                .order_by(HandoffModel.created_at.asc()),
+            ),
+        )
         return SessionSummaryResponse(
             id=session_row.id,
             project_name=session_row.project_name,
@@ -1352,6 +1461,7 @@ class SessionService:
             last_recovery_reason=session_row.last_recovery_reason,
             created_by=session_row.created_by,
             launcher_id=session_row.launcher_id,
+            session_epoch=session_row.session_epoch,
             created_at=session_row.created_at,
             closed_at=session_row.closed_at,
             power_target=self._load_power_target_summary(db, session_row),
@@ -1360,6 +1470,8 @@ class SessionService:
             active_operation=self._load_active_operation(db, session_row),
             pending_jobs=pending_jobs,
             active_jobs=active_jobs,
+            tasks=[self._to_task_summary(task) for task in tasks],
+            queued_handoffs=[self._to_handoff_summary(handoff) for handoff in queued_handoffs],
             agents=[self._to_agent_response(agent) for agent in session_row.agents],
         )
 
@@ -1509,6 +1621,56 @@ class SessionService:
             current_task_state=drift.current_task_state,
         )
 
+    @staticmethod
+    def _to_task_summary(task: TaskModel) -> TaskStateSummary:
+        file_scope: list[str] = []
+        if task.file_scope_json:
+            try:
+                raw_scope = json.loads(task.file_scope_json)
+                if isinstance(raw_scope, list):
+                    file_scope = [str(item) for item in raw_scope if str(item).strip()]
+            except Exception:  # noqa: BLE001
+                file_scope = []
+        return TaskStateSummary(
+            id=task.id,
+            task_key=task.task_key,
+            title=task.title,
+            role=task.role,
+            assigned_agent=task.assigned_agent,
+            source_agent=task.source_agent,
+            depends_on_task_key=task.depends_on_task_key,
+            semantic_scope=task.semantic_scope,
+            file_scope=file_scope,
+            state=task.state,
+            revision=task.revision,
+            session_epoch=task.session_epoch,
+            summary_text=task.summary_text,
+            body_text=task.body_text,
+            latest_brief_name=task.latest_brief_name,
+            latest_log_name=task.latest_log_name,
+            created_at=task.created_at,
+            updated_at=task.updated_at,
+            last_transition_at=task.last_transition_at,
+        )
+
+    @staticmethod
+    def _to_handoff_summary(handoff: HandoffModel) -> HandoffStateSummary:
+        return HandoffStateSummary(
+            id=handoff.id,
+            task_id=handoff.task_id,
+            task_key=handoff.task.task_key if handoff.task is not None else "",
+            source_agent=handoff.source_agent,
+            target_agent=handoff.target_agent,
+            target_role=handoff.target_role,
+            state=handoff.state,
+            revision=handoff.revision,
+            session_epoch=handoff.session_epoch,
+            body_text=handoff.body_text,
+            created_at=handoff.created_at,
+            claimed_at=handoff.claimed_at,
+            consumed_at=handoff.consumed_at,
+        )
+
     def get_drift_overview(self) -> tuple[int, int]:
         with session_scope() as db:
             sessions = list(
@@ -1567,6 +1729,10 @@ class SessionService:
             session_id=job.session_id,
             agent_name=job.agent_name,
             job_type=job.job_type,
+            task_id=job.task_id,
+            task_revision=job.task_revision,
+            lease_token=job.lease_token,
+            session_epoch=job.session_epoch,
             input_text=job.input_text,
             user_id=job.user_id,
             project_name=session_row.target_project_name or session_row.project_name,
@@ -1645,6 +1811,25 @@ class SessionService:
                 .limit(SESSION_SUMMARY_PENDING_LIMIT),
             ),
         )
+        ready_tasks = list(
+            db.scalars(
+                select(TaskModel)
+                .where(TaskModel.session_id == session_row.id)
+                .where(TaskModel.state.in_(tuple(sorted(READY_TASK_STATES))))
+                .order_by(TaskModel.updated_at.asc())
+                .limit(SESSION_SUMMARY_PENDING_LIMIT),
+            ),
+        )
+        queued_handoffs = list(
+            db.scalars(
+                select(HandoffModel)
+                .options(selectinload(HandoffModel.task))
+                .where(HandoffModel.session_id == session_row.id)
+                .where(HandoffModel.state == "queued")
+                .order_by(HandoffModel.created_at.asc())
+                .limit(SESSION_SUMMARY_PENDING_LIMIT),
+            ),
+        )
 
         lines = [
             "Session overview:",
@@ -1689,6 +1874,25 @@ class SessionService:
                 f"- {job.agent_name} [{job.job_type}] {job.status}: "
                 f"{self._trim_context_text(job.input_text, SESSION_SUMMARY_TEXT_LIMIT)}"
                 for job in pending_jobs
+            )
+
+        if ready_tasks:
+            lines.append("")
+            lines.append("Ready queue:")
+            lines.extend(
+                f"- {task.task_key} [{task.role}] {task.state} owner={task.assigned_agent or 'unassigned'}: "
+                f"{self._trim_context_text(task.summary_text or task.title, SESSION_SUMMARY_TEXT_LIMIT)}"
+                for task in ready_tasks
+            )
+
+        if queued_handoffs:
+            lines.append("")
+            lines.append("Queued handoffs:")
+            lines.extend(
+                f"- {handoff.task.task_key if handoff.task is not None else 'task-pending'} "
+                f"{handoff.source_agent}->{handoff.target_agent}: "
+                f"{self._trim_context_text(handoff.body_text, SESSION_SUMMARY_TEXT_LIMIT)}"
+                for handoff in queued_handoffs
             )
 
         return "\n".join(lines)
@@ -1836,22 +2040,54 @@ class SessionService:
         self,
         db: Session,
         *,
+        session_row: SessionModel,
         session_id: str,
         source_agent: str,
         source_job: JobModel,
         handoffs: list[HandoffRequest],
     ) -> None:
+        agent_roles = {agent.agent_name: agent.role for agent in session_row.agents}
         for handoff in handoffs:
-            db.add(
-                JobModel(
-                    session_id=session_id,
-                    agent_name=handoff.target_agent,
-                    job_type="handoff",
-                    source_discord_message_id=source_job.source_discord_message_id,
-                    user_id=f"agent:{source_agent}",
-                    input_text=handoff.body,
-                    status="pending",
-                ),
+            task = self._upsert_task_for_handoff(
+                db,
+                session_row=session_row,
+                source_agent=source_agent,
+                handoff=handoff,
+            )
+            for stale_handoff in db.scalars(
+                select(HandoffModel)
+                .where(HandoffModel.task_id == task.id)
+                .where(HandoffModel.state.in_(["queued", "claimed"])),
+            ):
+                stale_handoff.state = "superseded"
+                stale_handoff.updated_at = utcnow()
+                stale_handoff.consumed_at = stale_handoff.consumed_at or utcnow()
+            handoff_row = HandoffModel(
+                session_id=session_id,
+                task_id=task.id,
+                source_job_id=source_job.id,
+                source_agent=source_agent,
+                target_agent=handoff.target_agent,
+                target_role=agent_roles.get(handoff.target_agent, task.role),
+                state="queued",
+                revision=task.revision,
+                session_epoch=session_row.session_epoch,
+                body_text=handoff.body,
+            )
+            db.add(handoff_row)
+            db.flush()
+            self._append_task_event(
+                db,
+                session_id=session_id,
+                task=task,
+                handoff=handoff_row,
+                event_type="handoff_queued",
+                actor=source_agent,
+                payload={
+                    "target_agent": handoff.target_agent,
+                    "task_key": task.task_key,
+                    "revision": task.revision,
+                },
             )
             self.transcript_service.add_entry(
                 db,
@@ -1865,6 +2101,365 @@ class SessionService:
                 ),
                 source_discord_message_id=source_job.source_discord_message_id,
             )
+
+    @staticmethod
+    def _append_task_event(
+        db: Session,
+        *,
+        session_id: str,
+        task: TaskModel | None,
+        handoff: HandoffModel | None,
+        event_type: str,
+        actor: str,
+        payload: dict[str, object] | None = None,
+    ) -> None:
+        db.add(
+            TaskEventModel(
+                session_id=session_id,
+                task_id=task.id if task is not None else None,
+                handoff_id=handoff.id if handoff is not None else None,
+                event_type=event_type,
+                actor=actor,
+                payload_json=json.dumps(payload, ensure_ascii=False) if payload else None,
+            ),
+        )
+
+    def _upsert_task_for_handoff(
+        self,
+        db: Session,
+        *,
+        session_row: SessionModel,
+        source_agent: str,
+        handoff: HandoffRequest,
+    ) -> TaskModel:
+        target_agent = self._require_agent(db, session_id=session_row.id, agent_name=handoff.target_agent)
+        task_key = handoff.task_id or f"T-{uuid4().hex[:6].upper()}"
+        summary_line = self._extract_prefixed_line(handoff.body, "Target summary:")
+        file_scope = self._extract_prefixed_line(handoff.body, "Files:")
+        done_condition = self._extract_prefixed_line(handoff.body, "Done condition:")
+        semantic_scope = self._derive_semantic_scope(summary_line or handoff.body)
+
+        task = db.scalar(
+            select(TaskModel)
+            .where(TaskModel.session_id == session_row.id)
+            .where(TaskModel.task_key == task_key),
+        )
+        if task is None:
+            task = TaskModel(
+                session_id=session_row.id,
+                task_key=task_key,
+                title=self._derive_task_title_from_handoff(handoff.body),
+                role=target_agent.role,
+                assigned_agent=handoff.target_agent,
+                source_agent=source_agent,
+                state="ready",
+                revision=1,
+                session_epoch=session_row.session_epoch,
+                summary_text=summary_line,
+                body_text=handoff.body,
+                semantic_scope=semantic_scope,
+                file_scope_json=json.dumps(
+                    [item.strip() for item in (file_scope or "").split(",") if item.strip()],
+                    ensure_ascii=False,
+                )
+                if file_scope
+                else None,
+            )
+            db.add(task)
+            db.flush()
+        else:
+            task.title = self._derive_task_title_from_handoff(handoff.body)
+            task.role = target_agent.role
+            task.assigned_agent = handoff.target_agent
+            task.source_agent = source_agent
+            task.summary_text = summary_line
+            task.body_text = handoff.body
+            task.semantic_scope = semantic_scope
+            task.file_scope_json = (
+                json.dumps(
+                    [item.strip() for item in (file_scope or "").split(",") if item.strip()],
+                    ensure_ascii=False,
+                )
+                if file_scope
+                else None
+            )
+            task.state = "ready"
+            task.revision += 1
+            task.session_epoch = session_row.session_epoch
+            task.current_lease_token = None
+            task.current_worker_id = None
+            task.updated_at = utcnow()
+            task.last_transition_at = utcnow()
+
+        if done_condition:
+            task.latest_brief_name = None
+            task.latest_log_name = None
+        return task
+
+    def _claim_ready_task_job(
+        self,
+        db: Session,
+        *,
+        session_row: SessionModel,
+        agent: AgentModel,
+        worker_id: str,
+    ) -> JobPayload | None:
+        role_candidates = {agent.role, agent.agent_name}
+        handoff = next(
+            (
+                candidate
+                for candidate in db.scalars(
+                    select(HandoffModel)
+                    .options(selectinload(HandoffModel.task))
+                    .where(HandoffModel.session_id == session_row.id)
+                    .where(HandoffModel.state == "queued")
+                    .where(HandoffModel.session_epoch == session_row.session_epoch)
+                    .where(
+                        (HandoffModel.target_agent == agent.agent_name)
+                        | (HandoffModel.target_role.in_(tuple(role_candidates)))
+                    )
+                    .order_by(HandoffModel.created_at.asc()),
+                )
+                if candidate.task is not None and self._can_self_claim_task(db, session_row=session_row, task=candidate.task)
+            ),
+            None,
+        )
+        if handoff is None or handoff.task is None:
+            return None
+
+        task = handoff.task
+        if task.state not in READY_TASK_STATES or task.session_epoch != session_row.session_epoch:
+            return None
+
+        lease_token = str(uuid4())
+        job = JobModel(
+            session_id=session_row.id,
+            agent_name=agent.agent_name,
+            job_type="handoff",
+            source_discord_message_id=None,
+            user_id=f"agent:{handoff.source_agent}",
+            input_text=handoff.body_text,
+            status="in_progress",
+            worker_id=worker_id,
+            task_id=task.id,
+            handoff_id=handoff.id,
+            session_epoch=session_row.session_epoch,
+            task_revision=task.revision,
+            lease_token=lease_token,
+            idempotency_key=f"{session_row.id}:{task.task_key}:{task.revision}:{agent.agent_name}",
+            claimed_at=utcnow(),
+        )
+        db.add(job)
+        db.flush()
+        db.refresh(job)
+
+        task.state = "in_progress"
+        task.current_lease_token = lease_token
+        task.current_worker_id = worker_id
+        task.assigned_agent = agent.agent_name
+        task.updated_at = utcnow()
+        task.last_transition_at = utcnow()
+
+        handoff.state = "claimed"
+        handoff.claimed_by_job_id = job.id
+        handoff.claimed_at = utcnow()
+        handoff.updated_at = utcnow()
+
+        self._append_task_event(
+            db,
+            session_id=session_row.id,
+            task=task,
+            handoff=handoff,
+            event_type="task_claimed",
+            actor=agent.agent_name,
+            payload={"job_id": job.id, "lease_token": lease_token, "revision": task.revision},
+        )
+
+        recent_transcript = self._load_recent_transcript(db, session_id=session_row.id)
+        session_summary = self._build_session_summary(
+            db,
+            session_row=session_row,
+            current_agent=agent.agent_name,
+        )
+        agent.status = "busy"
+        return self._to_job_payload(
+            job,
+            session_row=session_row,
+            session_summary=session_summary,
+            recent_transcript=recent_transcript,
+        )
+
+    def _can_self_claim_task(self, db: Session, *, session_row: SessionModel, task: TaskModel) -> bool:
+        active_tasks = list(
+            db.scalars(
+                select(TaskModel)
+                .where(TaskModel.session_id == session_row.id)
+                .where(TaskModel.state == "in_progress")
+                .where(TaskModel.id != task.id),
+            ),
+        )
+        candidate_scope = self._parse_scope_list(task.file_scope_json)
+        for active in active_tasks:
+            if task.semantic_scope and active.semantic_scope and task.semantic_scope == active.semantic_scope:
+                return False
+            active_scope = self._parse_scope_list(active.file_scope_json)
+            if candidate_scope and active_scope and candidate_scope.intersection(active_scope):
+                return False
+        return True
+
+    @staticmethod
+    def _parse_scope_list(raw_scope: str | None) -> set[str]:
+        if not raw_scope:
+            return set()
+        try:
+            payload = json.loads(raw_scope)
+        except Exception:  # noqa: BLE001
+            return set()
+        if not isinstance(payload, list):
+            return set()
+        return {str(item).strip() for item in payload if str(item).strip()}
+
+    @staticmethod
+    def _extract_prefixed_line(text: str, prefix: str) -> str | None:
+        for raw_line in text.splitlines():
+            if raw_line.strip().lower().startswith(prefix.lower()):
+                return raw_line.split(":", 1)[1].strip() if ":" in raw_line else raw_line.strip()
+        return None
+
+    @staticmethod
+    def _derive_task_title_from_handoff(body: str) -> str:
+        summary_line = SessionService._extract_prefixed_line(body, "Target summary:")
+        first_line = next((line.strip() for line in body.splitlines() if line.strip()), "Focused follow-up task")
+        candidate = summary_line or first_line
+        candidate = TASK_CARD_ID_RE.sub("", candidate).strip(" -:\t")
+        if not candidate:
+            candidate = "Focused follow-up task"
+        return candidate[:96]
+
+    @staticmethod
+    def _derive_semantic_scope(text: str) -> str | None:
+        normalized = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+        return normalized[:64] or None
+
+    @staticmethod
+    def _validate_job_concurrency(
+        *,
+        job: JobModel,
+        session_row: SessionModel,
+        lease_token: str | None,
+        task_revision: int | None,
+        session_epoch: int | None,
+    ) -> bool:
+        if session_epoch is not None and job.session_epoch != session_epoch:
+            return False
+        if job.session_epoch != session_row.session_epoch:
+            return False
+        if job.lease_token and lease_token is not None and job.lease_token != lease_token:
+            return False
+        if job.task_revision and task_revision is not None and job.task_revision != task_revision:
+            return False
+        return True
+
+    def _synchronize_completed_task(
+        self,
+        db: Session,
+        *,
+        session_row: SessionModel,
+        job: JobModel,
+        actor: str,
+        report_text: str,
+        question_present: bool,
+        handoffs: list[HandoffRequest],
+    ) -> None:
+        if not job.task_id:
+            return
+        task = db.scalar(select(TaskModel).where(TaskModel.id == job.task_id))
+        if task is None:
+            return
+
+        same_task_handoff = any(
+            (handoff.task_id or "").strip().upper() == task.task_key.upper()
+            for handoff in handoffs
+        )
+        if same_task_handoff:
+            next_state = task.state if task.state in READY_TASK_STATES else "ready"
+        elif question_present:
+            next_state = "blocked_on_operator"
+        else:
+            next_state = "done"
+
+        task.state = next_state
+        if not same_task_handoff:
+            task.revision += 1
+        task.current_lease_token = None
+        task.current_worker_id = None
+        task.latest_log_name = None
+        task.updated_at = utcnow()
+        task.last_transition_at = utcnow()
+        if report_text:
+            task.summary_text = self._trim_context_text(report_text, SESSION_SUMMARY_TEXT_LIMIT)
+
+        handoff = None
+        if job.handoff_id:
+            handoff = db.scalar(select(HandoffModel).where(HandoffModel.id == job.handoff_id))
+            if handoff is not None and handoff.state not in TERMINAL_HANDOFF_STATES:
+                handoff.state = "consumed"
+                handoff.consumed_at = utcnow()
+                handoff.updated_at = utcnow()
+
+        self._append_task_event(
+            db,
+            session_id=session_row.id,
+            task=task,
+            handoff=handoff,
+            event_type="task_completed",
+            actor=actor,
+            payload={
+                "state": next_state,
+                "revision": task.revision,
+                "handoff_count": len(handoffs),
+            },
+        )
+
+    def _synchronize_failed_task(
+        self,
+        db: Session,
+        *,
+        session_row: SessionModel,
+        job: JobModel,
+        actor: str,
+        error_text: str,
+    ) -> None:
+        if not job.task_id:
+            return
+        task = db.scalar(select(TaskModel).where(TaskModel.id == job.task_id))
+        if task is None:
+            return
+
+        task.state = "failed"
+        task.revision += 1
+        task.current_lease_token = None
+        task.current_worker_id = None
+        task.updated_at = utcnow()
+        task.last_transition_at = utcnow()
+        task.summary_text = self._trim_context_text(error_text, SESSION_SUMMARY_TEXT_LIMIT)
+
+        handoff = None
+        if job.handoff_id:
+            handoff = db.scalar(select(HandoffModel).where(HandoffModel.id == job.handoff_id))
+            if handoff is not None and handoff.state not in TERMINAL_HANDOFF_STATES:
+                handoff.state = "failed"
+                handoff.updated_at = utcnow()
+
+        self._append_task_event(
+            db,
+            session_id=session_row.id,
+            task=task,
+            handoff=handoff,
+            event_type="task_failed",
+            actor=actor,
+            payload={"state": "failed", "revision": task.revision},
+        )
 
     def _queue_discussions(
         self,
@@ -1891,6 +2486,11 @@ class SessionService:
                                 discuss=discuss,
                             ),
                             status="pending",
+                            session_epoch=source_job.session_epoch,
+                            idempotency_key=(
+                                f"discuss:{session_id}:{discuss.anomaly_id or 'none'}:"
+                                f"{source_agent}:{target_agent}:{discuss.discuss_type}"
+                            ),
                         ),
                     )
                     self.transcript_service.add_entry(
@@ -1919,6 +2519,11 @@ class SessionService:
                             discuss=discuss,
                         ),
                         status="pending",
+                        session_epoch=source_job.session_epoch,
+                        idempotency_key=(
+                            f"discuss:{session_id}:{discuss.anomaly_id or 'none'}:"
+                            f"{source_agent}:{discuss.to_agent}:{discuss.discuss_type}"
+                        ),
                     ),
                 )
                 self.transcript_service.add_entry(
@@ -2004,6 +2609,8 @@ class SessionService:
                 user_id="system:recovery",
                 input_text=prompt,
                 status="pending",
+                session_epoch=session_row.session_epoch,
+                idempotency_key=f"recovery:{session_row.id}:{failed_job.id}",
             ),
         )
         self.transcript_service.add_entry(
@@ -2074,6 +2681,8 @@ class SessionService:
                     rejections=rejections,
                 ),
                 status="pending",
+                session_epoch=session_row.session_epoch,
+                idempotency_key=f"handoff_repair:{session_row.id}:{source_job.id}",
             ),
         )
         self.transcript_service.add_entry(

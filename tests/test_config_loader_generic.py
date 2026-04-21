@@ -72,3 +72,19 @@ agents:
     assert config.profile_name == "LegacyProfile"
     assert config.resolved_default_target_name == "LegacyProfile"
     assert config.default_workdir == r"C:\Projects\LegacyProfile"
+
+
+def test_sample_profile_includes_curator_and_verifier_roles():
+    sample_project = OPS_CURE_ROOT / "pc_launcher" / "projects" / "sample" / "project.yaml"
+
+    config = load_project(sample_project)
+
+    roles = {agent.name: agent.role for agent in config.agents}
+
+    assert "curator" in roles
+    assert roles["curator"] == "coordination"
+    assert "verifier" in roles
+    assert roles["verifier"] == "verification"
+    assert config.policy.max_parallel_agents == 3
+    assert config.verification.enabled is True
+    assert {"smoke", "play_capture", "repro_bug"}.issubset(config.verification.commands.keys())

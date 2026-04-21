@@ -164,6 +164,9 @@ class WorkerRuntime:
                     agent_name=self.agent_name,
                     worker_id=self.worker_id,
                     output_text=f"Agent `{self.agent_name}` restarted successfully.",
+                    lease_token=str(job.get("lease_token") or "") or None,
+                    task_revision=int(job.get("task_revision") or 0) or None,
+                    session_epoch=int(job.get("session_epoch") or 0) or None,
                     pid_hint=self.pid_hint,
                 )
             else:
@@ -175,6 +178,9 @@ class WorkerRuntime:
                     worker_id=self.worker_id,
                     output_text=completion.control_text,
                     thread_output_text=completion.thread_text,
+                    lease_token=str(job.get("lease_token") or "") or None,
+                    task_revision=int(job.get("task_revision") or 0) or None,
+                    session_epoch=int(job.get("session_epoch") or 0) or None,
                     pid_hint=self.pid_hint,
                 )
         except Exception as exc:  # noqa: BLE001
@@ -186,6 +192,9 @@ class WorkerRuntime:
                     agent_name=self.agent_name,
                     worker_id=self.worker_id,
                     error_text=str(exc),
+                    lease_token=str(job.get("lease_token") or "") or None,
+                    task_revision=int(job.get("task_revision") or 0) or None,
+                    session_epoch=int(job.get("session_epoch") or 0) or None,
                     pid_hint=self.pid_hint,
                 )
             except Exception as report_exc:  # noqa: BLE001

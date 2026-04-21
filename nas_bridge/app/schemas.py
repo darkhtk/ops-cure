@@ -183,6 +183,44 @@ class TranscriptContextEntry(BaseModel):
     created_at: datetime
 
 
+class TaskStateSummary(BaseModel):
+    id: str
+    task_key: str
+    title: str
+    role: str
+    assigned_agent: str | None = None
+    source_agent: str | None = None
+    depends_on_task_key: str | None = None
+    semantic_scope: str | None = None
+    file_scope: list[str] = Field(default_factory=list)
+    state: str
+    revision: int = 1
+    session_epoch: int = 1
+    summary_text: str | None = None
+    body_text: str | None = None
+    latest_brief_name: str | None = None
+    latest_log_name: str | None = None
+    created_at: datetime
+    updated_at: datetime
+    last_transition_at: datetime
+
+
+class HandoffStateSummary(BaseModel):
+    id: str
+    task_id: str
+    task_key: str
+    source_agent: str
+    target_agent: str
+    target_role: str
+    state: str
+    revision: int = 1
+    session_epoch: int = 1
+    body_text: str
+    created_at: datetime
+    claimed_at: datetime | None = None
+    consumed_at: datetime | None = None
+
+
 class PowerTargetSummary(BaseModel):
     name: str
     provider: str
@@ -257,6 +295,10 @@ class JobPayload(BaseModel):
     session_id: str
     agent_name: str
     job_type: str
+    task_id: str | None = None
+    task_revision: int = 0
+    lease_token: str | None = None
+    session_epoch: int = 1
     input_text: str
     user_id: str
     project_name: str
@@ -287,6 +329,9 @@ class JobCompleteRequest(BaseModel):
     worker_id: str
     output_text: str
     thread_output_text: str | None = None
+    lease_token: str | None = None
+    task_revision: int | None = None
+    session_epoch: int | None = None
     pid_hint: int | None = None
 
 
@@ -295,6 +340,9 @@ class JobFailRequest(BaseModel):
     agent_name: str
     worker_id: str
     error_text: str
+    lease_token: str | None = None
+    task_revision: int | None = None
+    session_epoch: int | None = None
     pid_hint: int | None = None
 
 
@@ -377,6 +425,7 @@ class SessionSummaryResponse(BaseModel):
     last_recovery_reason: str | None = None
     created_by: str
     launcher_id: str | None = None
+    session_epoch: int = 1
     created_at: datetime
     closed_at: datetime | None = None
     power_target: PowerTargetSummary | None = None
@@ -385,6 +434,8 @@ class SessionSummaryResponse(BaseModel):
     active_operation: SessionOperationResponse | None = None
     pending_jobs: int = 0
     active_jobs: int = 0
+    tasks: list[TaskStateSummary] = Field(default_factory=list)
+    queued_handoffs: list[HandoffStateSummary] = Field(default_factory=list)
     agents: list[AgentStatusResponse]
 
 

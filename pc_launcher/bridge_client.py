@@ -158,6 +158,9 @@ class BridgeClient:
         worker_id: str,
         output_text: str,
         thread_output_text: str | None = None,
+        lease_token: str | None = None,
+        task_revision: int | None = None,
+        session_epoch: int | None = None,
         pid_hint: int | None,
     ) -> dict[str, Any]:
         payload = {
@@ -169,6 +172,12 @@ class BridgeClient:
         }
         if thread_output_text is not None:
             payload["thread_output_text"] = thread_output_text
+        if lease_token is not None:
+            payload["lease_token"] = lease_token
+        if task_revision is not None:
+            payload["task_revision"] = task_revision
+        if session_epoch is not None:
+            payload["session_epoch"] = session_epoch
         return self._post(f"/api/workers/jobs/{job_id}/complete", payload)
 
     def fail_job(
@@ -179,18 +188,25 @@ class BridgeClient:
         agent_name: str,
         worker_id: str,
         error_text: str,
+        lease_token: str | None = None,
+        task_revision: int | None = None,
+        session_epoch: int | None = None,
         pid_hint: int | None,
     ) -> dict[str, Any]:
-        return self._post(
-            f"/api/workers/jobs/{job_id}/fail",
-            {
-                "session_id": session_id,
-                "agent_name": agent_name,
-                "worker_id": worker_id,
-                "error_text": error_text,
-                "pid_hint": pid_hint,
-            },
-        )
+        payload = {
+            "session_id": session_id,
+            "agent_name": agent_name,
+            "worker_id": worker_id,
+            "error_text": error_text,
+            "pid_hint": pid_hint,
+        }
+        if lease_token is not None:
+            payload["lease_token"] = lease_token
+        if task_revision is not None:
+            payload["task_revision"] = task_revision
+        if session_epoch is not None:
+            payload["session_epoch"] = session_epoch
+        return self._post(f"/api/workers/jobs/{job_id}/fail", payload)
 
     def get_session(self, session_id: str) -> dict[str, Any]:
         return self._get(f"/api/sessions/{session_id}")

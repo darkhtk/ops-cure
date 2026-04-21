@@ -34,6 +34,7 @@ class SessionModel(Base):
     last_recovery_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_recovery_reason: Mapped[str | None] = mapped_column(Text(), nullable=True)
     policy_version: Mapped[int] = mapped_column(Integer(), default=1)
+    session_epoch: Mapped[int] = mapped_column(Integer(), default=1)
     created_by: Mapped[str] = mapped_column(index=True)
     launcher_id: Mapped[str | None] = mapped_column(index=True, nullable=True)
     status_message_id: Mapped[str | None] = mapped_column(index=True, nullable=True)
@@ -63,6 +64,18 @@ class SessionModel(Base):
         cascade="all, delete-orphan",
     )
     operations: Mapped[list["SessionOperationModel"]] = relationship(
+        back_populates="session",
+        cascade="all, delete-orphan",
+    )
+    tasks: Mapped[list["TaskModel"]] = relationship(
+        back_populates="session",
+        cascade="all, delete-orphan",
+    )
+    handoffs: Mapped[list["HandoffModel"]] = relationship(
+        back_populates="session",
+        cascade="all, delete-orphan",
+    )
+    task_events: Mapped[list["TaskEventModel"]] = relationship(
         back_populates="session",
         cascade="all, delete-orphan",
     )
@@ -110,6 +123,12 @@ class JobModel(Base):
     user_id: Mapped[str] = mapped_column(index=True)
     input_text: Mapped[str] = mapped_column(Text())
     status: Mapped[str] = mapped_column(index=True, default="pending")
+    task_id: Mapped[str | None] = mapped_column(ForeignKey("tasks.id", ondelete="SET NULL"), index=True, nullable=True)
+    handoff_id: Mapped[str | None] = mapped_column(ForeignKey("handoffs.id", ondelete="SET NULL"), index=True, nullable=True)
+    session_epoch: Mapped[int] = mapped_column(Integer(), default=1)
+    task_revision: Mapped[int] = mapped_column(Integer(), default=0)
+    lease_token: Mapped[str | None] = mapped_column(index=True, nullable=True)
+    idempotency_key: Mapped[str | None] = mapped_column(index=True, nullable=True)
     worker_id: Mapped[str | None] = mapped_column(index=True, nullable=True)
     result_text: Mapped[str | None] = mapped_column(Text(), nullable=True)
     error_text: Mapped[str | None] = mapped_column(Text(), nullable=True)
@@ -118,6 +137,97 @@ class JobModel(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     session: Mapped[SessionModel] = relationship(back_populates="jobs")
+
+
+class TaskModel(Base):
+    __tablename__ = "tasks"
+    __table_args__ = (
+        UniqueConstraint("session_id", "task_key", name="uq_task_per_session"),
+        Index("ix_tasks_session_state_role", "session_id", "state", "role"),
+        Index("ix_tasks_session_agent_state", "session_id", "assigned_agent", "state"),
+    )
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=lambda: str(uuid.uuid4()))
+    session_id: Mapped[str] = mapped_column(ForeignKey("sessions.id", ondelete="CASCADE"), index=True)
+    task_key: Mapped[str] = mapped_column(index=True)
+    title: Mapped[str] = mapped_column(Text(), default="Focused follow-up task")
+    role: Mapped[str] = mapped_column(index=True, default="coding")
+    assigned_agent: Mapped[str | None] = mapped_column(index=True, nullable=True)
+    source_agent: Mapped[str | None] = mapped_column(index=True, nullable=True)
+    depends_on_task_key: Mapped[str | None] = mapped_column(index=True, nullable=True)
+    semantic_scope: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    file_scope_json: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    state: Mapped[str] = mapped_column(index=True, default="ready")
+    revision: Mapped[int] = mapped_column(Integer(), default=1)
+    session_epoch: Mapped[int] = mapped_column(Integer(), default=1)
+    current_lease_token: Mapped[str | None] = mapped_column(index=True, nullable=True)
+    current_worker_id: Mapped[str | None] = mapped_column(index=True, nullable=True)
+    summary_text: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    body_text: Mapped[str] = mapped_column(Text(), default="")
+    latest_brief_name: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    latest_log_name: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+    last_transition_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    session: Mapped[SessionModel] = relationship(back_populates="tasks")
+    handoffs: Mapped[list["HandoffModel"]] = relationship(
+        back_populates="task",
+        cascade="all, delete-orphan",
+    )
+    events: Mapped[list["TaskEventModel"]] = relationship(
+        back_populates="task",
+        cascade="all, delete-orphan",
+    )
+
+
+class HandoffModel(Base):
+    __tablename__ = "handoffs"
+    __table_args__ = (
+        Index("ix_handoffs_session_state_target", "session_id", "state", "target_agent"),
+        Index("ix_handoffs_session_role_state", "session_id", "target_role", "state"),
+    )
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=lambda: str(uuid.uuid4()))
+    session_id: Mapped[str] = mapped_column(ForeignKey("sessions.id", ondelete="CASCADE"), index=True)
+    task_id: Mapped[str] = mapped_column(ForeignKey("tasks.id", ondelete="CASCADE"), index=True)
+    source_job_id: Mapped[str | None] = mapped_column(ForeignKey("jobs.id", ondelete="SET NULL"), index=True, nullable=True)
+    claimed_by_job_id: Mapped[str | None] = mapped_column(ForeignKey("jobs.id", ondelete="SET NULL"), index=True, nullable=True)
+    source_agent: Mapped[str] = mapped_column(index=True)
+    target_agent: Mapped[str] = mapped_column(index=True)
+    target_role: Mapped[str] = mapped_column(index=True)
+    state: Mapped[str] = mapped_column(index=True, default="queued")
+    revision: Mapped[int] = mapped_column(Integer(), default=1)
+    session_epoch: Mapped[int] = mapped_column(Integer(), default=1)
+    body_text: Mapped[str] = mapped_column(Text())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+    session: Mapped[SessionModel] = relationship(back_populates="handoffs")
+    task: Mapped[TaskModel] = relationship(back_populates="handoffs")
+
+
+class TaskEventModel(Base):
+    __tablename__ = "task_events"
+    __table_args__ = (
+        Index("ix_task_events_session_created", "session_id", "created_at"),
+        Index("ix_task_events_task_created", "task_id", "created_at"),
+        Index("ix_task_events_handoff_created", "handoff_id", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=lambda: str(uuid.uuid4()))
+    session_id: Mapped[str] = mapped_column(ForeignKey("sessions.id", ondelete="CASCADE"), index=True)
+    task_id: Mapped[str | None] = mapped_column(ForeignKey("tasks.id", ondelete="CASCADE"), index=True, nullable=True)
+    handoff_id: Mapped[str | None] = mapped_column(ForeignKey("handoffs.id", ondelete="CASCADE"), index=True, nullable=True)
+    event_type: Mapped[str] = mapped_column(index=True)
+    actor: Mapped[str] = mapped_column(index=True)
+    payload_json: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    session: Mapped[SessionModel] = relationship(back_populates="task_events")
+    task: Mapped[TaskModel | None] = relationship(back_populates="events")
 
 
 class TranscriptModel(Base):

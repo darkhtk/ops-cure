@@ -331,6 +331,132 @@ def test_max_parallel_agents_policy_limits_claims(app_env):
     assert coder_job is None
 
 
+def test_handoff_creates_canonical_ready_task_and_self_claims(app_env):
+    summary = __import__("asyncio").run(_start_session(app_env))
+
+    __import__("asyncio").run(
+        app_env.session_service.register_worker(
+            session_id=summary.id,
+            agent_name="planner",
+            worker_id="worker-planner-1",
+            pid_hint=1001,
+        ),
+    )
+    __import__("asyncio").run(
+        app_env.session_service.register_worker(
+            session_id=summary.id,
+            agent_name="coder",
+            worker_id="worker-coder-1",
+            pid_hint=1002,
+        ),
+    )
+
+    routed_agent = __import__("asyncio").run(
+        app_env.session_service.route_discord_message(
+            thread_id=summary.discord_thread_id,
+            discord_message_id="discord-1",
+            user_id="user-1",
+            content="Analyze the issue and queue one focused implementation task.",
+            author_name="operator",
+        ),
+    )
+    assert routed_agent == "planner"
+
+    planner_job = __import__("asyncio").run(
+        app_env.session_service.claim_next_job(
+            session_id=summary.id,
+            agent_name="planner",
+            worker_id="worker-planner-1",
+        ),
+    )
+    assert planner_job is not None
+    assert planner_job.job_type == "orchestration"
+
+    __import__("asyncio").run(
+        app_env.session_service.complete_job(
+            job_id=planner_job.id,
+            session_id=summary.id,
+            agent_name="planner",
+            worker_id="worker-planner-1",
+            output_text=(
+                "[[report]]Queued one focused implementation task.[[/report]]\n"
+                "[[handoff agent=\"coder\"]]\n"
+                "T-201\n"
+                "Target summary: Implement the first focused fix.\n"
+                "Read CURRENT_STATE.md and TASK_BOARD.md first.\n"
+                "Files: src/example.py, tests/test_example.py\n"
+                "Done condition: The focused fix lands with regression coverage.\n"
+                "[[/handoff]]"
+            ),
+            thread_output_text=(
+                "OPS: type=handoff | task=T-201 | from=planner | to=coder | state=ready | "
+                "read=CURRENT_STATE.md,TASKS/T-201.md\n"
+                "HUMAN: coder가 첫 구현 작업을 진행한다."
+            ),
+            lease_token=planner_job.lease_token,
+            task_revision=planner_job.task_revision,
+            session_epoch=planner_job.session_epoch,
+            pid_hint=1001,
+        ),
+    )
+
+    from app.models import HandoffModel, JobModel, TaskModel
+
+    with app_env.db.session_scope() as db:
+        task = db.scalar(
+            select(TaskModel)
+            .where(TaskModel.session_id == summary.id)
+            .where(TaskModel.task_key == "T-201"),
+        )
+        assert task is not None
+        assert task.state == "ready"
+        assert task.role == "coding"
+
+        handoff = db.scalar(
+            select(HandoffModel)
+            .where(HandoffModel.session_id == summary.id)
+            .where(HandoffModel.task_id == task.id),
+        )
+        assert handoff is not None
+        assert handoff.state == "queued"
+
+        pending_coder_jobs = list(
+            db.scalars(
+                select(JobModel)
+                .where(JobModel.session_id == summary.id)
+                .where(JobModel.agent_name == "coder")
+                .where(JobModel.status == "pending"),
+            ),
+        )
+        assert pending_coder_jobs == []
+
+    coder_job = __import__("asyncio").run(
+        app_env.session_service.claim_next_job(
+            session_id=summary.id,
+            agent_name="coder",
+            worker_id="worker-coder-1",
+        ),
+    )
+    assert coder_job is not None
+    assert coder_job.job_type == "handoff"
+    assert coder_job.task_id is not None
+    assert coder_job.lease_token is not None
+    assert coder_job.task_revision >= 1
+    assert "T-201" in coder_job.input_text
+
+    with app_env.db.session_scope() as db:
+        task = db.scalar(select(TaskModel).where(TaskModel.id == coder_job.task_id))
+        assert task is not None
+        assert task.state == "in_progress"
+        assert task.current_lease_token == coder_job.lease_token
+        claimed_handoff = db.scalar(
+            select(HandoffModel)
+            .where(HandoffModel.task_id == task.id)
+            .where(HandoffModel.state == "claimed"),
+        )
+        assert claimed_handoff is not None
+
+
 def test_quiet_discord_preserves_human_line_without_truncation(app_env):
     long_ops = "OPS: " + " ".join(["state=busy"] * 80)
     long_human = " ".join(["operator-facing"] * 120)

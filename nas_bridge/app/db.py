@@ -129,6 +129,27 @@ def _named_migrations(connection) -> tuple[NamedMigration, ...]:
                 ],
             ),
         ),
+        NamedMigration(
+            name="20260421_state_kernel_columns",
+            statements=
+            missing_columns(
+                "sessions",
+                [
+                    ("session_epoch", "INTEGER NOT NULL DEFAULT 1"),
+                ],
+            )
+            + missing_columns(
+                "jobs",
+                [
+                    ("task_id", "TEXT"),
+                    ("handoff_id", "TEXT"),
+                    ("session_epoch", "INTEGER NOT NULL DEFAULT 1"),
+                    ("task_revision", "INTEGER NOT NULL DEFAULT 0"),
+                    ("lease_token", "TEXT"),
+                    ("idempotency_key", "TEXT"),
+                ],
+            ),
+        ),
     )
 
 

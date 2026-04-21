@@ -25,6 +25,13 @@ agents:
     default: false
     timeout_seconds: 900
 
+  - name: curator
+    cli: claude
+    role: coordination
+    prompt_file: prompts/curator.md
+    default: false
+    timeout_seconds: 900
+
   - name: coder
     # Windows-first setup: use Claude here because Claude CLI is confirmed working locally.
     # You can switch this back to codex later after fixing the local Codex executable issue.
@@ -41,6 +48,13 @@ agents:
     default: false
     timeout_seconds: 900
 
+  - name: verifier
+    cli: claude
+    role: verification
+    prompt_file: prompts/verifier.md
+    default: false
+    timeout_seconds: 1200
+
 startup:
   send_ready_message: true
   restore_last_session: false
@@ -49,6 +63,14 @@ startup:
 artifacts:
   sessions_dir: "_discord_sessions"
   quiet_discord: true
+
+policy:
+  max_parallel_agents: 3
+  auto_retry: true
+  max_retries: 1
+  quiet_discord: true
+  approval_mode: critical_only
+  allow_cross_agent_handoff: true
 
 finder:
   roots:
@@ -60,11 +82,26 @@ finder:
   analysis_timeout_seconds: 120
 
 verification:
-  enabled: false
+  enabled: true
   provider: command
   artifact_dir: _verification
   run_timeout_seconds: 300
-  commands: {}
+  commands:
+    smoke:
+      - powershell
+      - -NoProfile
+      - -Command
+      - Write-Output 'Ops-Cure smoke verification'
+    play_capture:
+      - powershell
+      - -NoProfile
+      - -Command
+      - Write-Output 'Ops-Cure play capture placeholder'
+    repro_bug:
+      - powershell
+      - -NoProfile
+      - -Command
+      - Write-Output 'Ops-Cure repro bug placeholder'
   capture:
     screenshots: true
     video: false

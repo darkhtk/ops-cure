@@ -31,13 +31,14 @@ TASK_ID_RE = re.compile(r"\b(T-\d{3})\b", re.IGNORECASE)
 TASK_STATUS_ORDER = [
     "ready",
     "in_progress",
+    "verify",
     "review",
     "blocked_on_operator",
     "handoff_queued",
     "done",
     "failed",
 ]
-ACTIVE_CHILD_TASK_STATUSES = {"ready", "in_progress", "review", "handoff_queued"}
+ACTIVE_CHILD_TASK_STATUSES = {"ready", "in_progress", "verify", "review", "handoff_queued"}
 PENDING_HANDOFF_TASK_STATUSES = {"ready", "handoff_queued"}
 
 
@@ -276,6 +277,8 @@ class SessionWorkspace:
         pending_jobs = int(summary.get("pending_jobs") or 0)
         active_jobs = int(summary.get("active_jobs") or 0)
         agent_rows = [agent for agent in (summary.get("agents") or []) if isinstance(agent, dict)]
+        summary_tasks = [task for task in (summary.get("tasks") or []) if isinstance(task, dict)]
+        summary_handoffs = [handoff for handoff in (summary.get("queued_handoffs") or []) if isinstance(handoff, dict)]
         busy_agents = [
             str(agent.get("agent_name") or "").strip()
             for agent in agent_rows
@@ -287,25 +290,32 @@ class SessionWorkspace:
             and active_jobs == 0
             and not busy_agents
         )
-        index = self._load_task_index()
+        index = self._task_index_from_bridge_summary(summary_tasks)
+        if summary_tasks or summary_handoffs:
+            self._save_task_index(index)
+            self._remove_stale_task_files(index)
+            for card in index.values():
+                self._write_task_card(card)
+        else:
+            index = self._load_task_index()
         updated_files: list[Path] = []
-        changed = False
+        changed = bool(summary_tasks or summary_handoffs)
 
         if settled:
-            transient_statuses = {"in_progress", "review", "handoff_queued"}
-            for card in index.values():
-                if card.status not in transient_statuses:
-                    continue
-                card.status = "ready" if session_status in {"ready", "paused"} else "failed"
-                card.updated_at = utcnow().isoformat()
-                card.notes = (
-                    "Reconciled from bridge session state after the session settled without active jobs."
-                )
-                self._write_task_card(card)
-                updated_files.append(self.task_file(card.task_id))
-                changed = True
-
-            handoff_specs = self._pending_handoffs_from_task_index(index)
+            if not summary_tasks and index:
+                transient_statuses = {"in_progress", "review", "handoff_queued"}
+                for card in index.values():
+                    if card.status not in transient_statuses:
+                        continue
+                    card.status = "ready" if session_status in {"ready", "paused"} else "failed"
+                    card.updated_at = utcnow().isoformat()
+                    card.notes = (
+                        "Reconciled from bridge session state after the session settled without active jobs."
+                    )
+                    self._write_task_card(card)
+                    updated_files.append(self.task_file(card.task_id))
+                    changed = True
+            handoff_specs = self._handoff_specs_from_bridge_summary(summary_handoffs, index) if summary_handoffs else self._pending_handoffs_from_task_index(index)
             if handoff_specs:
                 self.handoffs_file.write_text(
                     self._build_handoffs_text(agent_name=agent_name, handoffs=handoff_specs),
@@ -317,7 +327,7 @@ class SessionWorkspace:
 
             if changed:
                 self._save_task_index(index)
-            updated_files.append(self._refresh_task_board(index))
+            updated_files.append(self._refresh_task_board(index, reconcile=not (summary_tasks or summary_handoffs)))
 
             status_label = "paused" if desired_status == "paused" or session_status == "paused" else session_status
             blocker_text = str(summary.get("pause_reason") or "none") if status_label == "paused" else "none"
@@ -370,9 +380,18 @@ class SessionWorkspace:
             return True
 
         active_agent_name = busy_agents[0] if busy_agents else agent_name
-        active_task_id = self._resolve_active_task_id(index=index, active_agent_name=active_agent_name)
+        active_task_id = next(
+            (
+                str(task.get("task_key") or "").strip().upper()
+                for task in summary_tasks
+                if str(task.get("state") or "").strip().lower() == "in_progress"
+            ),
+            None,
+        )
+        if not active_task_id:
+            active_task_id = self._resolve_active_task_id(index=index, active_agent_name=active_agent_name)
         active_task_path: Path | None = None
-        if active_task_id:
+        if active_task_id and not summary_tasks:
             card = index.get(active_task_id) or TaskCard(
                 task_id=active_task_id,
                 title=f"Active task {active_task_id}",
@@ -396,8 +415,16 @@ class SessionWorkspace:
             active_task_path = self.task_file(active_task_id)
             updated_files.append(active_task_path)
             changed = True
+        elif active_task_id:
+            active_task_path = self.task_file(active_task_id)
+            if active_task_path.exists():
+                updated_files.append(active_task_path)
 
-        pending_handoffs = self._pending_handoffs_from_task_index(index, exclude_task_id=active_task_id)
+        pending_handoffs = (
+            self._handoff_specs_from_bridge_summary(summary_handoffs, index, exclude_task_id=active_task_id)
+            if summary_handoffs
+            else self._pending_handoffs_from_task_index(index, exclude_task_id=active_task_id)
+        )
         if pending_handoffs:
             self.handoffs_file.write_text(
                 self._build_handoffs_text(agent_name=active_agent_name, handoffs=pending_handoffs),
@@ -409,7 +436,7 @@ class SessionWorkspace:
 
         if changed:
             self._save_task_index(index)
-        updated_files.append(self._refresh_task_board(index))
+        updated_files.append(self._refresh_task_board(index, reconcile=not (summary_tasks or summary_handoffs)))
 
         next_action = self._bridge_next_action(
             session_status=session_status,
@@ -1069,6 +1096,58 @@ class SessionWorkspace:
             )
         return handoffs
 
+    def _handoff_specs_from_bridge_summary(
+        self,
+        handoffs: list[dict[str, object]],
+        index: dict[str, TaskCard],
+        *,
+        exclude_task_id: str | None = None,
+    ) -> list[HandoffSpec]:
+        specs: list[HandoffSpec] = []
+        for handoff in handoffs:
+            task_id = str(handoff.get("task_key") or "").strip().upper() or None
+            if exclude_task_id and task_id == exclude_task_id:
+                continue
+            target_agent = str(handoff.get("target_agent") or "").strip()
+            body_text = str(handoff.get("body_text") or "").strip()
+            title = index.get(task_id).title if task_id and task_id in index else None
+            if not target_agent or not body_text:
+                continue
+            specs.append(
+                HandoffSpec(
+                    target_agent=target_agent,
+                    body=body_text,
+                    task_id=task_id,
+                    title=title,
+                ),
+            )
+        return specs
+
+    def _task_index_from_bridge_summary(self, tasks: list[dict[str, object]]) -> dict[str, TaskCard]:
+        index: dict[str, TaskCard] = {}
+        for task in tasks:
+            task_id = str(task.get("task_key") or "").strip().upper()
+            if not task_id:
+                continue
+            body_text = str(task.get("body_text") or "").strip()
+            summary_text = str(task.get("summary_text") or "").strip()
+            index[task_id] = TaskCard(
+                task_id=task_id,
+                title=str(task.get("title") or task_id).strip() or task_id,
+                owner=str(task.get("assigned_agent") or task.get("role") or "unassigned").strip() or "unassigned",
+                status=str(task.get("state") or "ready").strip() or "ready",
+                source_agent=str(task.get("source_agent") or "bridge").strip() or "bridge",
+                depends_on=str(task.get("depends_on_task_key") or "").strip() or None,
+                created_at=str(task.get("created_at") or utcnow().isoformat()),
+                updated_at=str(task.get("updated_at") or utcnow().isoformat()),
+                latest_brief_name=str(task.get("latest_brief_name") or "").strip() or None,
+                source_log_name=str(task.get("latest_log_name") or "").strip() or None,
+                goal=body_text or summary_text or "Continue the referenced task.",
+                definition_of_done=summary_text or "Complete the task and update the local session artifacts.",
+                notes=summary_text or body_text or "Rebuilt from bridge task summary.",
+            )
+        return index
+
     def _resolve_active_task_id(self, *, index: dict[str, TaskCard], active_agent_name: str) -> str | None:
         current_task_id = self._current_task_id_from_file()
         if current_task_id:
@@ -1083,6 +1162,17 @@ class SessionWorkspace:
         if len(candidate_ids) == 1:
             return candidate_ids[0]
         return current_task_id
+
+    def _remove_stale_task_files(self, index: dict[str, TaskCard]) -> None:
+        keep = {self.task_file(task_id).resolve() for task_id in index}
+        for path in self.tasks_dir.glob("T-*.md"):
+            try:
+                resolved = path.resolve()
+            except OSError:
+                resolved = path
+            if resolved in keep:
+                continue
+            path.unlink(missing_ok=True)
 
     def _build_protocol_text(self) -> str:
         agent_mentions = ", ".join(f"`{name}`" for name in self.agent_names)
@@ -1528,13 +1618,14 @@ class SessionWorkspace:
         payload = {task_id: asdict(card) for task_id, card in index.items()}
         self.task_index_file.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
-    def _refresh_task_board(self, index: dict[str, TaskCard] | None = None) -> Path:
+    def _refresh_task_board(self, index: dict[str, TaskCard] | None = None, *, reconcile: bool = True) -> Path:
         task_index = index or self._load_task_index()
-        changed_task_ids = self._reconcile_task_index(task_index)
-        if changed_task_ids:
-            self._save_task_index(task_index)
-            for task_id in sorted(changed_task_ids):
-                self._write_task_card(task_index[task_id])
+        if reconcile:
+            changed_task_ids = self._reconcile_task_index(task_index)
+            if changed_task_ids:
+                self._save_task_index(task_index)
+                for task_id in sorted(changed_task_ids):
+                    self._write_task_card(task_index[task_id])
         if not task_index:
             self.task_board_file.write_text(self._build_task_board_template(), encoding="utf-8")
             return self.task_board_file
