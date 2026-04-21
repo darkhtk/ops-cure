@@ -28,6 +28,8 @@ The default sample profile currently defines five roles:
 
 The launcher supervises one worker process per configured agent when a session is active.
 
+While a worker is busy, the launcher also tracks the latest stdout or stderr line coming from the local CLI process and reports only that latest line back to the bridge.
+
 ## What The Launcher Does
 
 At runtime, the launcher:
@@ -122,6 +124,8 @@ The launcher supervises local worker processes that run:
 
 Workers poll the bridge for jobs.
 The bridge decides canonical ready state; workers do not invent orchestration truth locally.
+
+When a worker is busy, its latest CLI activity line is also sent in heartbeats so the bridge can show a current "what is this worker doing now?" view in the Discord status card.
 
 ## Verification Lane
 

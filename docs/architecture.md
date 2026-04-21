@@ -215,6 +215,21 @@ or
 discuss_open -> discuss_reply -> discuss_escalate
 ```
 
+## Live Activity Rendering
+
+Ops-Cure also maintains a lightweight live-activity layer for active workers.
+
+The execution plane reads the latest stdout or stderr line from each running CLI process and includes only the latest sanitized line in worker heartbeats.
+
+The bridge stores that latest line on the agent record and renders it into the session status card.
+
+Important rules:
+
+- only `busy` workers are shown
+- only the latest activity line is shown
+- the thread does not accumulate line-by-line worker logs
+- worker activity is informational and does not become scheduling truth
+
 ## State And Projection Flow
 
 ```mermaid

@@ -155,6 +155,14 @@ Visible message prefixes include:
 Those are rendered from structured internal state and events.
 They are not supposed to become the scheduling source of truth.
 
+The status card also shows live worker activity:
+
+- only workers that are currently `busy`
+- only the latest activity line reported by each busy worker
+- no cumulative per-line worker log output in the thread
+
+This keeps the thread readable while still showing what active workers are doing right now.
+
 ## Recovery And Drift Handling
 
 The bridge is also responsible for:

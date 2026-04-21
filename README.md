@@ -100,6 +100,7 @@ This is the intended flow:
 3. Windows workers self-claim ready work that matches their role.
 4. Local execution produces code, logs, screenshots, and review evidence.
 5. The bridge renders concise thread updates while keeping the database as the source of truth.
+6. The status card shows only busy workers, plus each worker's latest live activity line when available.
 
 ## What Ops-Cure Is Trying To Solve
 
@@ -171,6 +172,20 @@ Visible line types:
 - feature intent mismatch
 - review interpretation mismatch
 - runtime anomaly triage
+
+### Live Worker Activity
+
+Ops-Cure tracks the latest live output line from each busy worker.
+
+The launcher reads the current CLI stdout or stderr line for a worker, sends that line in worker heartbeats, and the bridge stores only the latest value.
+
+The thread status card then renders:
+
+- only workers that are currently `busy`
+- only the latest sanitized activity line for each busy worker
+- no cumulative worker log spam inside the Discord thread
+
+This lets operators see what active workers are doing right now without turning the thread into a scrolling terminal log.
 
 ## Repository Layout
 
