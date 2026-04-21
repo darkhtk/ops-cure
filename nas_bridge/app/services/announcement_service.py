@@ -33,6 +33,7 @@ class SessionStatusSnapshot:
     execution_line: str
     worker_summary: str
     active_worker_lines: tuple[str, ...]
+    activity_report_line: str | None
     job_summary: str
     active_operation: str
     recovery_summary: str
@@ -144,6 +145,9 @@ class AnnouncementService:
             for agent in sorted(summary.agents, key=lambda item: item.agent_name)
             if agent.status == "busy"
         )
+        activity_report_line = None
+        if active_worker_lines:
+            activity_report_line = utcnow().astimezone().strftime("Live update: %H:%M")
         job_summary = f"pending={pending_jobs}, active={active_jobs}"
 
         power_line = "not configured"
@@ -210,6 +214,7 @@ class AnnouncementService:
                 )
                 for agent in sorted(summary.agents, key=lambda item: item.agent_name)
             ],
+            "activity_report_line": activity_report_line,
             "pending_jobs": pending_jobs,
             "active_jobs": active_jobs,
             "pause_reason": summary.pause_reason,
@@ -253,6 +258,7 @@ class AnnouncementService:
             execution_line=execution_line,
             worker_summary=worker_summary,
             active_worker_lines=active_worker_lines,
+            activity_report_line=activity_report_line,
             job_summary=job_summary,
             active_operation=active_operation,
             recovery_summary=recovery_summary,
@@ -311,7 +317,14 @@ class AnnouncementService:
 
     @staticmethod
     def _render_status_card(snapshot: SessionStatusSnapshot) -> str:
-        active_workers = "\n".join(snapshot.active_worker_lines) if snapshot.active_worker_lines else "- none"
+        if snapshot.active_worker_lines:
+            activity_block = (
+                f"Active workers:\n"
+                f"{chr(10).join(snapshot.active_worker_lines)}\n"
+                f"{snapshot.activity_report_line or ''}\n"
+            )
+        else:
+            activity_block = "Activity: waiting\n"
         return (
             "**Opscure Status**\n"
             f"Session: `{snapshot.session_title}`\n"
@@ -323,7 +336,7 @@ class AnnouncementService:
             f"Power: {snapshot.power_line}\n"
             f"Execution: {snapshot.execution_line}\n"
             f"Workers: {snapshot.worker_summary}\n"
-            f"Active workers:\n{active_workers}\n"
+            f"{activity_block}"
             f"Queue: {snapshot.job_summary}\n"
             f"Active op: {snapshot.active_operation}\n"
             f"Recovery: {snapshot.recovery_summary}\n"

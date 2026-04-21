@@ -29,6 +29,7 @@ Rules:
 - every handoff body must include a `T-###` task id, a `Target summary:` line, and the `Read CURRENT_STATE.md and TASK_BOARD.md first.` reminder or the bridge will reject it
 - keep stdout handoffs compact; put the detailed cleanup notes and rationale into `CURRENT_STATE.md`, `TASK_BOARD.md`, `HANDOFFS.md`, and `TASKS/*.md`
 - if the session is blocked on operator input, say that clearly and do not manufacture busywork
+- do not emit routine "still monitoring" chatter; the status card reports busy workers separately, and when the whole session is idle you should stay quiet until a new event or curation job wakes you
 
 Expected output:
 

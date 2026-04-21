@@ -902,19 +902,37 @@ class SessionService:
         artifact_snapshot: ArtifactHeartbeatSnapshot | None = None,
         activity_line: str | None = None,
     ) -> None:
+        should_sync_status = False
         with session_scope() as db:
+            session_row = self._require_session(
+                db,
+                select(SessionModel)
+                .options(selectinload(SessionModel.agents))
+                .where(SessionModel.id == session_id),
+            )
             agent = self._require_agent(db, session_id=session_id, agent_name=agent_name)
+            previous_status = agent.status
             agent.worker_id = worker_id
             agent.status = "paused" if agent.desired_status == "paused" and status != "busy" else status
             agent.pid_hint = pid_hint
-            agent.last_heartbeat_at = utcnow()
+            now = utcnow()
+            agent.last_heartbeat_at = now
             normalized_activity = sanitize_text(activity_line or "").strip() or None
             if agent.status == "busy" and normalized_activity:
                 agent.current_activity_line = normalized_activity
-                agent.current_activity_updated_at = utcnow()
+                agent.current_activity_updated_at = now
             else:
                 agent.current_activity_line = None
                 agent.current_activity_updated_at = None
+
+            any_busy = self._has_busy_agent(session_row.agents)
+            became_busy = previous_status != "busy" and agent.status == "busy"
+            became_idle = previous_status == "busy" and agent.status != "busy"
+            report_due = any_busy and (
+                session_row.last_announced_at is None
+                or (now - session_row.last_announced_at) >= timedelta(seconds=60)
+            )
+            should_sync_status = became_busy or became_idle or report_due
         self.drift_monitor.record_heartbeat(
             session_id=session_id,
             agent_name=agent_name,
@@ -922,6 +940,8 @@ class SessionService:
             worker_status=status,
             artifact_snapshot=self._to_artifact_snapshot(artifact_snapshot),
         )
+        if should_sync_status:
+            await self._sync_session_status_message(session_id)
 
     def get_thread_delta(
         self,
@@ -2555,6 +2575,8 @@ class SessionService:
     ) -> JobPayload | None:
         if not self._is_curator_agent(agent):
             return None
+        if not self._has_non_curator_busy_agent(session_row.agents):
+            return None
         prompt, reason = self._build_curator_sweep_prompt(db, session_row=session_row)
         if not prompt:
             return None
@@ -3562,6 +3584,12 @@ class SessionService:
             return True
         role = agent.role.lower()
         return "coordination" in role or "curat" in role
+
+    def _has_busy_agent(self, agents: Iterable[AgentModel]) -> bool:
+        return any(agent.status == "busy" for agent in agents)
+
+    def _has_non_curator_busy_agent(self, agents: Iterable[AgentModel]) -> bool:
+        return any(agent.status == "busy" and not self._is_curator_agent(agent) for agent in agents)
 
     def _should_route_to_planner_first(
         self,
