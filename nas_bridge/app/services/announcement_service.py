@@ -32,6 +32,7 @@ class SessionStatusSnapshot:
     power_line: str
     execution_line: str
     worker_summary: str
+    active_worker_lines: tuple[str, ...]
     job_summary: str
     active_operation: str
     recovery_summary: str
@@ -137,11 +138,12 @@ class AnnouncementService:
 
         attached_workers = sum(1 for agent in summary.agents if agent.worker_id)
         total_agents = len(summary.agents)
-        worker_states = ", ".join(
-            f"{agent.agent_name}={agent.status}"
+        worker_summary = f"{attached_workers}/{total_agents} attached"
+        active_worker_lines = tuple(
+            self._render_active_worker_line(agent)
             for agent in sorted(summary.agents, key=lambda item: item.agent_name)
-        ) or "none"
-        worker_summary = f"{attached_workers}/{total_agents} attached | {worker_states}"
+            if agent.status == "busy"
+        )
         job_summary = f"pending={pending_jobs}, active={active_jobs}"
 
         power_line = "not configured"
@@ -199,7 +201,15 @@ class AnnouncementService:
             "execution_state": summary.execution_state,
             "attached_workers": attached_workers,
             "total_agents": total_agents,
-            "agent_states": [(agent.agent_name, agent.status, agent.worker_id) for agent in sorted(summary.agents, key=lambda item: item.agent_name)],
+            "agent_states": [
+                (
+                    agent.agent_name,
+                    agent.status,
+                    agent.worker_id,
+                    agent.current_activity_line,
+                )
+                for agent in sorted(summary.agents, key=lambda item: item.agent_name)
+            ],
             "pending_jobs": pending_jobs,
             "active_jobs": active_jobs,
             "pause_reason": summary.pause_reason,
@@ -242,6 +252,7 @@ class AnnouncementService:
             power_line=power_line,
             execution_line=execution_line,
             worker_summary=worker_summary,
+            active_worker_lines=active_worker_lines,
             job_summary=job_summary,
             active_operation=active_operation,
             recovery_summary=recovery_summary,
@@ -292,7 +303,15 @@ class AnnouncementService:
         return "reconciling session state"
 
     @staticmethod
+    def _render_active_worker_line(agent) -> str:
+        detail = agent.current_activity_line or (
+            f"working on {agent.current_task_id}" if agent.current_task_id else "working"
+        )
+        return f"- `{agent.agent_name}` [{agent.cli_type}] {detail}"
+
+    @staticmethod
     def _render_status_card(snapshot: SessionStatusSnapshot) -> str:
+        active_workers = "\n".join(snapshot.active_worker_lines) if snapshot.active_worker_lines else "- none"
         return (
             "**Ops-Cure Status**\n"
             f"Session: `{snapshot.session_title}`\n"
@@ -304,6 +323,7 @@ class AnnouncementService:
             f"Power: {snapshot.power_line}\n"
             f"Execution: {snapshot.execution_line}\n"
             f"Workers: {snapshot.worker_summary}\n"
+            f"Active workers:\n{active_workers}\n"
             f"Queue: {snapshot.job_summary}\n"
             f"Active op: {snapshot.active_operation}\n"
             f"Recovery: {snapshot.recovery_summary}\n"

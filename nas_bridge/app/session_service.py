@@ -852,6 +852,8 @@ class SessionService:
             agent.status = "paused" if session_row.desired_status == "paused" else "idle"
             agent.last_heartbeat_at = utcnow()
             agent.last_error = None
+            agent.current_activity_line = None
+            agent.current_activity_updated_at = None
             session_row.execution_state = "online"
             session_row.status = "paused" if session_row.desired_status == "paused" else "launching"
             thread_id = session_row.discord_thread_id
@@ -889,6 +891,7 @@ class SessionService:
         status: str,
         pid_hint: int | None,
         artifact_snapshot: ArtifactHeartbeatSnapshot | None = None,
+        activity_line: str | None = None,
     ) -> None:
         with session_scope() as db:
             agent = self._require_agent(db, session_id=session_id, agent_name=agent_name)
@@ -896,6 +899,13 @@ class SessionService:
             agent.status = "paused" if agent.desired_status == "paused" and status != "busy" else status
             agent.pid_hint = pid_hint
             agent.last_heartbeat_at = utcnow()
+            normalized_activity = sanitize_text(activity_line or "").strip() or None
+            if agent.status == "busy" and normalized_activity:
+                agent.current_activity_line = normalized_activity
+                agent.current_activity_updated_at = utcnow()
+            else:
+                agent.current_activity_line = None
+                agent.current_activity_updated_at = None
         self.drift_monitor.record_heartbeat(
             session_id=session_id,
             agent_name=agent_name,
@@ -1075,6 +1085,8 @@ class SessionService:
             agent.pid_hint = pid_hint
             agent.last_heartbeat_at = utcnow()
             agent.last_error = None
+            agent.current_activity_line = None
+            agent.current_activity_updated_at = None
             thread_id = session_row.discord_thread_id
 
             self._queue_handoffs(
@@ -1187,6 +1199,8 @@ class SessionService:
             agent.pid_hint = pid_hint
             agent.last_heartbeat_at = utcnow()
             agent.last_error = sanitized
+            agent.current_activity_line = None
+            agent.current_activity_updated_at = None
             thread_id = session_row.discord_thread_id
             self._synchronize_failed_task(
                 db,
@@ -1617,6 +1631,8 @@ class SessionService:
             last_heartbeat_at=agent.last_heartbeat_at,
             worker_id=agent.worker_id,
             pid_hint=agent.pid_hint,
+            current_activity_line=agent.current_activity_line,
+            current_activity_updated_at=agent.current_activity_updated_at,
             drift_state=drift.drift_state,
             drift_reason=drift.drift_reason,
             workspace_ready=drift.workspace_ready,

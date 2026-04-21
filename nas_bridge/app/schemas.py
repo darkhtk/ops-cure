@@ -167,6 +167,8 @@ class AgentStatusResponse(BaseModel):
     last_heartbeat_at: datetime | None = None
     worker_id: str | None = None
     pid_hint: int | None = None
+    current_activity_line: str | None = None
+    current_activity_updated_at: datetime | None = None
     drift_state: str = "unknown"
     drift_reason: str | None = None
     workspace_ready: bool | None = None
@@ -288,6 +290,7 @@ class WorkerHeartbeatRequest(BaseModel):
     status: str
     pid_hint: int | None = None
     artifact_snapshot: ArtifactHeartbeatSnapshot | None = None
+    activity_line: str | None = None
 
 
 class JobPayload(BaseModel):

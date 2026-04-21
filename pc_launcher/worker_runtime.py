@@ -16,14 +16,14 @@ try:
     from .bridge_client import BridgeClient, BridgeClientError
     from .cli_adapters import AdapterContext, get_adapter
     from .config_loader import AgentConfig, ProjectConfig, find_agent, load_project
-    from .process_io import build_utf8_subprocess_env, text_subprocess_kwargs
+    from .process_io import build_utf8_subprocess_env, normalize_activity_line, text_subprocess_kwargs
     from .verification_runner import CommandVerificationRunner
 except ImportError:  # pragma: no cover - script mode support
     from artifact_workspace import BridgeCompletionPayload, SessionWorkspace
     from bridge_client import BridgeClient, BridgeClientError
     from cli_adapters import AdapterContext, get_adapter
     from config_loader import AgentConfig, ProjectConfig, find_agent, load_project
-    from process_io import build_utf8_subprocess_env, text_subprocess_kwargs
+    from process_io import build_utf8_subprocess_env, normalize_activity_line, text_subprocess_kwargs
     from verification_runner import CommandVerificationRunner
 
 LOGGER = logging.getLogger(__name__)
@@ -65,8 +65,10 @@ class WorkerRuntime:
         self.adapter = get_adapter(self.agent.cli)
         self._status = "starting"
         self._status_lock = threading.Lock()
+        self._activity_lock = threading.Lock()
         self._stop_event = threading.Event()
         self._current_process: subprocess.Popen[str] | None = None
+        self._current_activity_line: str | None = None
         self._session_name = self.project.resolved_default_target_name
         self._session_preset = self.project.profile_name
         self._workspace: SessionWorkspace | None = None
@@ -132,6 +134,7 @@ class WorkerRuntime:
                     status=self._get_status(),
                     pid_hint=self.pid_hint,
                     artifact_snapshot=self._build_artifact_snapshot(),
+                    activity_line=self._get_activity_line(),
                 )
             except Exception as exc:  # noqa: BLE001
                 LOGGER.warning("Heartbeat failed: %s", exc)
@@ -156,10 +159,12 @@ class WorkerRuntime:
         job_id = str(job["id"])
         job_type = str(job["job_type"])
         self._set_status("busy")
+        self._set_activity_line(self._default_activity_line(job_type=job_type, task_id=str(job.get("task_id") or "").strip().upper() or None))
 
         try:
             if job_type == "restart":
                 self._set_status("restarting")
+                self._set_activity_line("Restarting worker runtime.")
                 self._restart_runtime()
                 self.bridge_client.complete_job(
                     job_id=job_id,
@@ -204,6 +209,7 @@ class WorkerRuntime:
                 LOGGER.error("Failed to report job failure to bridge: %s", report_exc)
         finally:
             self._set_status("idle")
+            self._clear_activity_line()
 
     def _run_cli_for_job(self, job: dict[str, object]) -> BridgeCompletionPayload:
         job_type = str(job.get("job_type") or "message")
@@ -256,17 +262,44 @@ class WorkerRuntime:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             env=env,
+            bufsize=1,
             **text_subprocess_kwargs(),
         )
         self._current_process = process
+        stdout_chunks: list[str] = []
+        stderr_chunks: list[str] = []
+        stdout_thread = threading.Thread(
+            target=self._consume_stream_lines,
+            kwargs={"stream": process.stdout, "sink": stdout_chunks},
+            daemon=True,
+        )
+        stderr_thread = threading.Thread(
+            target=self._consume_stream_lines,
+            kwargs={"stream": process.stderr, "sink": stderr_chunks},
+            daemon=True,
+        )
+        stdout_thread.start()
+        stderr_thread.start()
+        if process.stdin is not None:
+            try:
+                process.stdin.write(self.adapter.prepare_input(context))
+                process.stdin.flush()
+            except BrokenPipeError:
+                LOGGER.debug("CLI subprocess closed stdin early for %s", self.agent_name)
+            finally:
+                try:
+                    process.stdin.close()
+                except Exception:  # noqa: BLE001
+                    pass
         try:
-            stdout, stderr = process.communicate(
-                input=self.adapter.prepare_input(context),
-                timeout=timeout_seconds,
-            )
+            process.wait(timeout=timeout_seconds)
         except subprocess.TimeoutExpired as exc:
             process.kill()
-            stdout, stderr = process.communicate()
+            process.wait()
+            stdout_thread.join(timeout=5)
+            stderr_thread.join(timeout=5)
+            stdout = "".join(stdout_chunks)
+            stderr = "".join(stderr_chunks)
             failure_summary = workspace.record_cli_failure(
                 agent_name=self.agent_name,
                 job_type=job_type,
@@ -283,6 +316,10 @@ class WorkerRuntime:
             raise TimeoutError(failure_summary) from exc
         finally:
             self._current_process = None
+        stdout_thread.join(timeout=5)
+        stderr_thread.join(timeout=5)
+        stdout = "".join(stdout_chunks)
+        stderr = "".join(stderr_chunks)
 
         combined_output = self.adapter.combine_output(stdout, stderr, process.returncode or 0)
         if process.returncode not in (0, None):
@@ -328,6 +365,7 @@ class WorkerRuntime:
             )
 
         run_slug = task_id or str(job.get("id") or uuid.uuid4())
+        self._set_activity_line(f"Running verification `{mode}`.")
         artifact_dir = (
             Path(self.project.default_workdir).resolve()
             / self.project.verification.artifact_dir
@@ -439,6 +477,19 @@ class WorkerRuntime:
         with self._status_lock:
             return self._status
 
+    def _set_activity_line(self, line: str | None) -> None:
+        normalized = normalize_activity_line(line)
+        with self._activity_lock:
+            self._current_activity_line = normalized
+
+    def _clear_activity_line(self) -> None:
+        with self._activity_lock:
+            self._current_activity_line = None
+
+    def _get_activity_line(self) -> str | None:
+        with self._activity_lock:
+            return self._current_activity_line
+
     def _ensure_session_workspace(self, job: dict[str, object] | None = None) -> SessionWorkspace:
         if self._workspace is not None:
             return self._workspace
@@ -496,6 +547,40 @@ class WorkerRuntime:
     def _build_subprocess_env() -> dict[str, str]:
         # Force UTF-8 so non-ASCII prompts and reports survive Windows subprocess hops.
         return build_utf8_subprocess_env()
+
+    def _consume_stream_lines(
+        self,
+        *,
+        stream,
+        sink: list[str],
+    ) -> None:
+        if stream is None:
+            return
+        try:
+            for raw_line in iter(stream.readline, ""):
+                if raw_line == "":
+                    break
+                sink.append(raw_line)
+                activity = normalize_activity_line(raw_line)
+                if activity:
+                    self._set_activity_line(activity)
+        finally:
+            try:
+                stream.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _default_activity_line(self, *, job_type: str, task_id: str | None) -> str:
+        task_suffix = f" ({task_id})" if task_id else ""
+        if job_type == "routing":
+            return f"Routing the next step{task_suffix}."
+        if job_type == "handoff":
+            return f"Working on handoff{task_suffix}."
+        if job_type == "verification":
+            return f"Preparing verification{task_suffix}."
+        if job_type == "restart":
+            return "Restarting worker runtime."
+        return f"Working on {job_type}{task_suffix}."
 
     def _build_artifact_snapshot(self) -> dict[str, object] | None:
         if self._workspace is None:

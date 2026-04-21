@@ -150,6 +150,16 @@ def _named_migrations(connection) -> tuple[NamedMigration, ...]:
                 ],
             ),
         ),
+        NamedMigration(
+            name="20260421_agent_activity_fields",
+            statements=missing_columns(
+                "agents",
+                [
+                    ("current_activity_line", "TEXT"),
+                    ("current_activity_updated_at", "DATETIME"),
+                ],
+            ),
+        ),
     )
 
 

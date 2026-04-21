@@ -105,6 +105,8 @@ class AgentModel(Base):
     pid_hint: Mapped[int | None] = mapped_column(Integer(), nullable=True)
     worker_id: Mapped[str | None] = mapped_column(index=True, nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    current_activity_line: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    current_activity_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     session: Mapped[SessionModel] = relationship(back_populates="agents")
 

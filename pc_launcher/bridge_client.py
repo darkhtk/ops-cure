@@ -125,18 +125,19 @@ class BridgeClient:
         status: str,
         pid_hint: int | None,
         artifact_snapshot: dict[str, object] | None = None,
+        activity_line: str | None = None,
     ) -> dict[str, Any]:
-        return self._post(
-            "/api/workers/heartbeat",
-            {
-                "session_id": session_id,
-                "agent_name": agent_name,
-                "worker_id": worker_id,
-                "status": status,
-                "pid_hint": pid_hint,
-                "artifact_snapshot": artifact_snapshot,
-            },
-        )
+        payload: dict[str, Any] = {
+            "session_id": session_id,
+            "agent_name": agent_name,
+            "worker_id": worker_id,
+            "status": status,
+            "pid_hint": pid_hint,
+            "artifact_snapshot": artifact_snapshot,
+        }
+        if activity_line is not None:
+            payload["activity_line"] = activity_line
+        return self._post("/api/workers/heartbeat", payload)
 
     def next_job(self, *, session_id: str, agent_name: str, worker_id: str) -> dict[str, Any] | None:
         payload = self._post(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Mapping
 
 UTF8_ENV_DEFAULTS: dict[str, str] = {
@@ -16,6 +17,9 @@ POWERSHELL_UTF8_PROLOGUE = (
     "$OutputEncoding=[System.Text.UTF8Encoding]::UTF8; "
     "chcp 65001 > $null; "
 )
+
+ANSI_ESCAPE_RE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
+ACTIVITY_LINE_LIMIT = 280
 
 
 def build_utf8_subprocess_env(
@@ -50,3 +54,18 @@ def decode_text_output(payload: bytes | str | None) -> str:
 
 def wrap_powershell_utf8(script: str) -> str:
     return POWERSHELL_UTF8_PROLOGUE + script
+
+
+def normalize_activity_line(payload: str | None) -> str | None:
+    if not payload:
+        return None
+    text = ANSI_ESCAPE_RE.sub("", payload)
+    text = text.replace("\r", "\n")
+    candidates = [re.sub(r"\s+", " ", line).strip() for line in text.splitlines()]
+    candidates = [line for line in candidates if line]
+    if not candidates:
+        return None
+    latest = candidates[-1]
+    if len(latest) > ACTIVITY_LINE_LIMIT:
+        latest = latest[: ACTIVITY_LINE_LIMIT - 12].rstrip() + " [truncated]"
+    return latest

@@ -41,6 +41,7 @@ async def heartbeat(payload: WorkerHeartbeatRequest, request: Request) -> dict[s
         status=payload.status,
         pid_hint=payload.pid_hint,
         artifact_snapshot=payload.artifact_snapshot,
+        activity_line=payload.activity_line,
     )
     return {"status": "ok"}
 
