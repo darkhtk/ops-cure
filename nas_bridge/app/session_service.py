@@ -2070,7 +2070,7 @@ class SessionService:
     ) -> None:
         agent_roles = {agent.agent_name: agent.role for agent in session_row.agents}
         for handoff in handoffs:
-            task = self._upsert_task_for_handoff(
+            task, normalized_body = self._upsert_task_for_handoff(
                 db,
                 session_row=session_row,
                 source_agent=source_agent,
@@ -2094,7 +2094,7 @@ class SessionService:
                 state="queued",
                 revision=task.revision,
                 session_epoch=session_row.session_epoch,
-                body_text=handoff.body,
+                body_text=normalized_body,
             )
             db.add(handoff_row)
             db.flush()
@@ -2153,17 +2153,18 @@ class SessionService:
         session_row: SessionModel,
         source_agent: str,
         handoff: HandoffRequest,
-    ) -> TaskModel:
+    ) -> tuple[TaskModel, str]:
         target_agent = self._require_agent(db, session_id=session_row.id, agent_name=handoff.target_agent)
+        normalized_body = self._normalize_task_payload_text(handoff.body)
         task_key = (
             handoff.task_id.strip().upper()
             if handoff.task_id and CANONICAL_TASK_KEY_RE.fullmatch(handoff.task_id.strip().upper())
             else self._allocate_task_key(db, session_id=session_row.id)
         )
-        summary_line = self._extract_prefixed_line(handoff.body, "Target summary:")
-        file_scope = self._extract_prefixed_line(handoff.body, "Files:")
-        done_condition = self._extract_prefixed_line(handoff.body, "Done condition:")
-        semantic_scope = self._derive_semantic_scope(summary_line or handoff.body)
+        summary_line = self._extract_prefixed_line(normalized_body, "Target summary:")
+        file_scope = self._extract_prefixed_line(normalized_body, "Files:")
+        done_condition = self._extract_prefixed_line(normalized_body, "Done condition:")
+        semantic_scope = self._derive_semantic_scope(summary_line or normalized_body)
 
         task = db.scalar(
             select(TaskModel)
@@ -2174,7 +2175,7 @@ class SessionService:
             task = TaskModel(
                 session_id=session_row.id,
                 task_key=task_key,
-                title=self._derive_task_title_from_handoff(handoff.body),
+                title=self._derive_task_title_from_handoff(normalized_body),
                 role=target_agent.role,
                 assigned_agent=handoff.target_agent,
                 source_agent=source_agent,
@@ -2182,7 +2183,7 @@ class SessionService:
                 revision=1,
                 session_epoch=session_row.session_epoch,
                 summary_text=summary_line,
-                body_text=handoff.body,
+                body_text=normalized_body,
                 semantic_scope=semantic_scope,
                 file_scope_json=json.dumps(
                     [item.strip() for item in (file_scope or "").split(",") if item.strip()],
@@ -2194,12 +2195,12 @@ class SessionService:
             db.add(task)
             db.flush()
         else:
-            task.title = self._derive_task_title_from_handoff(handoff.body)
+            task.title = self._derive_task_title_from_handoff(normalized_body)
             task.role = target_agent.role
             task.assigned_agent = handoff.target_agent
             task.source_agent = source_agent
             task.summary_text = summary_line
-            task.body_text = handoff.body
+            task.body_text = normalized_body
             task.semantic_scope = semantic_scope
             task.file_scope_json = (
                 json.dumps(
@@ -2220,7 +2221,7 @@ class SessionService:
         if done_condition:
             task.latest_brief_name = None
             task.latest_log_name = None
-        return task
+        return task, normalized_body
 
     def _allocate_task_key(self, db: Session, *, session_id: str) -> str:
         existing_keys = db.scalars(
@@ -2371,9 +2372,43 @@ class SessionService:
         return None
 
     @staticmethod
+    def _normalize_task_payload_text(text: str) -> str:
+        stripped = text.strip()
+        if not stripped:
+            return ""
+        lines = [line.strip() for line in stripped.splitlines() if line.strip()]
+        if any(
+            raw_line.startswith(prefix)
+            for raw_line in lines
+            for prefix in ("Target summary:", "Files:", "Done condition:")
+        ):
+            return stripped
+        if any(raw_line.startswith(("OPS:", "HUMAN:", "ANSWER:", "ISSUE:", "DONE:")) for raw_line in lines):
+            preferred: list[str] = []
+            for prefix in ("ANSWER:", "HUMAN:"):
+                preferred.extend(
+                    raw_line[len(prefix) :].strip()
+                    for raw_line in lines
+                    if raw_line.startswith(prefix) and raw_line[len(prefix) :].strip()
+                )
+            issue_lines = [
+                raw_line[len("ISSUE:") :].strip()
+                for raw_line in lines
+                if raw_line.startswith("ISSUE:") and raw_line[len("ISSUE:") :].strip()
+            ]
+            preferred.extend(f"Issue: {item}" for item in issue_lines)
+            if preferred:
+                return "\n".join(preferred)
+            non_ops = [raw_line for raw_line in lines if not raw_line.startswith("OPS:")]
+            if non_ops:
+                return "\n".join(non_ops)
+        return stripped
+
+    @staticmethod
     def _derive_task_title_from_handoff(body: str) -> str:
-        summary_line = SessionService._extract_prefixed_line(body, "Target summary:")
-        first_line = next((line.strip() for line in body.splitlines() if line.strip()), "Focused follow-up task")
+        normalized_body = SessionService._normalize_task_payload_text(body)
+        summary_line = SessionService._extract_prefixed_line(normalized_body, "Target summary:")
+        first_line = next((line.strip() for line in normalized_body.splitlines() if line.strip()), "Focused follow-up task")
         candidate = summary_line or first_line
         candidate = TASK_CARD_ID_RE.sub("", candidate).strip(" -:\t")
         if not candidate:
@@ -2843,18 +2878,34 @@ class SessionService:
         if not normalized_lines:
             return ""
         trimmed_lines: list[str] = []
-        for line in normalized_lines[:QUIET_DISCORD_LINE_LIMIT]:
+        visible_lines = normalized_lines[:QUIET_DISCORD_LINE_LIMIT]
+        deferred_issue_lines = [
+            line
+            for line in normalized_lines[QUIET_DISCORD_LINE_LIMIT:]
+            if line.startswith("ISSUE:")
+        ]
+        for line in visible_lines:
             if line.startswith("HUMAN:"):
                 human_body = self._normalize_thread_text(line[len("HUMAN:") :])
                 trimmed_lines.append(f"HUMAN: {human_body}" if human_body else "HUMAN:")
                 continue
+            if line.startswith("ISSUE:"):
+                issue_body = self._normalize_thread_text(line[len("ISSUE:") :])
+                trimmed_lines.append(f"ISSUE: {issue_body}" if issue_body else "ISSUE:")
+                continue
             trimmed_lines.append(self._trim_thread_text(line, 180))
-        if len(normalized_lines) > QUIET_DISCORD_LINE_LIMIT:
+        for line in deferred_issue_lines:
+            issue_body = self._normalize_thread_text(line[len("ISSUE:") :])
+            formatted = f"ISSUE: {issue_body}" if issue_body else "ISSUE:"
+            if formatted not in trimmed_lines:
+                trimmed_lines.append(formatted)
+        omitted_line_count = len(normalized_lines) - len(visible_lines) - len(deferred_issue_lines)
+        if omitted_line_count > 0:
             trimmed_lines.append("HUMAN: 자세한 내용은 스레드 표시에서 생략되었습니다.")
         compact = "\n".join(trimmed_lines)
         if len(compact) <= QUIET_DISCORD_CHAR_LIMIT:
             return compact
-        if any(line.startswith("HUMAN:") for line in trimmed_lines):
+        if any(line.startswith(("HUMAN:", "ISSUE:")) for line in trimmed_lines):
             return compact
         return self._trim_thread_text(compact, QUIET_DISCORD_CHAR_LIMIT)
 

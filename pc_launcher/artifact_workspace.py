@@ -29,6 +29,10 @@ CONTROL_BLOCKS_RE = re.compile(
 )
 TASK_ID_RE = re.compile(r"\b(T-\d{3})\b", re.IGNORECASE)
 CANONICAL_TASK_ID_RE = re.compile(r"^T-(?P<number>\d+)$", re.IGNORECASE)
+UUID_TASK_ID_RE = re.compile(
+    r"^[0-9A-F]{8}(?:-[0-9A-F]{4}){3}-[0-9A-F]{12}$",
+    re.IGNORECASE,
+)
 TASK_STATUS_ORDER = [
     "ready",
     "in_progress",
@@ -41,6 +45,8 @@ TASK_STATUS_ORDER = [
 ]
 ACTIVE_CHILD_TASK_STATUSES = {"ready", "in_progress", "verify", "review", "handoff_queued"}
 PENDING_HANDOFF_TASK_STATUSES = {"ready", "handoff_queued"}
+THREAD_PROTOCOL_PREFIXES = ("OPS:", "HUMAN:", "ANSWER:", "ISSUE:", "DONE:")
+TASK_BODY_HINT_PREFIXES = ("Target summary:", "Files:", "Done condition:")
 
 
 def utcnow() -> datetime:
@@ -328,7 +334,13 @@ class SessionWorkspace:
 
             if changed:
                 self._save_task_index(index)
-            updated_files.append(self._refresh_task_board(index, reconcile=not (summary_tasks or summary_handoffs)))
+            updated_files.append(
+                self._refresh_task_board(
+                    index,
+                    reconcile=not (summary_tasks or summary_handoffs),
+                    session_status=session_status,
+                )
+            )
 
             status_label = "paused" if desired_status == "paused" or session_status == "paused" else session_status
             blocker_text = str(summary.get("pause_reason") or "none") if status_label == "paused" else "none"
@@ -437,7 +449,13 @@ class SessionWorkspace:
 
         if changed:
             self._save_task_index(index)
-        updated_files.append(self._refresh_task_board(index, reconcile=not (summary_tasks or summary_handoffs)))
+        updated_files.append(
+            self._refresh_task_board(
+                index,
+                reconcile=not (summary_tasks or summary_handoffs),
+                session_status=session_status,
+            )
+        )
 
         next_action = self._bridge_next_action(
             session_status=session_status,
@@ -1113,7 +1131,7 @@ class SessionWorkspace:
             if exclude_task_id and task_id == exclude_task_id:
                 continue
             target_agent = str(handoff.get("target_agent") or "").strip()
-            body_text = str(handoff.get("body_text") or "").strip()
+            body_text = self._normalize_task_payload_text(str(handoff.get("body_text") or "").strip())
             title = index.get(task_id).title if task_id and task_id in index else None
             if not target_agent or not body_text:
                 continue
@@ -1133,11 +1151,12 @@ class SessionWorkspace:
             task_id = str(task.get("task_key") or "").strip().upper()
             if not task_id:
                 continue
-            body_text = str(task.get("body_text") or "").strip()
-            summary_text = str(task.get("summary_text") or "").strip()
+            body_text = self._normalize_task_payload_text(str(task.get("body_text") or "").strip())
+            summary_text = self._normalize_task_payload_text(str(task.get("summary_text") or "").strip())
+            title_text = self._normalize_task_payload_text(str(task.get("title") or task_id).strip()) or task_id
             index[task_id] = TaskCard(
                 task_id=task_id,
-                title=str(task.get("title") or task_id).strip() or task_id,
+                title=title_text,
                 owner=str(task.get("assigned_agent") or task.get("role") or "unassigned").strip() or "unassigned",
                 status=str(task.get("state") or "ready").strip() or "ready",
                 source_agent=str(task.get("source_agent") or "bridge").strip() or "bridge",
@@ -1164,7 +1183,9 @@ class SessionWorkspace:
 
     def _remove_stale_task_files(self, index: dict[str, TaskCard]) -> None:
         keep = {self.task_file(task_id).resolve() for task_id in index}
-        for path in self.tasks_dir.glob("T-*.md"):
+        for path in self.tasks_dir.glob("*.md"):
+            if not self._is_task_card_path(path):
+                continue
             try:
                 resolved = path.resolve()
             except OSError:
@@ -1269,6 +1290,50 @@ class SessionWorkspace:
             f"- Workspace root: `{self.relative_root.as_posix()}`\n\n"
             "No task cards have been recorded yet.\n"
         )
+
+    def _build_closed_task_board_text(self, index: dict[str, TaskCard]) -> str:
+        ordered = sorted(
+            index.values(),
+            key=lambda card: (
+                TASK_STATUS_ORDER.index(card.status) if card.status in TASK_STATUS_ORDER else len(TASK_STATUS_ORDER),
+                card.task_id,
+            ),
+        )
+        status_counts: dict[str, int] = {}
+        for card in ordered:
+            status_counts[card.status] = status_counts.get(card.status, 0) + 1
+        lines = [
+            "# Task Board",
+            "",
+            f"- Session: `{self.session_name}`",
+            f"- Session ID: `{self.session_id}`",
+            f"- Workspace root: `{self.relative_root.as_posix()}`",
+            f"- Updated at: `{utcnow().isoformat()}`",
+            "- Session status: `closed`",
+            "",
+            "세션이 종료되어 이 보드는 현재 큐가 아니라 마지막 작업 결과만 보여준다.",
+            "",
+            "## Final counts",
+            "",
+        ]
+        for status in TASK_STATUS_ORDER:
+            count = status_counts.get(status, 0)
+            if count:
+                lines.append(f"- `{status}`: {count}")
+        lines.append("")
+        for status in TASK_STATUS_ORDER:
+            cards = [card for card in ordered if card.status == status]
+            if not cards:
+                continue
+            lines.extend([f"## {status}", ""])
+            for card in cards:
+                depends = card.depends_on or "none"
+                lines.append(
+                    f"- `{card.task_id}` | owner=`{card.owner}` | depends_on=`{depends}` | "
+                    f"[{self._display_path(self.task_file(card.task_id))}] {trim_text(card.title, 90)}"
+                )
+            lines.append("")
+        return "\n".join(lines).rstrip() + "\n"
 
     def _build_agent_template(self, agent_name: str) -> str:
         return f"# Agent Notes: {agent_name}\n\nNo notes have been written yet.\n"
@@ -1422,9 +1487,10 @@ class SessionWorkspace:
         materialized: list[HandoffSpec] = []
         for handoff in handoffs:
             task_id = handoff.task_id or self._allocate_task_id(index)
+            normalized_body = self._normalize_task_payload_text(handoff.body) or handoff.body
             card = index.get(task_id) or TaskCard(
                 task_id=task_id,
-                title=handoff.title or self._derive_task_title(handoff.body),
+                title=handoff.title or self._derive_task_title(normalized_body),
                 owner=handoff.target_agent,
                 status="ready",
                 source_agent=source_agent,
@@ -1433,7 +1499,7 @@ class SessionWorkspace:
                 updated_at=utcnow().isoformat(),
                 latest_brief_name=None,
                 source_log_name=source_log_name,
-                goal=handoff.body,
+                goal=normalized_body,
                 definition_of_done=(
                     "Complete the focused next action, update CURRENT_STATE.md / STATUS.md, and leave the work "
                     "in a reviewable state."
@@ -1446,9 +1512,9 @@ class SessionWorkspace:
             card.depends_on = card.depends_on or parent_task_id
             card.updated_at = utcnow().isoformat()
             card.source_log_name = source_log_name
-            card.goal = handoff.body
-            card.title = handoff.title or card.title or self._derive_task_title(handoff.body)
-            card.notes = f"Latest handoff from `{source_agent}`.\n\n{handoff.body}"
+            card.goal = normalized_body
+            card.title = handoff.title or card.title or self._derive_task_title(normalized_body)
+            card.notes = f"Latest handoff from `{source_agent}`.\n\n{normalized_body}"
             index[task_id] = card
             self._write_task_card(card)
             updated_files.append(self.task_file(task_id))
@@ -1624,16 +1690,30 @@ class SessionWorkspace:
             if "task_id" not in sanitized:
                 sanitized["task_id"] = str(task_id).strip().upper()
                 changed = True
-            index[task_id] = TaskCard(**sanitized)
+            normalized_task_id = str(sanitized["task_id"]).strip().upper()
+            if CANONICAL_TASK_ID_RE.fullmatch(normalized_task_id) is None:
+                changed = True
+                continue
+            if normalized_task_id != task_id:
+                changed = True
+            sanitized["task_id"] = normalized_task_id
+            index[normalized_task_id] = TaskCard(**sanitized)
         if changed:
             self._save_task_index(index)
+            self._remove_stale_task_files(index)
         return index
 
     def _save_task_index(self, index: dict[str, TaskCard]) -> None:
         payload = {task_id: asdict(card) for task_id, card in index.items()}
         self.task_index_file.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
-    def _refresh_task_board(self, index: dict[str, TaskCard] | None = None, *, reconcile: bool = True) -> Path:
+    def _refresh_task_board(
+        self,
+        index: dict[str, TaskCard] | None = None,
+        *,
+        reconcile: bool = True,
+        session_status: str | None = None,
+    ) -> Path:
         task_index = index or self._load_task_index()
         if reconcile:
             changed_task_ids = self._reconcile_task_index(task_index)
@@ -1643,6 +1723,9 @@ class SessionWorkspace:
                     self._write_task_card(task_index[task_id])
         if not task_index:
             self.task_board_file.write_text(self._build_task_board_template(), encoding="utf-8")
+            return self.task_board_file
+        if session_status == "closed":
+            self.task_board_file.write_text(self._build_closed_task_board_text(task_index), encoding="utf-8")
             return self.task_board_file
         ordered = sorted(
             task_index.values(),
@@ -1709,7 +1792,7 @@ class SessionWorkspace:
 
     @staticmethod
     def _derive_task_title(text: str) -> str:
-        stripped = " ".join(text.strip().split())
+        stripped = " ".join(SessionWorkspace._normalize_task_payload_text(text).strip().split())
         if not stripped:
             return "Focused follow-up task"
         stripped = re.sub(r"^Task\s+T-\d{3}\.?\s*", "", stripped, flags=re.IGNORECASE)
@@ -1725,6 +1808,40 @@ class SessionWorkspace:
             return path.relative_to(self.root).as_posix()
         except ValueError:
             return path.name
+
+    @staticmethod
+    def _is_task_card_path(path: Path) -> bool:
+        stem = path.stem.strip()
+        return bool(CANONICAL_TASK_ID_RE.fullmatch(stem) or UUID_TASK_ID_RE.fullmatch(stem))
+
+    @staticmethod
+    def _normalize_task_payload_text(text: str) -> str:
+        stripped = text.strip()
+        if not stripped:
+            return ""
+        lines = [line.strip() for line in stripped.splitlines() if line.strip()]
+        if any(any(line.startswith(prefix) for prefix in TASK_BODY_HINT_PREFIXES) for line in lines):
+            return stripped
+        if any(line.startswith(THREAD_PROTOCOL_PREFIXES) for line in lines):
+            preferred: list[str] = []
+            for prefix in ("ANSWER:", "HUMAN:"):
+                preferred.extend(
+                    line[len(prefix) :].strip()
+                    for line in lines
+                    if line.startswith(prefix) and line[len(prefix) :].strip()
+                )
+            issue_lines = [
+                line[len("ISSUE:") :].strip()
+                for line in lines
+                if line.startswith("ISSUE:") and line[len("ISSUE:") :].strip()
+            ]
+            preferred.extend(f"Issue: {item}" for item in issue_lines)
+            if preferred:
+                return "\n".join(preferred)
+            non_ops = [line for line in lines if not line.startswith("OPS:")]
+            if non_ops:
+                return "\n".join(non_ops)
+        return stripped
 
     @staticmethod
     def _bridge_summary_text(
