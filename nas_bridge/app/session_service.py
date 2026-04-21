@@ -57,6 +57,7 @@ LOGGER = logging.getLogger(__name__)
 AGENT_PREFIX_RE = re.compile(r"^\s*@(?P<agent>[A-Za-z0-9_-]+)\s+(?P<body>.+)$", re.DOTALL)
 AGENT_THREAD_HEADER_RE = re.compile(r"^\s*\*\*(?P<agent>[A-Za-z0-9_-]+)(?:\s+error)?\*\*")
 TASK_CARD_ID_RE = re.compile(r"\bT-\d{3}\b", re.IGNORECASE)
+CANONICAL_TASK_KEY_RE = re.compile(r"^T-(?P<number>\d+)$", re.IGNORECASE)
 FOLLOW_UP_MESSAGE_RE = re.compile(
     r"^\s*(?:continue|go|proceed|keep going|ship it|do it|"
     r"계속|진행해|계속해|이어서|마저|해|해줘|해봐|처리해|다 해)\s*[.!?~]*\s*$",
@@ -2154,7 +2155,11 @@ class SessionService:
         handoff: HandoffRequest,
     ) -> TaskModel:
         target_agent = self._require_agent(db, session_id=session_row.id, agent_name=handoff.target_agent)
-        task_key = handoff.task_id or f"T-{uuid4().hex[:6].upper()}"
+        task_key = (
+            handoff.task_id.strip().upper()
+            if handoff.task_id and CANONICAL_TASK_KEY_RE.fullmatch(handoff.task_id.strip().upper())
+            else self._allocate_task_key(db, session_id=session_row.id)
+        )
         summary_line = self._extract_prefixed_line(handoff.body, "Target summary:")
         file_scope = self._extract_prefixed_line(handoff.body, "Files:")
         done_condition = self._extract_prefixed_line(handoff.body, "Done condition:")
@@ -2216,6 +2221,18 @@ class SessionService:
             task.latest_brief_name = None
             task.latest_log_name = None
         return task
+
+    def _allocate_task_key(self, db: Session, *, session_id: str) -> str:
+        existing_keys = db.scalars(
+            select(TaskModel.task_key).where(TaskModel.session_id == session_id),
+        ).all()
+        values = [
+            int(match.group("number"))
+            for task_key in existing_keys
+            if task_key and (match := CANONICAL_TASK_KEY_RE.fullmatch(task_key.strip().upper())) is not None
+        ]
+        next_index = (max(values) + 1) if values else 1
+        return f"T-{next_index:03d}"
 
     def _claim_ready_task_job(
         self,
@@ -2833,7 +2850,7 @@ class SessionService:
                 continue
             trimmed_lines.append(self._trim_thread_text(line, 180))
         if len(normalized_lines) > QUIET_DISCORD_LINE_LIMIT:
-            trimmed_lines.append("HUMAN: Additional detail omitted from the thread view.")
+            trimmed_lines.append("HUMAN: 자세한 내용은 스레드 표시에서 생략되었습니다.")
         compact = "\n".join(trimmed_lines)
         if len(compact) <= QUIET_DISCORD_CHAR_LIMIT:
             return compact

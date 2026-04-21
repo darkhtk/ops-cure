@@ -28,6 +28,7 @@ CONTROL_BLOCKS_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 TASK_ID_RE = re.compile(r"\b(T-\d{3})\b", re.IGNORECASE)
+CANONICAL_TASK_ID_RE = re.compile(r"^T-(?P<number>\d+)$", re.IGNORECASE)
 TASK_STATUS_ORDER = [
     "ready",
     "in_progress",
@@ -1190,8 +1191,8 @@ class SessionWorkspace:
             "- Independent tasks may be handed to multiple agents in parallel only when the file scope does not overlap.\n"
             "- `CURRENT_STATE.md` remains the single-source summary for the operator.\n\n"
             "## Required stdout blocks\n\n"
-            "[[report]]\nOne short human-readable sentence.\n[[/report]]\n\n"
-            "[[answer]]\nDirect answer to the operator's question.\n[[/answer]]\n\n"
+            "[[report]]\n한 줄짜리 짧은 한국어 상태 문장.\n[[/report]]\n\n"
+            "[[answer]]\n운영자 질문에 대한 직접 답변을 한국어로 작성.\n[[/answer]]\n\n"
             "[[question]]\nOnly if a critical blocking decision is needed.\n[[/question]]\n\n"
             "[[discuss type=\"open\" ask=\"reviewer,coder\" anomaly=\"A-001\"]]\n"
             "Short async discussion opener for anomalies, feature-intent misunderstandings, or review disagreements.\n"
@@ -1208,7 +1209,7 @@ class SessionWorkspace:
             "- The runtime turns stdout plus handoff metadata into compact thread events.\n"
             "- Every thread event should contain at least one `OPS:` line and one `HUMAN:` line.\n"
             "- `OPS:` is the async event bus line for agents and the bridge. Keep it terse and structured.\n"
-            "- `HUMAN:` is a short sentence for operator observability.\n"
+            "- `HUMAN:` is a short Korean sentence for operator observability.\n"
             "- `ANSWER:` is used when an agent directly answers the operator's question.\n"
             "- Emit `[[answer]]...[[/answer]]` when the primary thread-visible output should be a direct answer.\n"
             "- Open a `[[discuss ...]]` block when a state anomaly, feature-intent misunderstanding, or review-interpretation mismatch should be clarified between agents before more work is queued.\n"
@@ -1698,7 +1699,11 @@ class SessionWorkspace:
 
     @staticmethod
     def _allocate_task_id(index: dict[str, TaskCard]) -> str:
-        values = [int(task_id.split("-")[1]) for task_id in index]
+        values = [
+            int(match.group("number"))
+            for task_id in index
+            if (match := CANONICAL_TASK_ID_RE.fullmatch(task_id.strip())) is not None
+        ]
         next_index = (max(values) + 1) if values else 1
         return f"T-{next_index:03d}"
 

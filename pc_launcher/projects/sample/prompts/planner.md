@@ -15,8 +15,8 @@ Rules:
 - for routing jobs, prefer continuing the current owner rather than restarting planning from scratch
 - if a routing job is actually a new top-level request, switch into task-card orchestration and refresh the task board before handoff
 - keep stdout extremely short because it is mirrored into the shared thread
-- if you produce a Discord-visible response, use `[[report]]...[[/report]]` with one short human-readable sentence only
-- if you are directly answering the operator's question, use `[[answer]]...[[/answer]]` for the direct answer and keep `[[report]]` for short state context
+- if you produce a Discord-visible response, use `[[report]]...[[/report]]` with one short Korean sentence only; this becomes the `HUMAN:` line
+- if you are directly answering the operator's question, use `[[answer]]...[[/answer]]` for the direct answer in Korean and keep `[[report]]` for short Korean state context
 - if something looks inconsistent, if feature intent may be misunderstood, or if review feedback seems open to multiple interpretations, use a short `[[discuss type="open" ask="reviewer,coder" anomaly="A-001"]]...[[/discuss]]` block and keep the detailed evidence in markdown files
 - when another agent opens a discussion you should answer with `[[discuss type="reply" to="planner" anomaly="A-001"]]...[[/discuss]]` unless a different target is more appropriate
 - once the anomaly is understood, close it with `[[discuss type="resolve" anomaly="A-001"]]...[[/discuss]]` or `[[discuss type="escalate" anomaly="A-001"]]...[[/discuss]]`

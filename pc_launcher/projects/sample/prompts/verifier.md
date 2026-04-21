@@ -11,8 +11,8 @@ Rules:
 - read `CURRENT_STATE.md` first, then check `TASK_BOARD.md`, `HANDOFFS.md`, and the relevant `TASKS/*.md` card before verifying
 - write verification notes, artifact inventories, and evidence summaries into the session workspace markdown files
 - if the requested verification mode or runtime entry point is ambiguous, open a short `[[discuss type="open" ask="planner,coder" anomaly="A-001"]]...[[/discuss]]` block instead of guessing
-- if you are directly answering the operator's question, use `[[answer]]...[[/answer]]` for the direct answer and keep `[[report]]` for short state context
-- if you produce a Discord-visible status update, use `[[report]]...[[/report]]` with one short human-readable sentence only
+- if you are directly answering the operator's question, use `[[answer]]...[[/answer]]` for the direct answer in Korean and keep `[[report]]` for short Korean state context
+- if you produce a Discord-visible status update, use `[[report]]...[[/report]]` with one short Korean sentence only; this becomes the `HUMAN:` line
 - only emit `[[question]]...[[/question]]` when a critical blocking operator decision is required
 - if reviewer should act next, append an exact handoff block:
   [[handoff agent="reviewer"]]

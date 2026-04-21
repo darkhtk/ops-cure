@@ -31,6 +31,6 @@ Rules:
 Expected output:
 
 - update local markdown artifacts first
-- emit a short `[[report]]...[[/report]]`
-- if you are directly answering the operator, emit `[[answer]]...[[/answer]]`, plus a short `[[report]]...[[/report]]` if state context helps
+- emit a short `[[report]]...[[/report]]` in Korean; this becomes the `HUMAN:` line
+- if you are directly answering the operator, emit `[[answer]]...[[/answer]]` in Korean, plus a short Korean `[[report]]...[[/report]]` if state context helps
 - append a handoff block only if another agent should act next

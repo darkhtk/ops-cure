@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import socket
 import subprocess
 import threading
@@ -30,6 +31,7 @@ LOGGER = logging.getLogger(__name__)
 HANDOFF_TIMEOUT_CAP_SECONDS = 900
 ROUTING_TIMEOUT_CAP_SECONDS = 240
 RESTART_TIMEOUT_CAP_SECONDS = 120
+CANONICAL_TASK_ID_RE = re.compile(r"^T-\d+$", re.IGNORECASE)
 
 
 class WorkerRuntime:
@@ -365,7 +367,7 @@ class WorkerRuntime:
             )
 
         run_slug = task_id or str(job.get("id") or uuid.uuid4())
-        self._set_activity_line(f"Running verification `{mode}`.")
+        self._set_activity_line(f"검증 `{mode}` 실행 중.")
         artifact_dir = (
             Path(self.project.default_workdir).resolve()
             / self.project.verification.artifact_dir
@@ -379,7 +381,7 @@ class WorkerRuntime:
             artifact_dir=artifact_dir,
         )
         if result.status != "completed":
-            failure_message = result.error_text or f"Verification `{mode}` failed."
+            failure_message = result.error_text or f"검증 `{mode}` 실행에 실패했습니다."
             stderr_text = "\n".join(
                 artifact["path"]
                 for artifact in result.artifacts
@@ -387,9 +389,7 @@ class WorkerRuntime:
             )
             raise RuntimeError(f"{failure_message}\nArtifacts: {artifact_dir}\n{stderr_text}".strip())
 
-        report_text = result.summary_text or (
-            f"Verification `{mode}` completed for profile `{self.project.profile_name}`."
-        )
+        report_text = result.summary_text or f"프로필 `{self.project.profile_name}`의 검증 `{mode}`가 완료되었습니다."
         review_handoff = self._build_review_handoff(task_id=task_id, mode=mode, artifact_dir=artifact_dir)
         synthetic_output = "\n\n".join(
             [
@@ -435,14 +435,16 @@ class WorkerRuntime:
         return commands[0] if commands else "smoke"
 
     def _build_review_handoff(self, *, task_id: str | None, mode: str, artifact_dir: Path) -> str:
-        task_label = task_id or "T-VERIFY"
+        task_label = task_id if task_id and CANONICAL_TASK_ID_RE.fullmatch(task_id) else None
         try:
             artifact_pointer = artifact_dir.relative_to(Path(self.project.default_workdir).resolve()).as_posix()
         except ValueError:
             artifact_pointer = str(artifact_dir)
+        task_line = f"{task_label}\n" if task_label else ""
+        task_reference = task_label or "the verification evidence"
         return (
-            f"{task_label}\n"
-            f"Target summary: Review verification artifacts for `{task_label}` after `{mode}`.\n"
+            f"{task_line}"
+            f"Target summary: Review verification artifacts for `{task_reference}` after `{mode}`.\n"
             "Read CURRENT_STATE.md and TASK_BOARD.md first.\n"
             f"Files: {artifact_pointer}\n"
             "Done condition: Record pass, fail, or replan based on the verification evidence."
@@ -573,14 +575,14 @@ class WorkerRuntime:
     def _default_activity_line(self, *, job_type: str, task_id: str | None) -> str:
         task_suffix = f" ({task_id})" if task_id else ""
         if job_type == "routing":
-            return f"Routing the next step{task_suffix}."
+            return f"다음 흐름을 정리하는 중{task_suffix}."
         if job_type == "handoff":
-            return f"Working on handoff{task_suffix}."
+            return f"handoff 작업 처리 중{task_suffix}."
         if job_type == "verification":
-            return f"Preparing verification{task_suffix}."
+            return f"검증 준비 중{task_suffix}."
         if job_type == "restart":
-            return "Restarting worker runtime."
-        return f"Working on {job_type}{task_suffix}."
+            return "worker 런타임 재시작 중."
+        return f"{job_type} 작업 처리 중{task_suffix}."
 
     def _build_artifact_snapshot(self) -> dict[str, object] | None:
         if self._workspace is None:

@@ -74,8 +74,8 @@ class CommandVerificationRunner:
             if project.verification.capture.screenshots:
                 self._capture_desktop_screenshot(artifact_dir)
             summary = (
-                f"Verification `{run_payload['mode']}` timed out after {timeout_seconds}s "
-                f"for profile `{project.profile_name}`."
+                f"프로필 `{project.profile_name}`의 검증 `{run_payload['mode']}`이(가) "
+                f"{timeout_seconds}초 후 시간 초과되었습니다."
             )
             result_path.write_text(
                 json.dumps(
@@ -117,8 +117,8 @@ class CommandVerificationRunner:
             status = "failed"
             summary_text = None
             error_text = (
-                f"Verification `{run_payload['mode']}` exited with code `{completed.returncode}` "
-                f"for profile `{project.profile_name}`."
+                f"프로필 `{project.profile_name}`의 검증 `{run_payload['mode']}`이(가) "
+                f"종료 코드 `{completed.returncode}`로 실패했습니다."
             )
 
         result_path.write_text(
@@ -174,12 +174,12 @@ class CommandVerificationRunner:
         ]
         if screenshots:
             return (
-                f"Verification `{mode}` completed for profile `{profile_name}`. "
-                f"Representative screenshot: `{screenshots[0]}`."
+                f"프로필 `{profile_name}`의 검증 `{mode}`가 완료되었습니다. "
+                f"대표 스크린샷: `{screenshots[0]}`."
             )
         return (
-            f"Verification `{mode}` completed for profile `{profile_name}`. "
-            f"Artifacts were written to `{artifact_dir}`."
+            f"프로필 `{profile_name}`의 검증 `{mode}`가 완료되었습니다. "
+            f"산출물은 `{artifact_dir}`에 기록되었습니다."
         )
 
     @staticmethod
