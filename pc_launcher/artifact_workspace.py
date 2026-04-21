@@ -1610,7 +1610,23 @@ class SessionWorkspace:
         self.ensure_structure()
         raw = self.task_index_file.read_text(encoding="utf-8").strip() or "{}"
         data = json.loads(raw)
-        return {task_id: TaskCard(**payload) for task_id, payload in data.items()}
+        allowed_fields = set(TaskCard.__dataclass_fields__)
+        index: dict[str, TaskCard] = {}
+        changed = False
+        for task_id, payload in data.items():
+            if not isinstance(payload, dict):
+                changed = True
+                continue
+            sanitized = {key: value for key, value in payload.items() if key in allowed_fields}
+            if sanitized.keys() != payload.keys():
+                changed = True
+            if "task_id" not in sanitized:
+                sanitized["task_id"] = str(task_id).strip().upper()
+                changed = True
+            index[task_id] = TaskCard(**sanitized)
+        if changed:
+            self._save_task_index(index)
+        return index
 
     def _save_task_index(self, index: dict[str, TaskCard]) -> None:
         payload = {task_id: asdict(card) for task_id, card in index.items()}
