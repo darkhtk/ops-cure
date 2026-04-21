@@ -1574,6 +1574,11 @@ class SessionService:
 
     def _resolve_manifest(self, preset: str | None) -> tuple[ProjectManifest, str]:
         available_presets = self.registry.list_project_names()
+        if not available_presets:
+            raise ValueError(
+                "No profiles are currently registered by any launcher. "
+                "Start the PC launcher first, then run /project start again.",
+            )
         if preset:
             manifest = self.registry.get_project(preset)
             if manifest is None:
