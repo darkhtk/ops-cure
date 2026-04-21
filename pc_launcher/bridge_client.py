@@ -150,6 +150,26 @@ class BridgeClient:
         )
         return payload.get("job")
 
+    def get_thread_delta(
+        self,
+        *,
+        session_id: str,
+        agent_name: str,
+        cursor: str | None = None,
+        kinds: list[str] | None = None,
+        task_id: str | None = None,
+        limit: int = 12,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "session_id": session_id,
+            "agent_name": agent_name,
+            "cursor": cursor,
+            "kinds": kinds or [],
+            "task_id": task_id,
+            "limit": limit,
+        }
+        return self._post("/api/workers/thread-delta", payload)
+
     def complete_job(
         self,
         *,

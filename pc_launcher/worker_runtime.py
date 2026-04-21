@@ -71,6 +71,7 @@ class WorkerRuntime:
         self._stop_event = threading.Event()
         self._current_process: subprocess.Popen[str] | None = None
         self._current_activity_line: str | None = None
+        self._thread_delta_cursor: str | None = None
         self._session_name = self.project.resolved_default_target_name
         self._session_preset = self.project.profile_name
         self._workspace: SessionWorkspace | None = None
@@ -216,12 +217,14 @@ class WorkerRuntime:
     def _run_cli_for_job(self, job: dict[str, object]) -> BridgeCompletionPayload:
         job_type = str(job.get("job_type") or "message")
         workspace = self._ensure_session_workspace(job)
+        thread_delta = self._load_thread_delta(job)
         workspace.write_job_brief(
             agent_name=self.agent_name,
             job_type=job_type,
             user_text=str(job.get("input_text") or ""),
             session_summary=str(job["session_summary"]) if job.get("session_summary") is not None else None,
             recent_transcript=list(job.get("recent_transcript") or []),
+            thread_delta=thread_delta,
             task_id=str(job.get("task_id") or "").strip().upper() or None,
         )
         if job_type == "verification":
@@ -583,6 +586,82 @@ class WorkerRuntime:
         if job_type == "restart":
             return "worker 런타임 재시작 중."
         return f"{job_type} 작업 처리 중{task_suffix}."
+
+    def _default_activity_line(self, *, job_type: str, task_id: str | None) -> str:
+        task_suffix = f" ({task_id})" if task_id else ""
+        if job_type == "routing":
+            return f"Planning next flow{task_suffix}."
+        if job_type == "handoff":
+            return f"Processing handoff{task_suffix}."
+        if job_type == "verification":
+            return f"Running verification{task_suffix}."
+        if job_type == "curation_event":
+            return f"Reviewing recent flow changes{task_suffix}."
+        if job_type == "curation_sweep":
+            return f"Sweeping stalled flow{task_suffix}."
+        if job_type == "restart":
+            return "Restarting worker runtime."
+        return f"Processing {job_type}{task_suffix}."
+
+    def _load_thread_delta(self, job: dict[str, object]) -> list[dict[str, object]]:
+        kinds = self._thread_delta_kinds_for_job(job_type=str(job.get("job_type") or "message"))
+        task_id = str(job.get("task_id") or "").strip().upper() or None
+        try:
+            payload = self.bridge_client.get_thread_delta(
+                session_id=self.session_id,
+                agent_name=self.agent_name,
+                cursor=self._thread_delta_cursor,
+                kinds=kinds,
+                task_id=task_id,
+                limit=12,
+            )
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("Failed to load thread delta for %s: %s", self.agent_name, exc)
+            return []
+        self._thread_delta_cursor = payload.get("next_cursor") or self._thread_delta_cursor
+        raw_events = payload.get("events") or []
+        if not isinstance(raw_events, list):
+            return []
+        return [item for item in raw_events if isinstance(item, dict)]
+
+    def _thread_delta_kinds_for_job(self, *, job_type: str) -> list[str]:
+        if self.agent_name.lower() == "curator" or job_type.startswith("curation_"):
+            return [
+                "user",
+                "issue",
+                "answer",
+                "ops",
+                "human",
+                "status",
+                "discuss_open",
+                "discuss_reply",
+                "discuss_resolve",
+                "discuss_escalate",
+                "done",
+            ]
+        if self.agent_name.lower() == "planner":
+            return [
+                "user",
+                "issue",
+                "answer",
+                "status",
+                "discuss_open",
+                "discuss_reply",
+                "discuss_resolve",
+                "discuss_escalate",
+                "done",
+            ]
+        return [
+            "user",
+            "issue",
+            "answer",
+            "status",
+            "discuss_open",
+            "discuss_reply",
+            "discuss_resolve",
+            "discuss_escalate",
+            "done",
+        ]
 
     def _build_artifact_snapshot(self) -> dict[str, object] | None:
         if self._workspace is None:

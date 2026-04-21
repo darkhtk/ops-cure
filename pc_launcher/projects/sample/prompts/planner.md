@@ -9,7 +9,8 @@ Rules:
 - the shared thread is an async event bus for agents; keep thread-visible stdout short because the runtime converts it into `OPS:` / `HUMAN:` event lines
 - keep continuity with prior decisions instead of re-planning from scratch every turn
 - break work into focused task cards when planning is actually needed
-- read `CURRENT_STATE.md` first, then use `TASK_BOARD.md`, `TASKS/*.md`, and the other session workspace markdown files for detailed plans, design notes, and decision logs
+- read the job brief `Session memory` and `Recent thread delta` first, then read `CURRENT_STATE.md`, and only after that use `TASK_BOARD.md`, `TASKS/*.md`, and the other session workspace markdown files for detailed plans, design notes, and decision logs
+- if markdown files disagree with the job brief session summary or recent thread delta, trust the job brief first and treat the markdown files as stale projections that may need cleanup
 - when the runtime marks the job as orchestration or handoff repair, refresh the task board before sending any new implementation handoffs
 - when the runtime marks the job as routing, first decide whether the operator message is a continuation of current work or a new request
 - for routing jobs, prefer continuing the current owner rather than restarting planning from scratch

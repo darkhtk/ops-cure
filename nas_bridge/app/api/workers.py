@@ -6,6 +6,8 @@ from ..auth import require_bridge_token
 from ..schemas import (
     JobCompleteRequest,
     JobFailRequest,
+    ThreadDeltaRequest,
+    ThreadDeltaResponse,
     WorkerPollRequest,
     WorkerPollResponse,
     WorkerRegisterRequest,
@@ -96,3 +98,16 @@ async def fail_job(job_id: str, payload: JobFailRequest, request: Request) -> di
     except PermissionError as exc:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
     return {"status": "failed"}
+
+
+@router.post("/thread-delta", response_model=ThreadDeltaResponse)
+async def thread_delta(payload: ThreadDeltaRequest, request: Request) -> ThreadDeltaResponse:
+    services = request.app.state.services
+    return services.session_service.get_thread_delta(
+        session_id=payload.session_id,
+        agent_name=payload.agent_name,
+        cursor=payload.cursor,
+        kinds=payload.kinds,
+        task_id=payload.task_id,
+        limit=payload.limit,
+    )

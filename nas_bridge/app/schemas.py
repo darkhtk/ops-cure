@@ -185,6 +185,35 @@ class TranscriptContextEntry(BaseModel):
     created_at: datetime
 
 
+class ThreadDeltaEntry(BaseModel):
+    cursor: str
+    direction: str
+    actor: str
+    kind: str
+    content: str
+    task_id: str | None = None
+    created_at: datetime
+
+
+class ThreadDeltaRequest(BaseModel):
+    session_id: str
+    agent_name: str
+    cursor: str | None = None
+    kinds: list[str] = Field(default_factory=list)
+    task_id: str | None = None
+    limit: int = 12
+
+    @field_validator("limit")
+    @classmethod
+    def validate_limit(cls, value: int) -> int:
+        return max(1, min(value, 50))
+
+
+class ThreadDeltaResponse(BaseModel):
+    next_cursor: str | None = None
+    events: list[ThreadDeltaEntry] = Field(default_factory=list)
+
+
 class TaskStateSummary(BaseModel):
     id: str
     task_key: str

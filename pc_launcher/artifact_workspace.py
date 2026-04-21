@@ -310,11 +310,11 @@ class SessionWorkspace:
 
         if settled:
             if not summary_tasks and index:
-                transient_statuses = {"in_progress", "review", "handoff_queued"}
+                transient_statuses = {"ready", "in_progress", "review", "verify", "handoff_queued"}
                 for card in index.values():
                     if card.status not in transient_statuses:
                         continue
-                    card.status = "ready" if session_status in {"ready", "paused"} else "failed"
+                    card.status = "done" if session_status in {"ready", "paused"} else "failed"
                     card.updated_at = utcnow().isoformat()
                     card.notes = (
                         "Reconciled from bridge session state after the session settled without active jobs."
@@ -322,7 +322,7 @@ class SessionWorkspace:
                     self._write_task_card(card)
                     updated_files.append(self.task_file(card.task_id))
                     changed = True
-            handoff_specs = self._handoff_specs_from_bridge_summary(summary_handoffs, index) if summary_handoffs else self._pending_handoffs_from_task_index(index)
+            handoff_specs = self._handoff_specs_from_bridge_summary(summary_handoffs, index) if summary_handoffs else []
             if handoff_specs:
                 self.handoffs_file.write_text(
                     self._build_handoffs_text(agent_name=agent_name, handoffs=handoff_specs),
@@ -521,6 +521,7 @@ class SessionWorkspace:
         user_text: str,
         session_summary: str | None,
         recent_transcript: list[dict[str, object]],
+        thread_delta: list[dict[str, object]] | None = None,
         task_id: str | None = None,
     ) -> Path:
         self.ensure_structure()
@@ -531,6 +532,11 @@ class SessionWorkspace:
             for entry in recent_transcript
         ]
         transcript_text = "\n".join(transcript_lines) if transcript_lines else "- none"
+        delta_lines = [
+            f"- [{entry.get('kind', 'unknown')}] {entry.get('actor', 'unknown')}: {entry.get('content', '')}"
+            for entry in (thread_delta or [])
+        ]
+        delta_text = "\n".join(delta_lines) if delta_lines else "- none"
         brief_path.write_text(
             (
                 f"# Job Brief\n\n"
@@ -540,7 +546,8 @@ class SessionWorkspace:
                 f"- Timestamp: `{utcnow().isoformat()}`\n\n"
                 f"## Current message\n\n{user_text.strip() or '(empty message)'}\n\n"
                 f"## Session memory\n\n{(session_summary or '- none').strip()}\n\n"
-                f"## Recent transcript\n\n{transcript_text}\n"
+                f"## Recent transcript\n\n{transcript_text}\n\n"
+                f"## Recent thread delta\n\n{delta_text}\n"
             ),
             encoding="utf-8",
         )
@@ -1589,9 +1596,10 @@ class SessionWorkspace:
         index = self._load_task_index()
         if not task_id:
             return [self._refresh_task_board(index)]
+        normalized_summary = self._normalize_task_payload_text(summary)
         card = index.get(task_id) or TaskCard(
             task_id=task_id,
-            title=self._derive_task_title(summary),
+            title=self._derive_task_title(normalized_summary),
             owner=agent_name,
             status="failed",
             source_agent=agent_name,
@@ -1602,13 +1610,13 @@ class SessionWorkspace:
             source_log_name=raw_log_name,
             goal="Investigate the failed runtime step.",
             definition_of_done="Stabilize the task and update the task board.",
-            notes=summary,
+            notes=normalized_summary,
         )
         card.owner = agent_name
         card.status = "failed"
         card.updated_at = utcnow().isoformat()
         card.source_log_name = raw_log_name
-        card.notes = summary
+        card.notes = normalized_summary
         index[task_id] = card
         self._save_task_index(index)
         self._write_task_card(card)
@@ -1759,9 +1767,13 @@ class SessionWorkspace:
         return self.task_board_file
 
     def _write_task_card(self, card: TaskCard) -> None:
+        goal_text = self._normalize_task_payload_text(card.goal)
+        definition_text = self._normalize_task_payload_text(card.definition_of_done)
+        notes_text = self._normalize_task_payload_text(card.notes)
+        title_text = self._normalize_task_payload_text(card.title) or card.task_id
         self.task_file(card.task_id).write_text(
             (
-                f"# {card.task_id} {card.title}\n\n"
+                f"# {card.task_id} {title_text}\n\n"
                 f"- Status: `{card.status}`\n"
                 f"- Owner: `{card.owner}`\n"
                 f"- Source agent: `{card.source_agent}`\n"
@@ -1771,11 +1783,11 @@ class SessionWorkspace:
                 f"- Latest brief: `{card.latest_brief_name or 'none'}`\n"
                 f"- Source log: `{card.source_log_name or 'none'}`\n\n"
                 "## Goal\n\n"
-                f"{card.goal.strip() or '(none)'}\n\n"
+                f"{goal_text.strip() or '(none)'}\n\n"
                 "## Definition Of Done\n\n"
-                f"{card.definition_of_done.strip() or '(none)'}\n\n"
+                f"{definition_text.strip() or '(none)'}\n\n"
                 "## Notes\n\n"
-                f"{card.notes.strip() or '(none)'}\n"
+                f"{notes_text.strip() or '(none)'}\n"
             ),
             encoding="utf-8",
         )

@@ -5,7 +5,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Iterable
 from uuid import uuid4
 
@@ -47,6 +47,8 @@ from .schemas import (
     ProjectFindSummaryResponse,
     SessionSummaryResponse,
     TaskStateSummary,
+    ThreadDeltaEntry,
+    ThreadDeltaResponse,
     TranscriptContextEntry,
 )
 from .thread_manager import ThreadManager
@@ -95,6 +97,12 @@ MIN_HANDOFF_BODY_LENGTH = 40
 TERMINAL_JOB_STATES = {"completed", "failed", "cancelled"}
 READY_TASK_STATES = {"ready", "review", "verify"}
 TERMINAL_HANDOFF_STATES = {"consumed", "superseded", "failed"}
+CURATION_READY_IDLE_SECONDS = 180
+CURATION_PLANNER_IMBALANCE_SECONDS = 180
+CURATION_SWEEP_COOLDOWN_SECONDS = 180
+THREAD_DELTA_FETCH_LIMIT = 120
+THREAD_CURSOR_SEPARATOR = "|"
+OPS_TYPE_RE = re.compile(r"(^|\n)OPS:\s*type=(?P<type>[A-Za-z0-9_-]+)", re.IGNORECASE)
 
 
 @dataclass(slots=True)
@@ -915,6 +923,77 @@ class SessionService:
             artifact_snapshot=self._to_artifact_snapshot(artifact_snapshot),
         )
 
+    def get_thread_delta(
+        self,
+        *,
+        session_id: str,
+        agent_name: str,
+        cursor: str | None = None,
+        kinds: list[str] | None = None,
+        task_id: str | None = None,
+        limit: int = 12,
+    ) -> ThreadDeltaResponse:
+        requested_kinds = {item.strip().lower() for item in (kinds or []) if item and item.strip()}
+        normalized_task_id = task_id.strip().upper() if task_id else None
+        cursor_marker = self._decode_thread_cursor(cursor)
+        events: list[ThreadDeltaEntry] = []
+        next_cursor = cursor
+        with session_scope() as db:
+            self._require_session(
+                db,
+                select(SessionModel).where(SessionModel.id == session_id),
+            )
+            self._require_agent(db, session_id=session_id, agent_name=agent_name)
+            statement = select(TranscriptModel).where(TranscriptModel.session_id == session_id)
+            if cursor_marker is None:
+                transcript_rows = list(
+                    db.scalars(
+                        statement
+                        .order_by(desc(TranscriptModel.created_at), desc(TranscriptModel.id))
+                        .limit(THREAD_DELTA_FETCH_LIMIT),
+                    ),
+                )
+                transcript_rows.reverse()
+            else:
+                transcript_rows = list(
+                    db.scalars(
+                        statement
+                        .where(TranscriptModel.created_at >= cursor_marker[0])
+                        .order_by(TranscriptModel.created_at.asc(), TranscriptModel.id.asc())
+                        .limit(THREAD_DELTA_FETCH_LIMIT),
+                    ),
+                )
+
+        scanned_after_cursor = False
+        for entry in transcript_rows:
+            if not self._thread_entry_after_cursor(entry, cursor_marker):
+                continue
+            scanned_after_cursor = True
+            next_cursor = self._encode_thread_cursor(entry)
+            kind = self._classify_transcript_kind(entry)
+            if requested_kinds and kind not in requested_kinds:
+                continue
+            resolved_task_id = self._extract_transcript_task_id(entry.content)
+            if normalized_task_id and resolved_task_id != normalized_task_id:
+                continue
+            events.append(
+                ThreadDeltaEntry(
+                    cursor=self._encode_thread_cursor(entry),
+                    direction=entry.direction,
+                    actor=entry.actor,
+                    kind=kind,
+                    content=entry.content,
+                    task_id=resolved_task_id,
+                    created_at=entry.created_at,
+                ),
+            )
+            if len(events) >= limit:
+                break
+
+        if not scanned_after_cursor:
+            next_cursor = cursor
+        return ThreadDeltaResponse(next_cursor=next_cursor, events=events)
+
     async def claim_next_job(
         self,
         *,
@@ -975,7 +1054,7 @@ class SessionService:
                 )
                 or 0,
             )
-            if active_job_count >= max_parallel_agents:
+            if active_job_count >= max_parallel_agents and not self._is_curator_agent(agent):
                 agent.status = "idle"
                 return None
 
@@ -994,6 +1073,15 @@ class SessionService:
                     worker_id=worker_id,
                 )
                 if payload is None:
+                    if self._is_curator_agent(agent):
+                        payload = self._claim_curator_sweep_job(
+                            db,
+                            session_row=session_row,
+                            agent=agent,
+                            worker_id=worker_id,
+                        )
+                    if payload is not None:
+                        return payload
                     agent.status = "idle"
                     return None
                 return payload
@@ -1769,6 +1857,71 @@ class SessionService:
             created_at=job.created_at,
         )
 
+    @staticmethod
+    def _encode_thread_cursor(entry: TranscriptModel) -> str:
+        return f"{entry.created_at.isoformat()}{THREAD_CURSOR_SEPARATOR}{entry.id}"
+
+    @staticmethod
+    def _decode_thread_cursor(cursor: str | None) -> tuple[datetime, str] | None:
+        if not cursor:
+            return None
+        raw_created_at, separator, raw_id = cursor.partition(THREAD_CURSOR_SEPARATOR)
+        if not separator or not raw_created_at or not raw_id:
+            return None
+        try:
+            created_at = datetime.fromisoformat(raw_created_at)
+        except ValueError:
+            return None
+        return created_at, raw_id
+
+    @staticmethod
+    def _thread_entry_after_cursor(
+        entry: TranscriptModel,
+        cursor_marker: tuple[datetime, str] | None,
+    ) -> bool:
+        if cursor_marker is None:
+            return True
+        cursor_created_at, cursor_id = cursor_marker
+        if entry.created_at > cursor_created_at:
+            return True
+        if entry.created_at < cursor_created_at:
+            return False
+        return entry.id > cursor_id
+
+    def _classify_transcript_kind(self, entry: TranscriptModel) -> str:
+        content = entry.content.strip()
+        lines = [line.strip() for line in content.splitlines() if line.strip()]
+        if entry.direction == "inbound":
+            return "user"
+        if entry.direction == "system":
+            lowered = content.lower()
+            if lowered.startswith("discussion queued"):
+                return "discuss_open"
+            if lowered.startswith("discussion reply queued"):
+                return "discuss_reply"
+            return "status"
+        if any(line.startswith("ISSUE:") for line in lines):
+            return "issue"
+        if any(line.startswith("ANSWER:") for line in lines):
+            return "answer"
+        if any(line.startswith("DONE:") for line in lines):
+            return "done"
+        if any(line.startswith("HUMAN:") for line in lines):
+            return "human"
+        match = OPS_TYPE_RE.search(content)
+        if match is not None:
+            return match.group("type").strip().lower()
+        if any(line.startswith("OPS:") for line in lines):
+            return "ops"
+        return "status"
+
+    @staticmethod
+    def _extract_transcript_task_id(content: str) -> str | None:
+        match = TASK_CARD_ID_RE.search(content)
+        if match is None:
+            return None
+        return match.group(0).strip().upper()
+
     def _load_recent_transcript(
         self,
         db: Session,
@@ -2069,13 +2222,28 @@ class SessionService:
         handoffs: list[HandoffRequest],
     ) -> None:
         agent_roles = {agent.agent_name: agent.role for agent in session_row.agents}
+        curator_details: list[str] = []
         for handoff in handoffs:
-            task, normalized_body = self._upsert_task_for_handoff(
+            task, normalized_body, duplicate = self._upsert_task_for_handoff(
                 db,
                 session_row=session_row,
                 source_agent=source_agent,
                 handoff=handoff,
             )
+            if duplicate:
+                self.transcript_service.add_entry(
+                    db,
+                    session_id=session_id,
+                    direction="system",
+                    actor="bridge",
+                    content=(
+                        f"Duplicate handoff ignored for {handoff.target_agent}"
+                        f"{f' ({task.task_key})' if task is not None else ''}: "
+                        f"{self._trim_context_text(normalized_body, HANDOFF_PREVIEW_LIMIT)}"
+                    ),
+                    source_discord_message_id=source_job.source_discord_message_id,
+                )
+                continue
             for stale_handoff in db.scalars(
                 select(HandoffModel)
                 .where(HandoffModel.task_id == task.id)
@@ -2123,6 +2291,18 @@ class SessionService:
                 ),
                 source_discord_message_id=source_job.source_discord_message_id,
             )
+            curator_details.append(
+                f"{task.task_key} -> {handoff.target_agent}: {self._trim_context_text(task.summary_text or normalized_body, HANDOFF_PREVIEW_LIMIT)}",
+            )
+        if curator_details:
+            self._queue_curator_event(
+                db,
+                session_row=session_row,
+                source_agent=source_agent,
+                source_job=source_job,
+                reason="handoff_update",
+                detail_lines=curator_details,
+            )
 
     @staticmethod
     def _append_task_event(
@@ -2153,7 +2333,7 @@ class SessionService:
         session_row: SessionModel,
         source_agent: str,
         handoff: HandoffRequest,
-    ) -> tuple[TaskModel, str]:
+    ) -> tuple[TaskModel, str, bool]:
         target_agent = self._require_agent(db, session_id=session_row.id, agent_name=handoff.target_agent)
         normalized_body = self._normalize_task_payload_text(handoff.body)
         task_key = (
@@ -2171,6 +2351,7 @@ class SessionService:
             .where(TaskModel.session_id == session_row.id)
             .where(TaskModel.task_key == task_key),
         )
+        duplicate = False
         if task is None:
             task = TaskModel(
                 session_id=session_row.id,
@@ -2195,6 +2376,15 @@ class SessionService:
             db.add(task)
             db.flush()
         else:
+            duplicate = self._is_duplicate_ready_handoff(
+                db,
+                session_row=session_row,
+                task=task,
+                target_agent=handoff.target_agent,
+                normalized_body=normalized_body,
+            )
+            if duplicate:
+                return task, normalized_body, True
             task.title = self._derive_task_title_from_handoff(normalized_body)
             task.role = target_agent.role
             task.assigned_agent = handoff.target_agent
@@ -2221,7 +2411,34 @@ class SessionService:
         if done_condition:
             task.latest_brief_name = None
             task.latest_log_name = None
-        return task, normalized_body
+        return task, normalized_body, False
+
+    @staticmethod
+    def _is_duplicate_ready_handoff(
+        db: Session,
+        *,
+        session_row: SessionModel,
+        task: TaskModel,
+        target_agent: str,
+        normalized_body: str,
+    ) -> bool:
+        if task.session_epoch != session_row.session_epoch:
+            return False
+        if task.assigned_agent and task.assigned_agent.lower() != target_agent.lower():
+            return False
+        if (task.body_text or "").strip() != normalized_body.strip():
+            return False
+        if task.state not in {"ready", "in_progress", "review", "verify", "handoff_queued"}:
+            return False
+        existing_handoff = db.scalar(
+            select(HandoffModel)
+            .where(HandoffModel.session_id == session_row.id)
+            .where(HandoffModel.task_id == task.id)
+            .where(HandoffModel.target_agent == target_agent)
+            .where(HandoffModel.state.in_(["queued", "claimed"]))
+            .order_by(HandoffModel.created_at.desc()),
+        )
+        return existing_handoff is not None
 
     def _allocate_task_key(self, db: Session, *, session_id: str) -> str:
         existing_keys = db.scalars(
@@ -2326,6 +2543,240 @@ class SessionService:
             session_row=session_row,
             session_summary=session_summary,
             recent_transcript=recent_transcript,
+        )
+
+    def _claim_curator_sweep_job(
+        self,
+        db: Session,
+        *,
+        session_row: SessionModel,
+        agent: AgentModel,
+        worker_id: str,
+    ) -> JobPayload | None:
+        if not self._is_curator_agent(agent):
+            return None
+        prompt, reason = self._build_curator_sweep_prompt(db, session_row=session_row)
+        if not prompt:
+            return None
+
+        lease_token = str(uuid4())
+        job = JobModel(
+            session_id=session_row.id,
+            agent_name=agent.agent_name,
+            job_type="curation_sweep",
+            source_discord_message_id=None,
+            user_id="system:curator",
+            input_text=prompt,
+            status="in_progress",
+            worker_id=worker_id,
+            session_epoch=session_row.session_epoch,
+            lease_token=lease_token,
+            idempotency_key=f"curation_sweep:{session_row.id}:{session_row.session_epoch}:{reason}",
+            claimed_at=utcnow(),
+        )
+        db.add(job)
+        agent.status = "busy"
+        self.transcript_service.add_entry(
+            db,
+            session_id=session_row.id,
+            direction="system",
+            actor="bridge",
+            content=f"Curator sweep started: {reason}",
+        )
+        db.flush()
+        db.refresh(job)
+        recent_transcript = self._load_recent_transcript(db, session_id=session_row.id)
+        session_summary = self._build_session_summary(
+            db,
+            session_row=session_row,
+            current_agent=agent.agent_name,
+        )
+        return self._to_job_payload(
+            job,
+            session_row=session_row,
+            session_summary=session_summary,
+            recent_transcript=recent_transcript,
+        )
+
+    def _build_curator_sweep_prompt(
+        self,
+        db: Session,
+        *,
+        session_row: SessionModel,
+    ) -> tuple[str, str] | None:
+        now = utcnow()
+        ready_threshold = now - timedelta(seconds=CURATION_READY_IDLE_SECONDS)
+        stale_handoff = db.scalar(
+            select(HandoffModel)
+            .options(selectinload(HandoffModel.task))
+            .where(HandoffModel.session_id == session_row.id)
+            .where(HandoffModel.state == "queued")
+            .where(HandoffModel.created_at <= ready_threshold)
+            .order_by(HandoffModel.created_at.asc()),
+        )
+        if stale_handoff is not None and stale_handoff.task is not None:
+            summary = self._trim_context_text(stale_handoff.body_text, HANDOFF_PREVIEW_LIMIT)
+            return (
+                (
+                    "Curator sweep triggered because a queued handoff has been idle for too long.\n\n"
+                    "Read CURRENT_STATE.md, TASK_BOARD.md, HANDOFFS.md, and the referenced task card first.\n"
+                    "Do not create new scope. Re-direct, requeue, open discuss, or escalate only if necessary.\n\n"
+                    f"Reason: stale queued handoff\n"
+                    f"Task: {stale_handoff.task.task_key}\n"
+                    f"Target agent: {stale_handoff.target_agent}\n"
+                    f"Context: {summary}\n"
+                ),
+                "stale_handoff",
+            )
+
+        stale_task = db.scalar(
+            select(TaskModel)
+            .where(TaskModel.session_id == session_row.id)
+            .where(TaskModel.state.in_(tuple(sorted(READY_TASK_STATES))))
+            .where(TaskModel.updated_at <= ready_threshold)
+            .order_by(TaskModel.updated_at.asc()),
+        )
+        if stale_task is not None:
+            summary = self._trim_context_text(stale_task.summary_text or stale_task.title, HANDOFF_PREVIEW_LIMIT)
+            return (
+                (
+                    "Curator sweep triggered because a ready task has not been claimed for too long.\n\n"
+                    "Read CURRENT_STATE.md, TASK_BOARD.md, HANDOFFS.md, and the relevant TASKS/*.md card first.\n"
+                    "Do not create new scope. Re-direct, requeue, open discuss, or escalate only if necessary.\n\n"
+                    f"Reason: stale ready task\n"
+                    f"Task: {stale_task.task_key}\n"
+                    f"Assigned agent: {stale_task.assigned_agent or 'unassigned'}\n"
+                    f"Context: {summary}\n"
+                ),
+                "stale_ready_task",
+            )
+
+        planner_agent = self._find_planner_agent(session_row.agents)
+        if planner_agent is None:
+            return None
+        active_planner_job = db.scalar(
+            select(JobModel)
+            .where(JobModel.session_id == session_row.id)
+            .where(JobModel.agent_name == planner_agent.agent_name)
+            .where(JobModel.status == "in_progress")
+            .order_by(JobModel.claimed_at.asc()),
+        )
+        if active_planner_job is None or active_planner_job.claimed_at is None:
+            return None
+        planner_running_for = (now - active_planner_job.claimed_at).total_seconds()
+        if planner_running_for < CURATION_PLANNER_IMBALANCE_SECONDS:
+            return None
+        idle_agents = [
+            candidate.agent_name
+            for candidate in session_row.agents
+            if candidate.agent_name != planner_agent.agent_name and candidate.agent_name != "curator" and candidate.status == "idle"
+        ]
+        if not idle_agents:
+            return None
+        queued_count = int(
+            db.scalar(
+                select(func.count())
+                .select_from(HandoffModel)
+                .where(HandoffModel.session_id == session_row.id)
+                .where(HandoffModel.state == "queued"),
+            )
+            or 0,
+        )
+        ready_count = int(
+            db.scalar(
+                select(func.count())
+                .select_from(TaskModel)
+                .where(TaskModel.session_id == session_row.id)
+                .where(TaskModel.state.in_(tuple(sorted(READY_TASK_STATES)))),
+            )
+            or 0,
+        )
+        if queued_count == 0 and ready_count == 0:
+            return None
+        return (
+            (
+                "Curator sweep triggered because planner is still busy while other agents are idle and actionable work exists.\n\n"
+                "Read CURRENT_STATE.md, TASK_BOARD.md, HANDOFFS.md, and the latest task cards first.\n"
+                "Do not create new scope. Re-direct, requeue, open discuss, or escalate only if necessary.\n\n"
+                f"Reason: planner bottleneck\n"
+                f"Planner job type: {active_planner_job.job_type}\n"
+                f"Planner running for: {int(planner_running_for)}s\n"
+                f"Idle agents: {', '.join(idle_agents)}\n"
+                f"Ready tasks: {ready_count}\n"
+                f"Queued handoffs: {queued_count}\n"
+            ),
+            "planner_bottleneck",
+        )
+
+    def _queue_curator_event(
+        self,
+        db: Session,
+        *,
+        session_row: SessionModel,
+        source_agent: str,
+        source_job: JobModel,
+        reason: str,
+        detail_lines: list[str],
+    ) -> bool:
+        curator_agent = self._find_curator_agent(session_row.agents)
+        if curator_agent is None or source_agent.lower() == curator_agent.agent_name.lower():
+            return False
+        existing_job = db.scalar(
+            select(JobModel)
+            .where(JobModel.session_id == session_row.id)
+            .where(JobModel.agent_name == curator_agent.agent_name)
+            .where(JobModel.job_type.in_(["curation_event", "curation_sweep"]))
+            .where(JobModel.status.in_(["pending", "in_progress"])),
+        )
+        if existing_job is not None:
+            return False
+        trimmed_details = detail_lines[:4]
+        prompt = self._build_curator_event_prompt(
+            reason=reason,
+            source_agent=source_agent,
+            detail_lines=trimmed_details,
+        )
+        db.add(
+            JobModel(
+                session_id=session_row.id,
+                agent_name=curator_agent.agent_name,
+                job_type="curation_event",
+                source_discord_message_id=source_job.source_discord_message_id,
+                user_id=f"agent:{source_agent}",
+                input_text=prompt,
+                status="pending",
+                session_epoch=session_row.session_epoch,
+                idempotency_key=f"curation_event:{session_row.id}:{session_row.session_epoch}:{reason}:{source_job.id}",
+            ),
+        )
+        self.transcript_service.add_entry(
+            db,
+            session_id=session_row.id,
+            direction="system",
+            actor="bridge",
+            content=(
+                f"Curator event queued after {reason}: "
+                f"{self._trim_context_text(' | '.join(trimmed_details), HANDOFF_PREVIEW_LIMIT)}"
+            ),
+            source_discord_message_id=source_job.source_discord_message_id,
+        )
+        return True
+
+    def _build_curator_event_prompt(
+        self,
+        *,
+        reason: str,
+        source_agent: str,
+        detail_lines: list[str],
+    ) -> str:
+        rendered_details = "\n".join(f"- {item}" for item in detail_lines) if detail_lines else "- no extra details"
+        return (
+            f"Curator event triggered after `{source_agent}` updated the shared flow.\n\n"
+            "Read CURRENT_STATE.md, TASK_BOARD.md, HANDOFFS.md, and the recent thread delta first.\n"
+            "Do not create new scope. Decide whether an existing task should be directed, requeued, discussed, or escalated.\n\n"
+            f"Reason: {reason}\n"
+            "Recent signals:\n"
+            f"{rendered_details}\n"
         )
 
     @staticmethod
@@ -2549,6 +3000,7 @@ class SessionService:
         source_job: JobModel,
         discussions: list[DiscussRequest],
     ) -> None:
+        curator_details: list[str] = []
         for discuss in discussions:
             if discuss.discuss_type == "open":
                 for target_agent in discuss.ask_agents or []:
@@ -2584,6 +3036,9 @@ class SessionService:
                         ),
                         source_discord_message_id=source_job.source_discord_message_id,
                     )
+                    curator_details.append(
+                        f"{discuss.discuss_type}:{target_agent}:{self._trim_context_text(discuss.body, HANDOFF_PREVIEW_LIMIT)}",
+                    )
             elif discuss.discuss_type == "reply" and discuss.to_agent:
                 db.add(
                     JobModel(
@@ -2617,6 +3072,23 @@ class SessionService:
                     ),
                     source_discord_message_id=source_job.source_discord_message_id,
                 )
+                curator_details.append(
+                    f"{discuss.discuss_type}:{discuss.to_agent}:{self._trim_context_text(discuss.body, HANDOFF_PREVIEW_LIMIT)}",
+                )
+        if curator_details:
+            self._queue_curator_event(
+                db,
+                session_row=self._require_session(
+                    db,
+                    select(SessionModel)
+                    .options(selectinload(SessionModel.agents))
+                    .where(SessionModel.id == session_id),
+                ),
+                source_agent=source_agent,
+                source_job=source_job,
+                reason="discussion_update",
+                detail_lines=curator_details,
+            )
 
     def _record_handoff_rejections(
         self,
@@ -3072,6 +3544,24 @@ class SessionService:
             if "plan" in agent.role.lower():
                 return agent
         return None
+
+    @staticmethod
+    def _find_curator_agent(agents: Iterable[AgentModel]) -> AgentModel | None:
+        agent_list = list(agents)
+        for agent in agent_list:
+            if agent.agent_name.lower() == "curator":
+                return agent
+        for agent in agent_list:
+            role = agent.role.lower()
+            if "coordination" in role or "curat" in role:
+                return agent
+        return None
+
+    def _is_curator_agent(self, agent: AgentModel) -> bool:
+        if agent.agent_name.lower() == "curator":
+            return True
+        role = agent.role.lower()
+        return "coordination" in role or "curat" in role
 
     def _should_route_to_planner_first(
         self,
