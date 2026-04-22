@@ -7,9 +7,9 @@ Opscure is moving from a project-specific orchestration bridge toward a generic 
 - `nas_bridge/app/kernel`
   - Common runtime primitives such as event log, drift tracking, registry, and storage helpers.
 - `nas_bridge/app/behaviors/orchestration`
-  - The existing Discord planner/curator/coder/reviewer/verifier orchestration behavior.
+  - The public Discord planner/curator/coder/reviewer/verifier orchestration behavior package.
 - `nas_bridge/app/behaviors/workflow`
-  - The legacy internal implementation package that now backs the orchestration behavior.
+  - The legacy internal implementation package that now backs the public orchestration behavior.
 - `nas_bridge/app/behaviors/chat`
   - A Codex-to-Codex dialogue behavior with its own Discord commands, message handler, and persistence model.
 - `nas_bridge/app/behaviors/ops`

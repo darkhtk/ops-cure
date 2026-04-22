@@ -51,7 +51,7 @@ class BehaviorDescriptor(Protocol):
 class OrchestrationBehaviorDescriptor:
     behavior_id: str = "orchestration"
     display_name: str = "Orchestration"
-    description: str = "Existing Discord orchestration framework behavior."
+    description: str = "Discord-native project orchestration behavior backed by the legacy workflow engine."
 
     def build_discord_binding(self, context: BehaviorContext) -> DiscordBehaviorBinding | None:
         return build_orchestration_discord_binding(

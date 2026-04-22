@@ -1,5 +1,23 @@
-"""Kernel binding wrapper for orchestration behavior."""
+"""Kernel binding for the public orchestration behavior."""
 
-from ..workflow.kernel_binding import build_workflow_kernel_binding as build_orchestration_kernel_binding
+from __future__ import annotations
 
-__all__ = ["build_orchestration_kernel_binding"]
+from ...kernel.bindings import KernelBehaviorBinding
+from ..workflow.kernel_binding import WorkflowKernelProvider
+
+
+class OrchestrationKernelProvider(WorkflowKernelProvider):
+    """Public orchestration provider backed by the legacy workflow kernel logic."""
+
+
+def build_orchestration_kernel_binding() -> KernelBehaviorBinding:
+    provider = OrchestrationKernelProvider()
+    return KernelBehaviorBinding(
+        behavior_id="orchestration",
+        space_provider=provider,
+        actor_provider=provider,
+        event_provider=provider,
+    )
+
+
+__all__ = ["OrchestrationKernelProvider", "build_orchestration_kernel_binding"]
