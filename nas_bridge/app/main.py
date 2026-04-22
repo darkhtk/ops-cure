@@ -10,6 +10,7 @@ from fastapi import FastAPI
 
 from .api import actors, behaviors, events, health, sessions, spaces, verification, workers
 from .behaviors.catalog import BehaviorCatalogService
+from .behaviors.chat import api as chat_api
 from .behaviors.chat.service import ChatBehaviorService
 from .behaviors.ops.service import OpsBehaviorService
 from .behaviors.registry import (
@@ -238,6 +239,7 @@ app.include_router(health.router)
 app.include_router(actors.router)
 app.include_router(behaviors.router)
 app.include_router(events.router)
+app.include_router(chat_api.router)
 app.include_router(sessions.router)
 app.include_router(spaces.router)
 app.include_router(verification.router)

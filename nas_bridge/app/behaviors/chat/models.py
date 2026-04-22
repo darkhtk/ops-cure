@@ -55,6 +55,23 @@ class ChatParticipantModel(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
+class ChatParticipantStateModel(Base):
+    __tablename__ = "chat_participant_states"
+    __table_args__ = (
+        UniqueConstraint("thread_id", "actor_name", name="uq_chat_participant_state_per_thread"),
+        Index("ix_chat_participant_states_thread_seen", "thread_id", "last_seen_at"),
+    )
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=lambda: str(uuid.uuid4()))
+    thread_id: Mapped[str] = mapped_column(ForeignKey("chat_threads.id", ondelete="CASCADE"), index=True)
+    actor_name: Mapped[str] = mapped_column(index=True)
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_read_message_id: Mapped[str | None] = mapped_column(ForeignKey("chat_messages.id", ondelete="SET NULL"), nullable=True)
+    last_read_message_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
 class ChatMessageModel(Base):
     __tablename__ = "chat_messages"
     __table_args__ = (

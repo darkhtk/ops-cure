@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from typing import Any
+from urllib.parse import quote_plus
 
 import requests
 
@@ -231,6 +232,78 @@ class BridgeClient:
 
     def get_session(self, session_id: str) -> dict[str, Any]:
         return self._get(f"/api/sessions/{session_id}")
+
+    def get_space_by_thread(self, *, thread_id: str) -> dict[str, Any]:
+        return self._get(f"/api/spaces/by-thread/{thread_id}")
+
+    def get_actors_for_space(self, *, space_id: str) -> dict[str, Any]:
+        return self._get(f"/api/actors/spaces/{space_id}")
+
+    def get_events_for_space(self, *, space_id: str, limit: int = 20) -> dict[str, Any]:
+        return self._get(f"/api/events/spaces/{space_id}?limit={limit}")
+
+    def register_chat_participant(
+        self,
+        *,
+        thread_id: str,
+        actor_name: str,
+        actor_kind: str = "ai",
+    ) -> dict[str, Any]:
+        return self._post(
+            f"/api/chat/threads/{thread_id}/participants/register",
+            {
+                "actor_name": actor_name,
+                "actor_kind": actor_kind,
+            },
+        )
+
+    def heartbeat_chat_participant(
+        self,
+        *,
+        thread_id: str,
+        actor_name: str,
+    ) -> dict[str, Any]:
+        return self._post(
+            f"/api/chat/threads/{thread_id}/participants/heartbeat",
+            {
+                "actor_name": actor_name,
+            },
+        )
+
+    def get_chat_delta(
+        self,
+        *,
+        thread_id: str,
+        actor_name: str,
+        after_message_id: str | None = None,
+        limit: int = 20,
+        mark_read: bool = False,
+    ) -> dict[str, Any]:
+        params = [
+            f"actor_name={quote_plus(actor_name)}",
+            f"limit={limit}",
+            f"mark_read={'true' if mark_read else 'false'}",
+        ]
+        if after_message_id:
+            params.append(f"after_message_id={quote_plus(after_message_id)}")
+        return self._get(f"/api/chat/threads/{thread_id}/delta?{'&'.join(params)}")
+
+    def submit_chat_message(
+        self,
+        *,
+        thread_id: str,
+        actor_name: str,
+        content: str,
+        actor_kind: str = "ai",
+    ) -> dict[str, Any]:
+        return self._post(
+            f"/api/chat/threads/{thread_id}/messages",
+            {
+                "actor_name": actor_name,
+                "actor_kind": actor_kind,
+                "content": content,
+            },
+        )
 
     def _post(self, path: str, payload: dict[str, Any]) -> Any:
         response = self.session.post(
