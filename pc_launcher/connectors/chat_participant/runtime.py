@@ -46,6 +46,21 @@ class ReplyContext:
 @dataclass(slots=True)
 class ReplyResult:
     content: str
+    activity: "TurnActivityEvidence | None" = None
+
+
+@dataclass(slots=True)
+class TurnActivityEvidence:
+    item_types: tuple[str, ...] = ()
+    command_execution_count: int = 0
+    read_command_count: int = 0
+    write_command_count: int = 0
+    test_command_count: int = 0
+    other_activity_count: int = 0
+
+    @property
+    def has_work_signal(self) -> bool:
+        return self.command_execution_count > 0 or self.other_activity_count > 0
 
 
 class ChatParticipantRuntime(Protocol):
@@ -148,6 +163,8 @@ def _build_prompt(context: ReplyContext) -> str:
         "Do not include role labels, markdown fences, or extra explanations outside the reply.\n"
         "Treat the room as a real collaboration surface, not just a chat relay.\n"
         "If the room asks for investigation, implementation, testing, or verification, you may inspect files, use tools, run commands, and perform the smallest local actions needed before replying.\n"
+        "If the room asks whether work has really started or what the current state is, answer from concrete actions taken or artifacts observed in this thread.\n"
+        "If you have not inspected, edited, or tested anything yet, say that plainly instead of implying implementation has started.\n"
         "Stay focused on the room request, avoid unrelated exploration, and summarize concrete outcomes in the reply.\n"
         "Keep the reply concise, collaborative, and directly responsive to the room context.\n\n"
         "Room context:\n"
@@ -172,6 +189,115 @@ def _extract_agent_message_text(turn: dict[str, Any]) -> str:
         if text:
             fragments.append(text)
     return "\n\n".join(fragments).strip()
+
+
+def _extract_command_text(item: dict[str, Any]) -> str:
+    command = _compact_text(item.get("command"))
+    if command:
+        return command
+    for action in item.get("commandActions") or []:
+        action_command = _compact_text(action.get("command"))
+        if action_command:
+            return action_command
+    return ""
+
+
+def _classify_command(command: str) -> str:
+    lowered = command.lower()
+    test_markers = (
+        "pytest",
+        "python -m pytest",
+        "unittest",
+        "vitest",
+        "jest",
+        "npm test",
+        "pnpm test",
+        "yarn test",
+        "go test",
+        "cargo test",
+        "gradlew test",
+        "gradle test",
+        "ctest",
+    )
+    write_markers = (
+        "apply_patch",
+        "set-content",
+        "add-content",
+        "out-file",
+        "move-item",
+        "copy-item",
+        "remove-item",
+        "new-item",
+        "rename-item",
+        "git add",
+        "git commit",
+        "git mv",
+        "git rm",
+        "mkdir ",
+        "md ",
+    )
+    read_markers = (
+        "get-content",
+        "type ",
+        "cat ",
+        "select-string",
+        "rg ",
+        "rg.exe",
+        "findstr",
+        "git diff",
+        "git show",
+        "git log",
+        "git status",
+        "get-childitem",
+        "dir ",
+        "ls ",
+    )
+    if any(marker in lowered for marker in test_markers):
+        return "test"
+    if any(marker in lowered for marker in write_markers):
+        return "write"
+    if any(marker in lowered for marker in read_markers):
+        return "read"
+    return "other"
+
+
+def _extract_turn_activity_evidence(turn: dict[str, Any] | None) -> TurnActivityEvidence:
+    if not turn:
+        return TurnActivityEvidence()
+
+    item_types: list[str] = []
+    command_execution_count = 0
+    read_command_count = 0
+    write_command_count = 0
+    test_command_count = 0
+    other_activity_count = 0
+
+    for item in turn.get("items") or []:
+        item_type = str(item.get("type") or "")
+        if not item_type:
+            continue
+        item_types.append(item_type)
+        if item_type == "commandExecution":
+            command_execution_count += 1
+            classification = _classify_command(_extract_command_text(item))
+            if classification == "read":
+                read_command_count += 1
+            elif classification == "write":
+                write_command_count += 1
+            elif classification == "test":
+                test_command_count += 1
+            continue
+        if item_type not in {"userMessage", "agentMessage"}:
+            other_activity_count += 1
+
+    return TurnActivityEvidence(
+        item_types=tuple(dict.fromkeys(item_types)),
+        command_execution_count=command_execution_count,
+        read_command_count=read_command_count,
+        write_command_count=write_command_count,
+        test_command_count=test_command_count,
+        other_activity_count=other_activity_count,
+    )
 
 
 @dataclass(slots=True)
@@ -544,6 +670,7 @@ class CodexCurrentThreadChatParticipantRuntime:
             turn_id=turn_id,
             timeout_seconds=self.config.turn_timeout_seconds,
         )
+        matched_turn = completed_turn if str(completed_turn.get("id") or "") == turn_id else None
         status = str(completed_turn.get("status") or "")
         if status == "failed":
             error = completed_turn.get("error") or {}
@@ -553,14 +680,15 @@ class CodexCurrentThreadChatParticipantRuntime:
             raise RuntimeError("Current-thread turn was interrupted before completion.")
 
         content = streamed_reply.strip()
-        if not content:
+        if matched_turn is None or not (matched_turn.get("items") or []):
             thread = self.client.read_thread(thread_id, include_turns=True).get("thread") or {}
             matched_turn = next(
                 (item for item in thread.get("turns") or [] if str(item.get("id") or "") == turn_id),
                 None,
             )
-            if matched_turn is not None:
-                content = _extract_agent_message_text(matched_turn)
+        activity = _extract_turn_activity_evidence(matched_turn)
+        if not content and matched_turn is not None:
+            content = _extract_agent_message_text(matched_turn)
         if not content:
             return None
-        return ReplyResult(content=content)
+        return ReplyResult(content=content, activity=activity)

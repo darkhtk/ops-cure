@@ -158,11 +158,17 @@ class ChatParticipantConnector:
                 progress_message_id=progress_message_id,
             )
 
+        reply_content = self._decorate_reply_content(
+            reply_content=reply.content,
+            reply_activity=getattr(reply, "activity", None),
+            target_message=target_message,
+            participants=delta.get("participants") or actors.get("actors") or [],
+        )
         submitted = self.bridge.submit_chat_message(
             thread_id=room_thread_id,
             actor_name=self.config.actor_name,
             actor_kind=self.config.actor_kind,
-            content=reply.content,
+            content=reply_content,
         )
         replied_message_id = submitted["message"]["id"]
         return ChatSyncResult(
@@ -394,6 +400,77 @@ class ChatParticipantConnector:
             return f"{FAILURE_NOTICE_KO_PREFIX} {detail}"
         return f"{FAILURE_NOTICE_EN_PREFIX} {detail}"
 
+    def _decorate_reply_content(
+        self,
+        *,
+        reply_content: str,
+        reply_activity,
+        target_message: dict[str, object],
+        participants: list[dict[str, object]],
+    ) -> str:
+        if not self._should_append_activity_evidence(
+            target_message=target_message,
+            participants=participants,
+        ):
+            return reply_content
+        evidence_line = self._build_activity_evidence_line(
+            target_message=target_message,
+            reply_activity=reply_activity,
+        )
+        if not evidence_line:
+            return reply_content
+        return f"{reply_content.rstrip()}\n\n{evidence_line}".strip()
+
+    def _should_append_activity_evidence(
+        self,
+        *,
+        target_message: dict[str, object],
+        participants: list[dict[str, object]],
+    ) -> bool:
+        actor_kind = self._actor_kind_for_message(
+            target_message=target_message,
+            participants=participants,
+        )
+        return actor_kind != "ai"
+
+    def _build_activity_evidence_line(self, *, target_message: dict[str, object], reply_activity) -> str:
+        content = str(target_message.get("content") or "")
+        korean = self._looks_like_korean(content)
+        if reply_activity is None:
+            return (
+                "증거 기준: 이번 turn에서 명령/도구 흔적을 확인하지 못했다."
+                if korean
+                else "Evidence: I could not confirm any command or tool activity in this turn."
+            )
+
+        item_types = ", ".join(reply_activity.item_types) if getattr(reply_activity, "item_types", ()) else "none"
+        if not getattr(reply_activity, "has_work_signal", False):
+            return (
+                f"증거 기준: 이번 turn에서 명령/도구 사용 없음. item={item_types}"
+                if korean
+                else f"Evidence: no command or tool activity in this turn. items={item_types}"
+            )
+
+        if korean:
+            return (
+                "증거 기준: "
+                f"명령 {reply_activity.command_execution_count}회, "
+                f"읽기 {reply_activity.read_command_count}회, "
+                f"수정 {reply_activity.write_command_count}회, "
+                f"테스트 {reply_activity.test_command_count}회, "
+                f"기타 활동 {reply_activity.other_activity_count}회. "
+                f"item={item_types}"
+            )
+        return (
+            "Evidence: "
+            f"{reply_activity.command_execution_count} commands, "
+            f"{reply_activity.read_command_count} read-like, "
+            f"{reply_activity.write_command_count} write-like, "
+            f"{reply_activity.test_command_count} test-like, "
+            f"{reply_activity.other_activity_count} other activity items. "
+            f"items={item_types}"
+        )
+
     def _looks_like_korean(self, content: str) -> bool:
         return any("\uac00" <= char <= "\ud7a3" for char in content)
 
@@ -458,6 +535,41 @@ class ChatParticipantConnector:
         has_numbered_list = any(token in normalized for token in ("1.", "2.", "3.", "4.", "5.", "6.", "7."))
 
         return planning_hits >= 2 or (has_acknowledgement and (planning_hits >= 1 or has_numbered_list))
+
+    def _is_status_request_text(self, content: str) -> bool:
+        normalized = self._normalize_text(content)
+        if not normalized:
+            return False
+        markers = (
+            "실제 구현",
+            "실구현",
+            "구현 들어",
+            "작업 들어",
+            "시작했",
+            "진행",
+            "진행 상황",
+            "상태",
+            "중간보고",
+            "보고",
+            "패치",
+            "검증",
+            "증거",
+            "손댔",
+            "작업 중",
+            "하고 있",
+            "started",
+            "starting",
+            "progress",
+            "status",
+            "evidence",
+            "proof",
+            "implemented",
+            "implementation",
+            "patch",
+            "verification",
+            "working on",
+        )
+        return any(marker in normalized for marker in markers)
 
     def _normalize_text(self, content: str) -> str:
         return " ".join(content.lower().split())

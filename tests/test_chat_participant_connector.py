@@ -497,6 +497,121 @@ def test_current_thread_runtime_uses_app_server_client_and_current_thread():
     assert "you may inspect files, use tools, run commands" in prompt
 
 
+def test_current_thread_runtime_extracts_activity_evidence_from_turn_items():
+    if str(OPS_CURE_ROOT) not in sys.path:
+        sys.path.insert(0, str(OPS_CURE_ROOT))
+
+    from pc_launcher.connectors.chat_participant.runtime import (
+        CodexCurrentThreadChatParticipantRuntime,
+        CodexCurrentThreadRuntimeConfig,
+        ReplyContext,
+    )
+
+    class FakeAppServerClient:
+        def resume_thread(self, thread_id: str) -> dict:
+            return {"thread": {"id": thread_id}}
+
+        def read_thread(self, thread_id: str, *, include_turns: bool = False) -> dict:
+            return {"thread": {"id": thread_id, "turns": []}}
+
+        def start_turn(self, thread_id: str, prompt: str) -> dict:
+            return {"turn": {"id": "turn-456", "status": "inProgress"}}
+
+        def wait_for_turn_completion(self, *, thread_id: str, turn_id: str, timeout_seconds: float):
+            return {
+                "id": turn_id,
+                "status": "completed",
+                "items": [
+                    {"type": "userMessage", "text": "status?"},
+                    {"type": "agentMessage", "text": "I started checking."},
+                    {
+                        "type": "commandExecution",
+                        "command": "Get-Content -Path connector.py -TotalCount 50",
+                    },
+                    {
+                        "type": "commandExecution",
+                        "command": "python -m pytest tests/test_chat_participant_connector.py -q",
+                    },
+                    {
+                        "type": "commandExecution",
+                        "command": "apply_patch",
+                    },
+                ],
+            }, ""
+
+        def close(self) -> None:
+            return None
+
+    runtime = CodexCurrentThreadChatParticipantRuntime(
+        config=CodexCurrentThreadRuntimeConfig(
+            executable="codex",
+            runtime_args=["app-server"],
+            cwd=str(OPS_CURE_ROOT),
+            thread_id="codex-thread-123",
+        ),
+        client=FakeAppServerClient(),
+    )
+    reply = runtime.generate_reply(
+        ReplyContext(
+            actor_name="codex-homedev",
+            actor_kind="ai",
+            thread_id="discord-thread-1",
+            space_id="space-1",
+            room_title="ops room",
+            room_topic="cross-codex chat",
+            machine_label="HOMEDEV",
+            participants=[{"actor_name": "operator", "actor_kind": "human"}],
+            recent_messages=[{"actor_name": "operator", "content": "실제 구현 들어갔냐?"}],
+        ),
+    )
+
+    assert reply is not None
+    assert reply.content == "I started checking."
+    assert reply.activity is not None
+    assert reply.activity.command_execution_count == 3
+    assert reply.activity.read_command_count == 1
+    assert reply.activity.test_command_count == 1
+    assert reply.activity.write_command_count == 1
+
+
+def test_chat_participant_connector_adds_activity_evidence_to_status_replies(tmp_path, monkeypatch):
+    if str(OPS_CURE_ROOT) not in sys.path:
+        sys.path.insert(0, str(OPS_CURE_ROOT))
+
+    from pc_launcher.connectors.chat_participant.runtime import ReplyResult, TurnActivityEvidence
+
+    chat_service, space_service, actor_service, event_service, _ = bootstrap_chat(tmp_path, monkeypatch)
+    thread_id = create_thread(chat_service, title="codex-chat: evidence", topic="status evidence")
+    chat_service.record_message(thread_id=thread_id, actor_name="operator", content="실제 구현에 들어갔냐? 증거 같이 말해.")
+
+    class EvidenceRuntime:
+        def generate_reply(self, context):
+            return ReplyResult(
+                content="실제로 손대기 시작했다.",
+                activity=TurnActivityEvidence(
+                    item_types=("userMessage", "agentMessage", "commandExecution"),
+                    command_execution_count=2,
+                    read_command_count=1,
+                    write_command_count=1,
+                    test_command_count=0,
+                    other_activity_count=0,
+                ),
+            )
+
+    bridge = ServiceBackedChatBridge(chat_service=chat_service, space_service=space_service, actor_service=actor_service)
+    connector = build_connector(bridge=bridge, runtime=EvidenceRuntime(), actor_name="codex-homedev")
+
+    result = connector.sync_once(thread_id=thread_id)
+    assert result.reason == "reply_submitted"
+
+    thread = space_service.get_space_by_thread(thread_id=thread_id)
+    events = event_service.get_events_for_space(space_id=thread.id, limit=10)
+    assert "실제로 손대기 시작했다." in events.events[-1].content
+    assert "증거 기준:" in events.events[-1].content
+    assert "명령 2회" in events.events[-1].content
+    assert "수정 1회" in events.events[-1].content
+
+
 def test_chat_service_submit_participant_message_and_notify_posts_to_discord(tmp_path, monkeypatch):
     chat_service, _, _, event_service, thread_manager = bootstrap_chat(tmp_path, monkeypatch)
     import app.behaviors.chat.kernel_binding as chat_kernel_binding
