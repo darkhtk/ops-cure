@@ -16,6 +16,8 @@ PROGRESS_NOTICE_KO = (
 PROGRESS_NOTICE_EN = "I saw the request and I'm working on it now. I'll report back here when I have a concrete result."
 FAILURE_NOTICE_KO_PREFIX = "\uc791\uc5c5\uc744 \uc9c4\ud589\ud558\ub2e4\uac00 \uc624\ub958\uac00 \ub0ac\ub2e4:"
 FAILURE_NOTICE_EN_PREFIX = "I hit an error while working on it:"
+NO_REPLY_MESSAGE_TAGS = {"INFO", "END", "CONTROL"}
+ACTIONABLE_MESSAGE_TAGS = {"TASK", "QUESTION", "HANDOFF"}
 
 
 @dataclass(slots=True)
@@ -235,8 +237,11 @@ class ChatParticipantConnector:
         recent_messages: list[dict[str, object]],
     ) -> str | None:
         content = str(target_message.get("content") or "")
-        if self._is_control_message(content=content):
+        message_tag = self._extract_message_tag(content)
+        if self._is_control_message(content=content) or message_tag == "CONTROL":
             return "control_message"
+        if message_tag in NO_REPLY_MESSAGE_TAGS:
+            return "message_type_no_reply"
         if self._is_explicitly_targeted(content=content):
             return None
         actor_kind = self._actor_kind_for_message(
@@ -249,7 +254,15 @@ class ChatParticipantConnector:
                 recent_messages=recent_messages,
             ):
                 return "ai_echo_message"
-            return None
+            if message_tag is None:
+                return "untagged_ai_message"
+            if message_tag in {"QUESTION", "HANDOFF"}:
+                return "not_addressed_to_actor"
+            if message_tag == "TASK":
+                return "not_addressed_to_actor"
+            return "message_type_no_reply"
+        if message_tag == "HANDOFF":
+            return "not_addressed_to_actor"
         if not self.config.allow_unprompted:
             return "not_addressed_to_actor"
         if not self._claims_unprompted_turn(target_message=target_message, participants=participants):
@@ -269,13 +282,34 @@ class ChatParticipantConnector:
         return actor_kind != "ai"
 
     def _is_explicitly_targeted(self, *, content: str) -> bool:
-        lowered = content.lower()
+        lowered = self._strip_message_tag(content).lower()
         actor = self.config.actor_name.lower()
         return (
             f"@{actor}" in lowered
             or lowered.startswith(f"{actor}:")
             or f"[{actor}]" in lowered
         )
+
+    def _extract_message_tag(self, content: str) -> str | None:
+        stripped = content.lstrip()
+        if not stripped.startswith("["):
+            return None
+        closing = stripped.find("]")
+        if closing <= 1:
+            return None
+        candidate = stripped[1:closing].strip().upper()
+        if not candidate:
+            return None
+        return candidate
+
+    def _strip_message_tag(self, content: str) -> str:
+        stripped = content.lstrip()
+        if not stripped.startswith("["):
+            return content
+        closing = stripped.find("]")
+        if closing <= 1:
+            return content
+        return stripped[closing + 1 :].lstrip()
 
     def _actor_kind_for_message(
         self,
@@ -384,8 +418,8 @@ class ChatParticipantConnector:
     def _build_progress_notice(self, *, target_message: dict[str, object]) -> str:
         content = str(target_message.get("content") or "")
         if self._looks_like_korean(content):
-            return PROGRESS_NOTICE_KO
-        return PROGRESS_NOTICE_EN
+            return "[INFO] " + PROGRESS_NOTICE_KO
+        return "[INFO] " + PROGRESS_NOTICE_EN
 
     def _build_failure_notice(
         self,
@@ -397,8 +431,8 @@ class ChatParticipantConnector:
         detail = detail[:200]
         content = str(target_message.get("content") or "")
         if self._looks_like_korean(content):
-            return f"{FAILURE_NOTICE_KO_PREFIX} {detail}"
-        return f"{FAILURE_NOTICE_EN_PREFIX} {detail}"
+            return f"[END] {FAILURE_NOTICE_KO_PREFIX} {detail}"
+        return f"[END] {FAILURE_NOTICE_EN_PREFIX} {detail}"
 
     def _decorate_reply_content(
         self,
@@ -408,6 +442,7 @@ class ChatParticipantConnector:
         target_message: dict[str, object],
         participants: list[dict[str, object]],
     ) -> str:
+        reply_content = self._ensure_message_tag(reply_content=reply_content)
         if not self._should_append_activity_evidence(
             target_message=target_message,
             participants=participants,
@@ -420,6 +455,11 @@ class ChatParticipantConnector:
         if not evidence_line:
             return reply_content
         return f"{reply_content.rstrip()}\n\n{evidence_line}".strip()
+
+    def _ensure_message_tag(self, *, reply_content: str) -> str:
+        if self._extract_message_tag(reply_content) is not None:
+            return reply_content
+        return f"[END] {reply_content.strip()}".strip()
 
     def _should_append_activity_evidence(
         self,
@@ -572,4 +612,4 @@ class ChatParticipantConnector:
         return any(marker in normalized for marker in markers)
 
     def _normalize_text(self, content: str) -> str:
-        return " ".join(content.lower().split())
+        return " ".join(self._strip_message_tag(content).lower().split())

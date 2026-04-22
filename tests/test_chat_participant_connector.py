@@ -177,6 +177,7 @@ def test_chat_participant_connector_replies_once_and_shows_up_in_generic_views(t
     chat_space = space_service.get_space_by_thread(thread_id=thread_id)
     chat_events = event_service.get_events_for_space(space_id=chat_space.id, limit=10)
     assert [event.actor_name for event in chat_events.events] == ["operator", "codex-b"]
+    assert chat_events.events[-1].content.startswith("[END] ")
 
     second = connector.sync_once(thread_id=thread_id)
     assert second.reason == "self_only_messages"
@@ -255,7 +256,7 @@ def test_chat_participant_connector_ignores_other_ai_progress_messages(tmp_path,
     assert result.reason == "ai_echo_message"
 
 
-def test_chat_participant_connector_allows_non_targeted_ai_collaboration_messages(tmp_path, monkeypatch):
+def test_chat_participant_connector_skips_untagged_ai_messages_by_default(tmp_path, monkeypatch):
     chat_service, space_service, actor_service, _, _ = bootstrap_chat(tmp_path, monkeypatch)
     thread_id = create_thread(chat_service, title="codex-chat: ai collaboration", topic="ai collaboration test")
     chat_service.submit_participant_message(
@@ -263,6 +264,25 @@ def test_chat_participant_connector_allows_non_targeted_ai_collaboration_message
         actor_name="codex-desktop",
         actor_kind="ai",
         content="I found the likely root cause in runner.py. We should move the reconnect status into the browser state model.",
+    )
+
+    bridge = ServiceBackedChatBridge(chat_service=chat_service, space_service=space_service, actor_service=actor_service)
+    runtime = FakeChatParticipantRuntime()
+    connector = build_connector(bridge=bridge, runtime=runtime, actor_name="codex-homedev")
+
+    result = connector.sync_once(thread_id=thread_id)
+    assert result.reason == "untagged_ai_message"
+    assert len(runtime.calls) == 0
+
+
+def test_chat_participant_connector_allows_tagged_ai_questions(tmp_path, monkeypatch):
+    chat_service, space_service, actor_service, _, _ = bootstrap_chat(tmp_path, monkeypatch)
+    thread_id = create_thread(chat_service, title="codex-chat: ai question", topic="ai question test")
+    chat_service.submit_participant_message(
+        thread_id=thread_id,
+        actor_name="codex-desktop",
+        actor_kind="ai",
+        content="[QUESTION] @codex-homedev Can you confirm whether the reconnect issue is only in the browser layer?",
     )
 
     bridge = ServiceBackedChatBridge(chat_service=chat_service, space_service=space_service, actor_service=actor_service)
@@ -281,7 +301,7 @@ def test_chat_participant_connector_does_not_post_progress_notice_for_ai_collabo
         thread_id=thread_id,
         actor_name="codex-desktop",
         actor_kind="ai",
-        content="I am still comparing the reconnect and backfill paths. Keep testing while I narrow it down.",
+        content="[QUESTION] @codex-homedev I am still comparing the reconnect and backfill paths. Keep testing while I narrow it down.",
     )
 
     bridge = ServiceBackedChatBridge(chat_service=chat_service, space_service=space_service, actor_service=actor_service)
