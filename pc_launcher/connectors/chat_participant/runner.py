@@ -112,6 +112,15 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Allow replies even when the latest message does not explicitly target this actor.",
     )
+    parser.add_argument(
+        "--targeted-only",
+        dest="allow_unprompted",
+        action="store_false",
+        help="Require explicit targeting such as @actor_name before replying.",
+    )
+    parser.set_defaults(
+        allow_unprompted=os.getenv("CHAT_PARTICIPANT_ALLOW_UNPROMPTED", "true").lower() != "false",
+    )
     parser.add_argument("--delta-limit", type=int, default=20, help="Unread message batch size.")
     parser.add_argument(
         "--poll-seconds",

@@ -194,9 +194,88 @@ def test_chat_participant_connector_replies_once_and_shows_up_in_generic_views(t
         content="This is a monologue that does not address any participant.",
     )
     third = connector.sync_once(thread_id=thread_id)
-    assert third.status == "skipped"
-    assert third.reason == "not_addressed_to_actor"
-    assert len(runtime.calls) == 1
+    assert third.status == "replied"
+    assert third.reason == "reply_submitted"
+    assert len(runtime.calls) == 2
+
+
+def test_chat_participant_connector_can_still_run_targeted_only(tmp_path, monkeypatch):
+    if str(NAS_BRIDGE_ROOT) not in sys.path:
+        sys.path.insert(0, str(NAS_BRIDGE_ROOT))
+    if str(OPS_CURE_ROOT) not in sys.path:
+        sys.path.insert(0, str(OPS_CURE_ROOT))
+
+    monkeypatch.setenv("BRIDGE_SHARED_AUTH_TOKEN", "test-token")
+    monkeypatch.setenv("BRIDGE_DISABLE_DISCORD", "true")
+    monkeypatch.setenv("BRIDGE_DATABASE_URL", f"sqlite:///{(tmp_path / 'bridge.db').as_posix()}")
+
+    for module_name in list(sys.modules):
+        if module_name == "app" or module_name.startswith("app."):
+            del sys.modules[module_name]
+
+    import app.config as config
+
+    config.get_settings.cache_clear()
+
+    import app.db as db
+    import app.behaviors.chat.kernel_binding as chat_kernel_binding
+    import app.behaviors.chat.service as chat_service_module
+    import app.kernel.actors as actors_module
+    import app.kernel.spaces as spaces_module
+    from pc_launcher.connectors.chat_participant import (
+        ChatParticipantConfig,
+        ChatParticipantConnector,
+        InMemoryChatParticipantStateStore,
+    )
+
+    db.init_db()
+
+    thread_manager = FakeThreadManager()
+    chat_service = chat_service_module.ChatBehaviorService(thread_manager=thread_manager)
+    kernel_binding = chat_kernel_binding.build_chat_kernel_binding()
+    space_service = spaces_module.SpaceService(providers=[kernel_binding.space_provider])
+    actor_service = actors_module.ActorService(providers=[kernel_binding.actor_provider])
+
+    async def scenario():
+        return await chat_service.create_chat_thread(
+            guild_id="guild-1",
+            parent_channel_id="parent-1",
+            title="codex-chat: targeted only",
+            topic="connector test",
+            created_by="operator",
+        )
+
+    created = asyncio.run(scenario())
+    thread_id = created.discord_thread_id
+    chat_service.record_message(
+        thread_id=thread_id,
+        actor_name="operator",
+        content="This is a monologue that does not address any participant.",
+    )
+
+    bridge = ServiceBackedChatBridge(
+        chat_service=chat_service,
+        space_service=space_service,
+        actor_service=actor_service,
+    )
+    runtime = FakeChatParticipantRuntime()
+    state_store = InMemoryChatParticipantStateStore()
+    connector = ChatParticipantConnector(
+        bridge=bridge,
+        runtime=runtime,
+        state_store=state_store,
+        config=ChatParticipantConfig(
+            actor_name="codex-b",
+            machine_label="pc-b",
+            allow_unprompted=False,
+        ),
+    )
+
+    result = connector.sync_once(thread_id=thread_id)
+
+    assert result.status == "skipped"
+    assert result.reason == "not_addressed_to_actor"
+    assert len(runtime.calls) == 0
 
 
 def test_json_state_store_persists_cursor(tmp_path):

@@ -13,7 +13,7 @@ class ChatParticipantConfig:
     actor_kind: str = "ai"
     machine_label: str | None = None
     default_thread_id: str | None = None
-    allow_unprompted: bool = False
+    allow_unprompted: bool = True
     delta_limit: int = 20
 
 
