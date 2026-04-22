@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import threading
 from dataclasses import dataclass
 
@@ -94,10 +95,11 @@ class ChatParticipantConnector:
                 seen_message_id=latest_seen_id,
             )
 
-        if not self._is_reply_allowed(
+        reply_gate_reason = self._reply_gate_reason(
             target_message=target_message,
             participants=delta.get("participants") or actors.get("actors") or [],
-        ):
+        )
+        if reply_gate_reason is not None:
             self.state_store.set_cursor(
                 actor_name=self.config.actor_name,
                 thread_id=room_thread_id,
@@ -106,7 +108,7 @@ class ChatParticipantConnector:
             return ChatSyncResult(
                 status="skipped",
                 thread_id=room_thread_id,
-                reason="not_addressed_to_actor",
+                reason=reply_gate_reason,
                 seen_message_id=latest_seen_id,
             )
 
@@ -203,23 +205,24 @@ class ChatParticipantConnector:
                 return message
         return None
 
-    def _is_reply_allowed(
+    def _reply_gate_reason(
         self,
         *,
         target_message: dict[str, object],
         participants: list[dict[str, object]],
-    ) -> bool:
+    ) -> str | None:
         content = str(target_message.get("content") or "")
+        if self._is_control_message(content=content):
+            return "control_message"
         if self._is_explicitly_targeted(content=content):
-            return True
+            return None
+        if self._actor_kind_for_message(target_message=target_message, participants=participants) == "ai":
+            return "ai_message_not_targeted"
         if not self.config.allow_unprompted:
-            return False
-        other_participants = [
-            item
-            for item in participants
-            if str(item.get("actor_name") or item.get("name") or "") != self.config.actor_name
-        ]
-        return bool(other_participants)
+            return "not_addressed_to_actor"
+        if not self._claims_unprompted_turn(target_message=target_message, participants=participants):
+            return "turn_claimed_by_other_participant"
+        return None
 
     def _is_explicitly_targeted(self, *, content: str) -> bool:
         lowered = content.lower()
@@ -229,6 +232,67 @@ class ChatParticipantConnector:
             or lowered.startswith(f"{actor}:")
             or f"[{actor}]" in lowered
         )
+
+    def _actor_kind_for_message(
+        self,
+        *,
+        target_message: dict[str, object],
+        participants: list[dict[str, object]],
+    ) -> str | None:
+        actor_name = str(target_message.get("actor_name") or "")
+        for participant in participants:
+            name = str(participant.get("actor_name") or participant.get("name") or "")
+            if name == actor_name:
+                return str(participant.get("actor_kind") or participant.get("kind") or "")
+        return None
+
+    def _claims_unprompted_turn(
+        self,
+        *,
+        target_message: dict[str, object],
+        participants: list[dict[str, object]],
+    ) -> bool:
+        ai_names = sorted(
+            {
+                str(item.get("actor_name") or item.get("name") or "")
+                for item in participants
+                if str(item.get("actor_kind") or item.get("kind") or "") == "ai"
+                and str(item.get("actor_name") or item.get("name") or "")
+            },
+        )
+        if not ai_names:
+            return True
+        if self.config.actor_name not in ai_names:
+            ai_names.append(self.config.actor_name)
+            ai_names.sort()
+        if len(ai_names) == 1:
+            return True
+        claim_seed = str(target_message.get("id") or "") or (
+            f"{target_message.get('actor_name') or ''}:{target_message.get('content') or ''}"
+        )
+        digest = hashlib.sha256(claim_seed.encode("utf-8")).digest()
+        claimed_actor = ai_names[int.from_bytes(digest[:4], "big") % len(ai_names)]
+        return claimed_actor == self.config.actor_name
+
+    def _is_control_message(self, *, content: str) -> bool:
+        lowered = " ".join(content.lower().split())
+        if lowered in {"멈춰", "stop"}:
+            return True
+        control_markers = (
+            "대화 멈춰",
+            "대답도 하지마",
+            "대답하지 마",
+            "응답하지 마",
+            "말하지 마",
+            "조용히",
+            "stop talking",
+            "stop replying",
+            "don't reply",
+            "do not reply",
+            "be quiet",
+            "silence this room",
+        )
+        return any(marker in lowered for marker in control_markers)
 
     def _submit_progress_notice(self, *, thread_id: str, target_message: dict[str, object]) -> str:
         submitted = self.bridge.submit_chat_message(
