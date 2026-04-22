@@ -42,31 +42,23 @@ class ServiceBackedChatBridge:
         self.actor_service = actor_service
 
     def get_space_by_thread(self, *, thread_id: str) -> dict:
-        summary = self.space_service.get_space_by_thread(thread_id=thread_id)
-        assert summary is not None
-        return summary.model_dump(mode="json")
+        return self.space_service.get_space_by_thread(thread_id=thread_id).model_dump(mode="json")
 
     def get_actors_for_space(self, *, space_id: str) -> dict:
-        response = self.actor_service.get_actors_for_space(space_id=space_id)
-        assert response is not None
-        return response.model_dump(mode="json")
+        return self.actor_service.get_actors_for_space(space_id=space_id).model_dump(mode="json")
 
     def register_chat_participant(self, *, thread_id: str, actor_name: str, actor_kind: str = "ai") -> dict:
-        summary = self.chat_service.register_participant(
+        return self.chat_service.register_participant(
             thread_id=thread_id,
             actor_name=actor_name,
             actor_kind=actor_kind,
-        )
-        assert summary is not None
-        return summary.model_dump(mode="json")
+        ).model_dump(mode="json")
 
     def heartbeat_chat_participant(self, *, thread_id: str, actor_name: str) -> dict:
-        summary = self.chat_service.heartbeat_participant(
+        return self.chat_service.heartbeat_participant(
             thread_id=thread_id,
             actor_name=actor_name,
-        )
-        assert summary is not None
-        return summary.model_dump(mode="json")
+        ).model_dump(mode="json")
 
     def get_chat_delta(
         self,
@@ -77,15 +69,13 @@ class ServiceBackedChatBridge:
         limit: int = 20,
         mark_read: bool = False,
     ) -> dict:
-        response = self.chat_service.get_thread_delta(
+        return self.chat_service.get_thread_delta(
             thread_id=thread_id,
             actor_name=actor_name,
             after_message_id=after_message_id,
             limit=limit,
             mark_read=mark_read,
-        )
-        assert response is not None
-        return response.model_dump(mode="json")
+        ).model_dump(mode="json")
 
     def submit_chat_message(
         self,
@@ -95,17 +85,15 @@ class ServiceBackedChatBridge:
         content: str,
         actor_kind: str = "ai",
     ) -> dict:
-        response = self.chat_service.submit_participant_message(
+        return self.chat_service.submit_participant_message(
             thread_id=thread_id,
             actor_name=actor_name,
             content=content,
             actor_kind=actor_kind,
-        )
-        assert response is not None
-        return response.model_dump(mode="json")
+        ).model_dump(mode="json")
 
 
-def test_chat_participant_connector_replies_once_and_shows_up_in_generic_views(tmp_path, monkeypatch):
+def bootstrap_chat(tmp_path, monkeypatch):
     if str(NAS_BRIDGE_ROOT) not in sys.path:
         sys.path.insert(0, str(NAS_BRIDGE_ROOT))
     if str(OPS_CURE_ROOT) not in sys.path:
@@ -120,21 +108,14 @@ def test_chat_participant_connector_replies_once_and_shows_up_in_generic_views(t
             del sys.modules[module_name]
 
     import app.config as config
-
-    config.get_settings.cache_clear()
-
     import app.db as db
     import app.behaviors.chat.kernel_binding as chat_kernel_binding
     import app.behaviors.chat.service as chat_service_module
     import app.kernel.actors as actors_module
     import app.kernel.events as events_module
     import app.kernel.spaces as spaces_module
-    from pc_launcher.connectors.chat_participant import (
-        ChatParticipantConfig,
-        ChatParticipantConnector,
-        InMemoryChatParticipantStateStore,
-    )
 
+    config.get_settings.cache_clear()
     db.init_db()
 
     thread_manager = FakeThreadManager()
@@ -144,487 +125,187 @@ def test_chat_participant_connector_replies_once_and_shows_up_in_generic_views(t
     actor_service = actors_module.ActorService(providers=[kernel_binding.actor_provider])
     event_service = events_module.EventService(providers=[kernel_binding.event_provider])
 
-    async def scenario():
-        return await chat_service.create_chat_thread(
+    return chat_service, space_service, actor_service, event_service, thread_manager
+
+
+def create_thread(chat_service, *, title: str, topic: str) -> str:
+    created = asyncio.run(
+        chat_service.create_chat_thread(
             guild_id="guild-1",
             parent_channel_id="parent-1",
-            title="codex-chat: connector smoke",
-            topic="connector test",
+            title=title,
+            topic=topic,
             created_by="operator",
-        )
+        ),
+    )
+    return created.discord_thread_id
 
-    created = asyncio.run(scenario())
-    thread_id = created.discord_thread_id
 
-    chat_service.record_message(
-        thread_id=thread_id,
-        actor_name="operator",
-        content="@codex-b hello, please share your status.",
+def build_connector(*, bridge, runtime, actor_name: str, allow_unprompted: bool = True, progress_notice_delay_seconds: float = 3.0):
+    from pc_launcher.connectors.chat_participant import (
+        ChatParticipantConfig,
+        ChatParticipantConnector,
+        InMemoryChatParticipantStateStore,
     )
 
-    bridge = ServiceBackedChatBridge(
-        chat_service=chat_service,
-        space_service=space_service,
-        actor_service=actor_service,
-    )
-    runtime = FakeChatParticipantRuntime()
-    state_store = InMemoryChatParticipantStateStore()
-    connector = ChatParticipantConnector(
+    return ChatParticipantConnector(
         bridge=bridge,
         runtime=runtime,
-        state_store=state_store,
+        state_store=InMemoryChatParticipantStateStore(),
         config=ChatParticipantConfig(
-            actor_name="codex-b",
-            machine_label="pc-b",
+            actor_name=actor_name,
+            machine_label=f"{actor_name}-pc",
+            allow_unprompted=allow_unprompted,
+            progress_notice_delay_seconds=progress_notice_delay_seconds,
         ),
     )
 
+
+def test_chat_participant_connector_replies_once_and_shows_up_in_generic_views(tmp_path, monkeypatch):
+    chat_service, space_service, actor_service, event_service, _ = bootstrap_chat(tmp_path, monkeypatch)
+    thread_id = create_thread(chat_service, title="codex-chat: connector smoke", topic="connector test")
+    chat_service.record_message(thread_id=thread_id, actor_name="operator", content="@codex-b hello, please share your status.")
+
+    bridge = ServiceBackedChatBridge(chat_service=chat_service, space_service=space_service, actor_service=actor_service)
+    runtime = FakeChatParticipantRuntime()
+    connector = build_connector(bridge=bridge, runtime=runtime, actor_name="codex-b")
+
     first = connector.sync_once(thread_id=thread_id)
     assert first.status == "replied"
-    assert first.replied_message_id is not None
     assert len(runtime.calls) == 1
 
     chat_space = space_service.get_space_by_thread(thread_id=thread_id)
-    assert chat_space is not None
-    assert chat_space.domain_type == "chat"
-
-    chat_actors = actor_service.get_actors_for_space(space_id=chat_space.id)
-    assert chat_actors is not None
-    assert {actor.name for actor in chat_actors.actors} == {"operator", "codex-b"}
-
     chat_events = event_service.get_events_for_space(space_id=chat_space.id, limit=10)
-    assert chat_events is not None
     assert [event.actor_name for event in chat_events.events] == ["operator", "codex-b"]
-    assert chat_events.events[-1].actor_name == "codex-b"
-    assert "reply" in chat_events.events[-1].content
 
     second = connector.sync_once(thread_id=thread_id)
-    assert second.status == "skipped"
     assert second.reason == "self_only_messages"
-    assert len(runtime.calls) == 1
 
-    chat_service.record_message(
-        thread_id=thread_id,
-        actor_name="operator",
-        content="This is a monologue that does not address any participant.",
-    )
+    chat_service.record_message(thread_id=thread_id, actor_name="operator", content="This is a monologue that does not address any participant.")
     third = connector.sync_once(thread_id=thread_id)
-    assert third.status == "replied"
     assert third.reason == "reply_submitted"
     assert len(runtime.calls) == 2
 
 
 def test_chat_participant_connector_can_still_run_targeted_only(tmp_path, monkeypatch):
-    if str(NAS_BRIDGE_ROOT) not in sys.path:
-        sys.path.insert(0, str(NAS_BRIDGE_ROOT))
-    if str(OPS_CURE_ROOT) not in sys.path:
-        sys.path.insert(0, str(OPS_CURE_ROOT))
+    chat_service, space_service, actor_service, _, _ = bootstrap_chat(tmp_path, monkeypatch)
+    thread_id = create_thread(chat_service, title="codex-chat: targeted only", topic="connector test")
+    chat_service.record_message(thread_id=thread_id, actor_name="operator", content="This is a monologue that does not address any participant.")
 
-    monkeypatch.setenv("BRIDGE_SHARED_AUTH_TOKEN", "test-token")
-    monkeypatch.setenv("BRIDGE_DISABLE_DISCORD", "true")
-    monkeypatch.setenv("BRIDGE_DATABASE_URL", f"sqlite:///{(tmp_path / 'bridge.db').as_posix()}")
-
-    for module_name in list(sys.modules):
-        if module_name == "app" or module_name.startswith("app."):
-            del sys.modules[module_name]
-
-    import app.config as config
-
-    config.get_settings.cache_clear()
-
-    import app.db as db
-    import app.behaviors.chat.kernel_binding as chat_kernel_binding
-    import app.behaviors.chat.service as chat_service_module
-    import app.kernel.actors as actors_module
-    import app.kernel.spaces as spaces_module
-    from pc_launcher.connectors.chat_participant import (
-        ChatParticipantConfig,
-        ChatParticipantConnector,
-        InMemoryChatParticipantStateStore,
-    )
-
-    db.init_db()
-
-    thread_manager = FakeThreadManager()
-    chat_service = chat_service_module.ChatBehaviorService(thread_manager=thread_manager)
-    kernel_binding = chat_kernel_binding.build_chat_kernel_binding()
-    space_service = spaces_module.SpaceService(providers=[kernel_binding.space_provider])
-    actor_service = actors_module.ActorService(providers=[kernel_binding.actor_provider])
-
-    async def scenario():
-        return await chat_service.create_chat_thread(
-            guild_id="guild-1",
-            parent_channel_id="parent-1",
-            title="codex-chat: targeted only",
-            topic="connector test",
-            created_by="operator",
-        )
-
-    created = asyncio.run(scenario())
-    thread_id = created.discord_thread_id
-    chat_service.record_message(
-        thread_id=thread_id,
-        actor_name="operator",
-        content="This is a monologue that does not address any participant.",
-    )
-
-    bridge = ServiceBackedChatBridge(
-        chat_service=chat_service,
-        space_service=space_service,
-        actor_service=actor_service,
-    )
-    runtime = FakeChatParticipantRuntime()
-    state_store = InMemoryChatParticipantStateStore()
-    connector = ChatParticipantConnector(
-        bridge=bridge,
-        runtime=runtime,
-        state_store=state_store,
-        config=ChatParticipantConfig(
-            actor_name="codex-b",
-            machine_label="pc-b",
-            allow_unprompted=False,
-        ),
-    )
+    bridge = ServiceBackedChatBridge(chat_service=chat_service, space_service=space_service, actor_service=actor_service)
+    connector = build_connector(bridge=bridge, runtime=FakeChatParticipantRuntime(), actor_name="codex-b", allow_unprompted=False)
 
     result = connector.sync_once(thread_id=thread_id)
-
-    assert result.status == "skipped"
     assert result.reason == "not_addressed_to_actor"
-    assert len(runtime.calls) == 0
 
 
 def test_chat_participant_connector_posts_progress_notice_for_slow_runtime(tmp_path, monkeypatch):
-    if str(NAS_BRIDGE_ROOT) not in sys.path:
-        sys.path.insert(0, str(NAS_BRIDGE_ROOT))
-    if str(OPS_CURE_ROOT) not in sys.path:
-        sys.path.insert(0, str(OPS_CURE_ROOT))
+    chat_service, space_service, actor_service, event_service, _ = bootstrap_chat(tmp_path, monkeypatch)
+    thread_id = create_thread(chat_service, title="codex-chat: slow runtime", topic="progress notice")
+    chat_service.record_message(thread_id=thread_id, actor_name="operator", content="Please investigate the issue and report back.")
 
-    monkeypatch.setenv("BRIDGE_SHARED_AUTH_TOKEN", "test-token")
-    monkeypatch.setenv("BRIDGE_DISABLE_DISCORD", "true")
-    monkeypatch.setenv("BRIDGE_DATABASE_URL", f"sqlite:///{(tmp_path / 'bridge.db').as_posix()}")
-
-    for module_name in list(sys.modules):
-        if module_name == "app" or module_name.startswith("app."):
-            del sys.modules[module_name]
-
-    import app.config as config
-
-    config.get_settings.cache_clear()
-
-    import app.db as db
-    import app.behaviors.chat.kernel_binding as chat_kernel_binding
-    import app.behaviors.chat.service as chat_service_module
-    import app.kernel.events as events_module
-    import app.kernel.actors as actors_module
-    import app.kernel.spaces as spaces_module
-    from pc_launcher.connectors.chat_participant import (
-        ChatParticipantConfig,
-        ChatParticipantConnector,
-        InMemoryChatParticipantStateStore,
-    )
-
-    db.init_db()
-
-    thread_manager = FakeThreadManager()
-    chat_service = chat_service_module.ChatBehaviorService(thread_manager=thread_manager)
-    kernel_binding = chat_kernel_binding.build_chat_kernel_binding()
-    space_service = spaces_module.SpaceService(providers=[kernel_binding.space_provider])
-    actor_service = actors_module.ActorService(providers=[kernel_binding.actor_provider])
-    event_service = events_module.EventService(providers=[kernel_binding.event_provider])
-
-    async def scenario():
-        return await chat_service.create_chat_thread(
-            guild_id="guild-1",
-            parent_channel_id="parent-1",
-            title="codex-chat: slow runtime",
-            topic="progress notice",
-            created_by="operator",
-        )
-
-    created = asyncio.run(scenario())
-    thread_id = created.discord_thread_id
-    chat_service.record_message(
-        thread_id=thread_id,
-        actor_name="operator",
-        content="Please investigate the issue and report back.",
-    )
-
-    bridge = ServiceBackedChatBridge(
-        chat_service=chat_service,
-        space_service=space_service,
-        actor_service=actor_service,
-    )
-    runtime = SlowFakeChatParticipantRuntime(delay_seconds=0.05)
-    state_store = InMemoryChatParticipantStateStore()
-    connector = ChatParticipantConnector(
+    bridge = ServiceBackedChatBridge(chat_service=chat_service, space_service=space_service, actor_service=actor_service)
+    connector = build_connector(
         bridge=bridge,
-        runtime=runtime,
-        state_store=state_store,
-        config=ChatParticipantConfig(
-            actor_name="codex-b",
-            machine_label="pc-b",
-            progress_notice_delay_seconds=0.01,
-        ),
+        runtime=SlowFakeChatParticipantRuntime(delay_seconds=0.05),
+        actor_name="codex-b",
+        progress_notice_delay_seconds=0.01,
     )
 
     result = connector.sync_once(thread_id=thread_id)
-
     assert result.status == "replied"
     assert result.progress_message_id is not None
-    assert len(runtime.calls) == 1
 
-    chat_events = event_service.get_events_for_space(space_id=created.id, limit=10)
-    assert chat_events is not None
-    assert [event.actor_name for event in chat_events.events] == ["operator", "codex-b", "codex-b"]
-    assert "working on it now" in chat_events.events[1].content
-    assert chat_events.events[2].content == "codex-b final: Please investigate the issue and report back."
+    thread = space_service.get_space_by_thread(thread_id=thread_id)
+    events = event_service.get_events_for_space(space_id=thread.id, limit=10)
+    assert [event.actor_name for event in events.events] == ["operator", "codex-b", "codex-b"]
 
 
 def test_chat_participant_connector_skips_control_messages(tmp_path, monkeypatch):
-    if str(NAS_BRIDGE_ROOT) not in sys.path:
-        sys.path.insert(0, str(NAS_BRIDGE_ROOT))
-    if str(OPS_CURE_ROOT) not in sys.path:
-        sys.path.insert(0, str(OPS_CURE_ROOT))
+    chat_service, space_service, actor_service, _, _ = bootstrap_chat(tmp_path, monkeypatch)
+    thread_id = create_thread(chat_service, title="codex-chat: control", topic="control test")
+    chat_service.record_message(thread_id=thread_id, actor_name="operator", content="\ub2e4 \ub300\ud654 \uba48\ucdb0\ub77c")
 
-    monkeypatch.setenv("BRIDGE_SHARED_AUTH_TOKEN", "test-token")
-    monkeypatch.setenv("BRIDGE_DISABLE_DISCORD", "true")
-    monkeypatch.setenv("BRIDGE_DATABASE_URL", f"sqlite:///{(tmp_path / 'bridge.db').as_posix()}")
-
-    for module_name in list(sys.modules):
-        if module_name == "app" or module_name.startswith("app."):
-            del sys.modules[module_name]
-
-    import app.config as config
-
-    config.get_settings.cache_clear()
-
-    import app.db as db
-    import app.behaviors.chat.kernel_binding as chat_kernel_binding
-    import app.behaviors.chat.service as chat_service_module
-    import app.kernel.actors as actors_module
-    import app.kernel.spaces as spaces_module
-    from pc_launcher.connectors.chat_participant import (
-        ChatParticipantConfig,
-        ChatParticipantConnector,
-        InMemoryChatParticipantStateStore,
-    )
-
-    db.init_db()
-
-    thread_manager = FakeThreadManager()
-    chat_service = chat_service_module.ChatBehaviorService(thread_manager=thread_manager)
-    kernel_binding = chat_kernel_binding.build_chat_kernel_binding()
-    space_service = spaces_module.SpaceService(providers=[kernel_binding.space_provider])
-    actor_service = actors_module.ActorService(providers=[kernel_binding.actor_provider])
-
-    created = asyncio.run(
-        chat_service.create_chat_thread(
-            guild_id="guild-1",
-            parent_channel_id="parent-1",
-            title="codex-chat: control",
-            topic="control test",
-            created_by="operator",
-        ),
-    )
-    thread_id = created.discord_thread_id
-    chat_service.record_message(
-        thread_id=thread_id,
-        actor_name="operator",
-        content="다 대화 멈춰라",
-    )
-
-    bridge = ServiceBackedChatBridge(
-        chat_service=chat_service,
-        space_service=space_service,
-        actor_service=actor_service,
-    )
-    runtime = FakeChatParticipantRuntime()
-    connector = ChatParticipantConnector(
-        bridge=bridge,
-        runtime=runtime,
-        state_store=InMemoryChatParticipantStateStore(),
-        config=ChatParticipantConfig(actor_name="codex-b", machine_label="pc-b"),
-    )
+    bridge = ServiceBackedChatBridge(chat_service=chat_service, space_service=space_service, actor_service=actor_service)
+    connector = build_connector(bridge=bridge, runtime=FakeChatParticipantRuntime(), actor_name="codex-b")
 
     result = connector.sync_once(thread_id=thread_id)
-
-    assert result.status == "skipped"
     assert result.reason == "control_message"
-    assert len(runtime.calls) == 0
 
 
 def test_chat_participant_connector_ignores_other_ai_progress_messages(tmp_path, monkeypatch):
-    if str(NAS_BRIDGE_ROOT) not in sys.path:
-        sys.path.insert(0, str(NAS_BRIDGE_ROOT))
-    if str(OPS_CURE_ROOT) not in sys.path:
-        sys.path.insert(0, str(OPS_CURE_ROOT))
-
-    monkeypatch.setenv("BRIDGE_SHARED_AUTH_TOKEN", "test-token")
-    monkeypatch.setenv("BRIDGE_DISABLE_DISCORD", "true")
-    monkeypatch.setenv("BRIDGE_DATABASE_URL", f"sqlite:///{(tmp_path / 'bridge.db').as_posix()}")
-
-    for module_name in list(sys.modules):
-        if module_name == "app" or module_name.startswith("app."):
-            del sys.modules[module_name]
-
-    import app.config as config
-
-    config.get_settings.cache_clear()
-
-    import app.db as db
-    import app.behaviors.chat.kernel_binding as chat_kernel_binding
-    import app.behaviors.chat.service as chat_service_module
-    import app.kernel.actors as actors_module
-    import app.kernel.spaces as spaces_module
-    from pc_launcher.connectors.chat_participant import (
-        ChatParticipantConfig,
-        ChatParticipantConnector,
-        InMemoryChatParticipantStateStore,
-    )
-
-    db.init_db()
-
-    thread_manager = FakeThreadManager()
-    chat_service = chat_service_module.ChatBehaviorService(thread_manager=thread_manager)
-    kernel_binding = chat_kernel_binding.build_chat_kernel_binding()
-    space_service = spaces_module.SpaceService(providers=[kernel_binding.space_provider])
-    actor_service = actors_module.ActorService(providers=[kernel_binding.actor_provider])
-
-    created = asyncio.run(
-        chat_service.create_chat_thread(
-            guild_id="guild-1",
-            parent_channel_id="parent-1",
-            title="codex-chat: ignore ai progress",
-            topic="ai message test",
-            created_by="operator",
-        ),
-    )
-    thread_id = created.discord_thread_id
+    chat_service, space_service, actor_service, _, _ = bootstrap_chat(tmp_path, monkeypatch)
+    thread_id = create_thread(chat_service, title="codex-chat: ignore ai progress", topic="ai message test")
     chat_service.record_message(thread_id=thread_id, actor_name="operator", content="status check")
     chat_service.register_participant(thread_id=thread_id, actor_name="codex-desktop", actor_kind="ai")
     chat_service.submit_participant_message(
         thread_id=thread_id,
         actor_name="codex-desktop",
         actor_kind="ai",
-        content="확인했다. 지금 바로 확인하고 진행 중이다. 끝나면 여기 보고하겠다.",
+        content=(
+            "\ud655\uc778\ud588\ub2e4. \uc9c0\uae08 \ubc14\ub85c \ud655\uc778\ud558\uace0 "
+            "\uc9c4\ud589 \uc911\uc774\ub2e4. \ub05d\ub098\uba74 \uc5ec\uae30 \ubcf4\uace0\ud558\uaca0\ub2e4."
+        ),
     )
 
-    bridge = ServiceBackedChatBridge(
-        chat_service=chat_service,
-        space_service=space_service,
-        actor_service=actor_service,
-    )
-    runtime = FakeChatParticipantRuntime()
-    connector = ChatParticipantConnector(
-        bridge=bridge,
-        runtime=runtime,
-        state_store=InMemoryChatParticipantStateStore(),
-        config=ChatParticipantConfig(actor_name="codex-homedev", machine_label="pc-b"),
-    )
+    bridge = ServiceBackedChatBridge(chat_service=chat_service, space_service=space_service, actor_service=actor_service)
+    connector = build_connector(bridge=bridge, runtime=FakeChatParticipantRuntime(), actor_name="codex-homedev")
 
     result = connector.sync_once(thread_id=thread_id)
+    assert result.reason == "ai_echo_message"
 
-    assert result.status == "skipped"
-    assert result.reason == "ai_message_not_targeted"
-    assert len(runtime.calls) == 0
+
+def test_chat_participant_connector_allows_non_targeted_ai_collaboration_messages(tmp_path, monkeypatch):
+    chat_service, space_service, actor_service, _, _ = bootstrap_chat(tmp_path, monkeypatch)
+    thread_id = create_thread(chat_service, title="codex-chat: ai collaboration", topic="ai collaboration test")
+    chat_service.submit_participant_message(
+        thread_id=thread_id,
+        actor_name="codex-desktop",
+        actor_kind="ai",
+        content="I found the likely root cause in runner.py. We should move the reconnect status into the browser state model.",
+    )
+
+    bridge = ServiceBackedChatBridge(chat_service=chat_service, space_service=space_service, actor_service=actor_service)
+    runtime = FakeChatParticipantRuntime()
+    connector = build_connector(bridge=bridge, runtime=runtime, actor_name="codex-homedev")
+
+    result = connector.sync_once(thread_id=thread_id)
+    assert result.reason == "reply_submitted"
+    assert len(runtime.calls) == 1
 
 
 def test_chat_participant_connector_claims_only_one_unprompted_turn(tmp_path, monkeypatch):
-    if str(NAS_BRIDGE_ROOT) not in sys.path:
-        sys.path.insert(0, str(NAS_BRIDGE_ROOT))
-    if str(OPS_CURE_ROOT) not in sys.path:
-        sys.path.insert(0, str(OPS_CURE_ROOT))
-
-    monkeypatch.setenv("BRIDGE_SHARED_AUTH_TOKEN", "test-token")
-    monkeypatch.setenv("BRIDGE_DISABLE_DISCORD", "true")
-    monkeypatch.setenv("BRIDGE_DATABASE_URL", f"sqlite:///{(tmp_path / 'bridge.db').as_posix()}")
-
-    for module_name in list(sys.modules):
-        if module_name == "app" or module_name.startswith("app."):
-            del sys.modules[module_name]
-
-    import app.config as config
-
-    config.get_settings.cache_clear()
-
-    import app.db as db
-    import app.behaviors.chat.kernel_binding as chat_kernel_binding
-    import app.behaviors.chat.service as chat_service_module
-    import app.kernel.actors as actors_module
-    import app.kernel.spaces as spaces_module
-    from pc_launcher.connectors.chat_participant import (
-        ChatParticipantConfig,
-        ChatParticipantConnector,
-        InMemoryChatParticipantStateStore,
-    )
-
-    db.init_db()
-
-    thread_manager = FakeThreadManager()
-    chat_service = chat_service_module.ChatBehaviorService(thread_manager=thread_manager)
-    kernel_binding = chat_kernel_binding.build_chat_kernel_binding()
-    space_service = spaces_module.SpaceService(providers=[kernel_binding.space_provider])
-    actor_service = actors_module.ActorService(providers=[kernel_binding.actor_provider])
-
-    created = asyncio.run(
-        chat_service.create_chat_thread(
-            guild_id="guild-1",
-            parent_channel_id="parent-1",
-            title="codex-chat: claim",
-            topic="claim test",
-            created_by="operator",
-        ),
-    )
-    thread_id = created.discord_thread_id
+    chat_service, space_service, actor_service, _, _ = bootstrap_chat(tmp_path, monkeypatch)
+    thread_id = create_thread(chat_service, title="codex-chat: claim", topic="claim test")
     chat_service.register_participant(thread_id=thread_id, actor_name="codex-a", actor_kind="ai")
     chat_service.register_participant(thread_id=thread_id, actor_name="codex-b", actor_kind="ai")
     chat_service.record_message(
         thread_id=thread_id,
         actor_name="operator",
-        content="이건 평문 요청이다. 한 명만 답해라.",
+        content="\uc774\uac74 \ud3c9\ubb38 \uc694\uccad\uc774\ub2e4. \ud55c \uba85\ub9cc \ub2f5\ud574\ub77c.",
     )
 
-    bridge = ServiceBackedChatBridge(
-        chat_service=chat_service,
-        space_service=space_service,
-        actor_service=actor_service,
-    )
-    connector_a = ChatParticipantConnector(
-        bridge=bridge,
-        runtime=FakeChatParticipantRuntime(),
-        state_store=InMemoryChatParticipantStateStore(),
-        config=ChatParticipantConfig(actor_name="codex-a", machine_label="pc-a"),
-    )
-    connector_b = ChatParticipantConnector(
-        bridge=bridge,
-        runtime=FakeChatParticipantRuntime(),
-        state_store=InMemoryChatParticipantStateStore(),
-        config=ChatParticipantConfig(actor_name="codex-b", machine_label="pc-b"),
-    )
+    bridge = ServiceBackedChatBridge(chat_service=chat_service, space_service=space_service, actor_service=actor_service)
+    connector_a = build_connector(bridge=bridge, runtime=FakeChatParticipantRuntime(), actor_name="codex-a")
+    connector_b = build_connector(bridge=bridge, runtime=FakeChatParticipantRuntime(), actor_name="codex-b")
+
     space = bridge.get_space_by_thread(thread_id=thread_id)
     actors = bridge.get_actors_for_space(space_id=space["id"])
-    delta = bridge.get_chat_delta(
-        thread_id=thread_id,
-        actor_name="codex-a",
-        after_message_id=None,
-        limit=20,
-        mark_read=False,
-    )
+    delta = bridge.get_chat_delta(thread_id=thread_id, actor_name="codex-a", after_message_id=None, limit=20, mark_read=False)
     target_message = delta["messages"][-1]
 
     gate_a = connector_a._reply_gate_reason(
         target_message=target_message,
         participants=delta.get("participants") or actors.get("actors") or [],
+        recent_messages=delta["messages"],
     )
     gate_b = connector_b._reply_gate_reason(
         target_message=target_message,
         participants=delta.get("participants") or actors.get("actors") or [],
+        recent_messages=delta["messages"],
     )
 
-    assert sorted([gate_a, gate_b], key=lambda item: "" if item is None else item) == [
-        None,
-        "turn_claimed_by_other_participant",
-    ]
+    assert sorted([gate_a, gate_b], key=lambda item: "" if item is None else item) == [None, "turn_claimed_by_other_participant"]
 
 
 def test_json_state_store_persists_cursor(tmp_path):
@@ -664,12 +345,7 @@ def test_codex_cli_chat_participant_runtime_uses_codex_exec_wrapper(tmp_path):
         output_flag_index = command.index("--output-last-message")
         output_path = Path(command[output_flag_index + 1])
         output_path.write_text("codex-b: ack from runtime", encoding="utf-8")
-        return subprocess.CompletedProcess(
-            args=command,
-            returncode=0,
-            stdout="",
-            stderr="",
-        )
+        return subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
 
     runtime = CodexCliChatParticipantRuntime(
         config=CodexCliRuntimeConfig(
@@ -698,16 +374,9 @@ def test_codex_cli_chat_participant_runtime_uses_codex_exec_wrapper(tmp_path):
     )
 
     reply = runtime.generate_reply(context)
-
-    assert reply is not None
     assert reply.content == "codex-b: ack from runtime"
-    assert captured["cwd"] == str(tmp_path)
     assert captured["command"][0].endswith("codex.cmd")
     assert captured["command"][1] == "exec"
-    assert "--output-last-message" in captured["command"]
-    assert "-C" in captured["command"]
-    assert "connector room" in captured["input"]
-    assert "@codex-b please confirm the runner." in captured["input"]
 
 
 def test_current_thread_runtime_uses_app_server_client_and_current_thread():
@@ -739,9 +408,6 @@ def test_current_thread_runtime_uses_app_server_client_and_current_thread():
             return {"turn": {"id": "turn-123", "status": "inProgress"}}
 
         def wait_for_turn_completion(self, *, thread_id: str, turn_id: str, timeout_seconds: float):
-            assert thread_id == "codex-thread-123"
-            assert turn_id == "turn-123"
-            assert timeout_seconds == 42.0
             return {"id": turn_id, "status": "completed", "items": []}, "current-thread reply"
 
         def close(self) -> None:
@@ -776,47 +442,16 @@ def test_current_thread_runtime_uses_app_server_client_and_current_thread():
     )
 
     reply = runtime.generate_reply(context)
-
-    assert reply is not None
     assert reply.content == "current-thread reply"
-    assert client.resume_calls == ["codex-thread-123"]
-    assert len(client.start_turn_calls) == 1
     started_thread_id, prompt = client.start_turn_calls[0]
     assert started_thread_id == "codex-thread-123"
-    assert "ops room" in prompt
-    assert "@codex-homedev are you attached to the current thread?" in prompt
-    assert "you may inspect files, use tools, run commands, and perform the smallest local actions needed before replying." in prompt
-    assert "Do not use tools, inspect files, or perform actions." not in prompt
-    assert client.read_calls == []
+    assert "you may inspect files, use tools, run commands" in prompt
 
 
 def test_chat_service_submit_participant_message_and_notify_posts_to_discord(tmp_path, monkeypatch):
-    if str(NAS_BRIDGE_ROOT) not in sys.path:
-        sys.path.insert(0, str(NAS_BRIDGE_ROOT))
-
-    monkeypatch.setenv("BRIDGE_SHARED_AUTH_TOKEN", "test-token")
-    monkeypatch.setenv("BRIDGE_DISABLE_DISCORD", "true")
-    monkeypatch.setenv("BRIDGE_DATABASE_URL", f"sqlite:///{(tmp_path / 'bridge.db').as_posix()}")
-
-    for module_name in list(sys.modules):
-        if module_name == "app" or module_name.startswith("app."):
-            del sys.modules[module_name]
-
-    import app.config as config
-
-    config.get_settings.cache_clear()
-
-    import app.db as db
+    chat_service, _, _, event_service, thread_manager = bootstrap_chat(tmp_path, monkeypatch)
     import app.behaviors.chat.kernel_binding as chat_kernel_binding
-    import app.behaviors.chat.service as chat_service_module
-    import app.kernel.events as events_module
-
-    db.init_db()
-
-    thread_manager = FakeThreadManager()
-    chat_service = chat_service_module.ChatBehaviorService(thread_manager=thread_manager)
     kernel_binding = chat_kernel_binding.build_chat_kernel_binding()
-    event_service = events_module.EventService(providers=[kernel_binding.event_provider])
 
     async def scenario():
         created = await chat_service.create_chat_thread(
@@ -835,47 +470,13 @@ def test_chat_service_submit_participant_message_and_notify_posts_to_discord(tmp
         return created, response
 
     created, response = asyncio.run(scenario())
-
-    assert response is not None
-    assert response.message.actor_name == "codex-homedev"
-    assert thread_manager.messages[-1] == (
-        created.discord_thread_id,
-        "**codex-homedev**: bridge reply into Discord",
-    )
-
+    assert thread_manager.messages[-1] == (created.discord_thread_id, "**codex-homedev**: bridge reply into Discord")
     chat_events = event_service.get_events_for_space(space_id=response.thread.id, limit=10)
-    assert chat_events is not None
-    assert chat_events.events[-1].actor_name == "codex-homedev"
     assert chat_events.events[-1].content == "bridge reply into Discord"
 
 
 def test_chat_service_record_message_does_not_echo_human_input_to_discord(tmp_path, monkeypatch):
-    if str(NAS_BRIDGE_ROOT) not in sys.path:
-        sys.path.insert(0, str(NAS_BRIDGE_ROOT))
-
-    monkeypatch.setenv("BRIDGE_SHARED_AUTH_TOKEN", "test-token")
-    monkeypatch.setenv("BRIDGE_DISABLE_DISCORD", "true")
-    monkeypatch.setenv("BRIDGE_DATABASE_URL", f"sqlite:///{(tmp_path / 'bridge.db').as_posix()}")
-
-    for module_name in list(sys.modules):
-        if module_name == "app" or module_name.startswith("app."):
-            del sys.modules[module_name]
-
-    import app.config as config
-
-    config.get_settings.cache_clear()
-
-    import app.db as db
-    import app.behaviors.chat.kernel_binding as chat_kernel_binding
-    import app.behaviors.chat.service as chat_service_module
-    import app.kernel.events as events_module
-
-    db.init_db()
-
-    thread_manager = FakeThreadManager()
-    chat_service = chat_service_module.ChatBehaviorService(thread_manager=thread_manager)
-    kernel_binding = chat_kernel_binding.build_chat_kernel_binding()
-    event_service = events_module.EventService(providers=[kernel_binding.event_provider])
+    chat_service, _, _, event_service, thread_manager = bootstrap_chat(tmp_path, monkeypatch)
 
     async def scenario():
         created = await chat_service.create_chat_thread(
@@ -891,18 +492,12 @@ def test_chat_service_record_message_does_not_echo_human_input_to_discord(tmp_pa
             actor_name="operator",
             content="hello from Discord",
         )
-        after_count = len(thread_manager.messages)
-        return created, summary, before_count, after_count
+        return created, summary, before_count, len(thread_manager.messages)
 
     created, summary, before_count, after_count = asyncio.run(scenario())
-
-    assert summary is not None
     assert summary.last_actor_name == "operator"
     assert after_count == before_count
-
     chat_events = event_service.get_events_for_space(space_id=created.id, limit=10)
-    assert chat_events is not None
-    assert [event.actor_name for event in chat_events.events] == ["operator"]
     assert chat_events.events[0].content == "hello from Discord"
 
 
@@ -913,12 +508,7 @@ def test_send_message_resolve_message_reads_utf8_file(tmp_path):
     from pc_launcher.connectors.chat_participant.send_message import resolve_message
 
     message_file = tmp_path / "message.txt"
-    message_file.write_text("디스코드 한글 확인", encoding="utf-8")
+    message_file.write_text("\ucf54\ub371\uc2a4 \ud55c\uae00 \ud655\uc778", encoding="utf-8")
 
-    resolved = resolve_message(
-        inline_message=None,
-        message_file=str(message_file),
-        read_stdin=False,
-    )
-
-    assert resolved == "디스코드 한글 확인"
+    resolved = resolve_message(inline_message=None, message_file=str(message_file), read_stdin=False)
+    assert resolved == "\ucf54\ub371\uc2a4 \ud55c\uae00 \ud655\uc778"

@@ -9,6 +9,15 @@ from .runtime import ChatParticipantRuntime, ReplyContext
 from .state_store import ChatParticipantStateStore
 
 
+PROGRESS_NOTICE_KO = (
+    "\ud655\uc778\ud588\ub2e4. \uc9c0\uae08 \ubc14\ub85c \ud655\uc778\ud558\uace0 "
+    "\uc9c4\ud589 \uc911\uc774\ub2e4. \ub05d\ub098\uba74 \uc5ec\uae30 \ubcf4\uace0\ud558\uaca0\ub2e4."
+)
+PROGRESS_NOTICE_EN = "I saw the request and I'm working on it now. I'll report back here when I have a concrete result."
+FAILURE_NOTICE_KO_PREFIX = "\uc791\uc5c5\uc744 \uc9c4\ud589\ud558\ub2e4\uac00 \uc624\ub958\uac00 \ub0ac\ub2e4:"
+FAILURE_NOTICE_EN_PREFIX = "I hit an error while working on it:"
+
+
 @dataclass(slots=True)
 class ChatParticipantConfig:
     actor_name: str
@@ -98,6 +107,7 @@ class ChatParticipantConnector:
         reply_gate_reason = self._reply_gate_reason(
             target_message=target_message,
             participants=delta.get("participants") or actors.get("actors") or [],
+            recent_messages=messages,
         )
         if reply_gate_reason is not None:
             self.state_store.set_cursor(
@@ -210,14 +220,24 @@ class ChatParticipantConnector:
         *,
         target_message: dict[str, object],
         participants: list[dict[str, object]],
+        recent_messages: list[dict[str, object]],
     ) -> str | None:
         content = str(target_message.get("content") or "")
         if self._is_control_message(content=content):
             return "control_message"
         if self._is_explicitly_targeted(content=content):
             return None
-        if self._actor_kind_for_message(target_message=target_message, participants=participants) == "ai":
-            return "ai_message_not_targeted"
+        actor_kind = self._actor_kind_for_message(
+            target_message=target_message,
+            participants=participants,
+        )
+        if actor_kind == "ai":
+            if self._is_meaningless_ai_echo(
+                target_message=target_message,
+                recent_messages=recent_messages,
+            ):
+                return "ai_echo_message"
+            return None
         if not self.config.allow_unprompted:
             return "not_addressed_to_actor"
         if not self._claims_unprompted_turn(target_message=target_message, participants=participants):
@@ -275,16 +295,16 @@ class ChatParticipantConnector:
         return claimed_actor == self.config.actor_name
 
     def _is_control_message(self, *, content: str) -> bool:
-        lowered = " ".join(content.lower().split())
-        if lowered in {"멈춰", "stop"}:
+        lowered = self._normalize_text(content)
+        if lowered in {"\uba48\ucdb0", "stop"}:
             return True
         control_markers = (
-            "대화 멈춰",
-            "대답도 하지마",
-            "대답하지 마",
-            "응답하지 마",
-            "말하지 마",
-            "조용히",
+            "\ub2e4 \ub300\ud654 \uba48\ucdb0",
+            "\ub300\ub2f5\ub3c4 \ud558\uc9c0\ub9c8",
+            "\ub300\ub2f5\ud558\uc9c0 \ub9c8",
+            "\uc751\ub2f5\ud558\uc9c0 \ub9c8",
+            "\ub9d0\ud558\uc9c0 \ub9c8",
+            "\uc870\uc6a9\ud788",
             "stop talking",
             "stop replying",
             "don't reply",
@@ -293,6 +313,24 @@ class ChatParticipantConnector:
             "silence this room",
         )
         return any(marker in lowered for marker in control_markers)
+
+    def _is_meaningless_ai_echo(
+        self,
+        *,
+        target_message: dict[str, object],
+        recent_messages: list[dict[str, object]],
+    ) -> bool:
+        content = self._normalize_text(str(target_message.get("content") or ""))
+        if not content:
+            return True
+        if self._is_progress_notice_text(content) or self._is_failure_notice_text(content):
+            return True
+        repeated_actors = {
+            str(message.get("actor_name") or "")
+            for message in recent_messages
+            if self._normalize_text(str(message.get("content") or "")) == content
+        }
+        return len(repeated_actors) >= 2
 
     def _submit_progress_notice(self, *, thread_id: str, target_message: dict[str, object]) -> str:
         submitted = self.bridge.submit_chat_message(
@@ -320,8 +358,8 @@ class ChatParticipantConnector:
     def _build_progress_notice(self, *, target_message: dict[str, object]) -> str:
         content = str(target_message.get("content") or "")
         if self._looks_like_korean(content):
-            return "확인했다. 지금 바로 확인하고 진행 중이다. 끝나면 여기 보고하겠다."
-        return "I saw the request and I'm working on it now. I'll report back here when I have a concrete result."
+            return PROGRESS_NOTICE_KO
+        return PROGRESS_NOTICE_EN
 
     def _build_failure_notice(
         self,
@@ -333,8 +371,24 @@ class ChatParticipantConnector:
         detail = detail[:200]
         content = str(target_message.get("content") or "")
         if self._looks_like_korean(content):
-            return f"작업을 진행하다가 오류가 났다: {detail}"
-        return f"I hit an error while working on it: {detail}"
+            return f"{FAILURE_NOTICE_KO_PREFIX} {detail}"
+        return f"{FAILURE_NOTICE_EN_PREFIX} {detail}"
 
     def _looks_like_korean(self, content: str) -> bool:
         return any("\uac00" <= char <= "\ud7a3" for char in content)
+
+    def _is_progress_notice_text(self, content: str) -> bool:
+        normalized = self._normalize_text(content)
+        return normalized in {
+            self._normalize_text(PROGRESS_NOTICE_KO),
+            self._normalize_text(PROGRESS_NOTICE_EN),
+        }
+
+    def _is_failure_notice_text(self, content: str) -> bool:
+        normalized = self._normalize_text(content)
+        return normalized.startswith(self._normalize_text(FAILURE_NOTICE_KO_PREFIX)) or normalized.startswith(
+            self._normalize_text(FAILURE_NOTICE_EN_PREFIX),
+        )
+
+    def _normalize_text(self, content: str) -> str:
+        return " ".join(content.lower().split())
