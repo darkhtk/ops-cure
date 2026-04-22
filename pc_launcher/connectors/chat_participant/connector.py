@@ -133,10 +133,15 @@ class ChatParticipantConnector:
             participants=list(delta.get("participants") or actors.get("actors") or []),
             recent_messages=messages,
         )
+        emit_progress_notice = self._should_emit_progress_notice(
+            target_message=target_message,
+            participants=delta.get("participants") or actors.get("actors") or [],
+        )
         reply, progress_message_id = self._generate_reply_with_progress(
             context=context,
             thread_id=room_thread_id,
             target_message=target_message,
+            emit_progress_notice=emit_progress_notice,
         )
 
         self.state_store.set_cursor(
@@ -175,6 +180,7 @@ class ChatParticipantConnector:
         context: ReplyContext,
         thread_id: str,
         target_message: dict[str, object],
+        emit_progress_notice: bool,
     ):
         reply_holder: dict[str, object] = {}
         error_holder: dict[str, BaseException] = {}
@@ -190,7 +196,7 @@ class ChatParticipantConnector:
         worker_thread.start()
         worker_thread.join(timeout=max(0.0, float(self.config.progress_notice_delay_seconds)))
 
-        if worker_thread.is_alive():
+        if emit_progress_notice and worker_thread.is_alive():
             progress_message_id = self._submit_progress_notice(
                 thread_id=thread_id,
                 target_message=target_message,
@@ -243,6 +249,18 @@ class ChatParticipantConnector:
         if not self._claims_unprompted_turn(target_message=target_message, participants=participants):
             return "turn_claimed_by_other_participant"
         return None
+
+    def _should_emit_progress_notice(
+        self,
+        *,
+        target_message: dict[str, object],
+        participants: list[dict[str, object]],
+    ) -> bool:
+        actor_kind = self._actor_kind_for_message(
+            target_message=target_message,
+            participants=participants,
+        )
+        return actor_kind != "ai"
 
     def _is_explicitly_targeted(self, *, content: str) -> bool:
         lowered = content.lower()

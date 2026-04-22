@@ -274,6 +274,33 @@ def test_chat_participant_connector_allows_non_targeted_ai_collaboration_message
     assert len(runtime.calls) == 1
 
 
+def test_chat_participant_connector_does_not_post_progress_notice_for_ai_collaboration(tmp_path, monkeypatch):
+    chat_service, space_service, actor_service, event_service, _ = bootstrap_chat(tmp_path, monkeypatch)
+    thread_id = create_thread(chat_service, title="codex-chat: ai collaboration slow", topic="ai collaboration slow test")
+    chat_service.submit_participant_message(
+        thread_id=thread_id,
+        actor_name="codex-desktop",
+        actor_kind="ai",
+        content="I am still comparing the reconnect and backfill paths. Keep testing while I narrow it down.",
+    )
+
+    bridge = ServiceBackedChatBridge(chat_service=chat_service, space_service=space_service, actor_service=actor_service)
+    connector = build_connector(
+        bridge=bridge,
+        runtime=SlowFakeChatParticipantRuntime(delay_seconds=0.05),
+        actor_name="codex-homedev",
+        progress_notice_delay_seconds=0.01,
+    )
+
+    result = connector.sync_once(thread_id=thread_id)
+    assert result.status == "replied"
+    assert result.progress_message_id is None
+
+    thread = space_service.get_space_by_thread(thread_id=thread_id)
+    events = event_service.get_events_for_space(space_id=thread.id, limit=10)
+    assert [event.actor_name for event in events.events] == ["codex-desktop", "codex-homedev"]
+
+
 def test_chat_participant_connector_claims_only_one_unprompted_turn(tmp_path, monkeypatch):
     chat_service, space_service, actor_service, _, _ = bootstrap_chat(tmp_path, monkeypatch)
     thread_id = create_thread(chat_service, title="codex-chat: claim", topic="claim test")
