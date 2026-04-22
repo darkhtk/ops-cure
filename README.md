@@ -1,283 +1,251 @@
 # Opscure
 
-Opscure is a Discord-first orchestration framework for local AI CLI work.
+Opscure is a channel-native state/event kernel.
 
-It uses a two-plane architecture:
-
-- `nas_bridge/` is the control plane that owns Discord, session state, tasks, handoffs, jobs, transcripts, and recovery.
-- `pc_launcher/` is the execution plane that runs on a Windows machine with local AI CLIs, discovers project profiles, launches workers, and executes verification commands.
-
-The current default runtime model is:
-
-- `planner` for request interpretation and high-level task decomposition
-- `curator` for queue hygiene, handoff flow, and projection cleanup
-- `coder` for implementation
-- `verifier` for build/run/capture/log evidence generation
-- `reviewer` for evidence-based pass/fail/replan decisions
+It treats a Discord channel or thread as a stateful space, then lets different behaviors run on top of that shared kernel. `orchestration` is one behavior. `chat` and `ops` are others. The kernel is the product; the behaviors are plugins.
 
 ## At A Glance
 
-Opscure keeps orchestration state on the bridge, runs AI workers on a Windows machine, and uses Discord as the operator-facing control surface.
+- `nas_bridge/` is the deployed core.
+- The core owns generic `Space / Actor / Event` state, behavior registration, Discord transport, and rendered status output.
+- Behaviors such as `orchestration`, `chat`, and `ops` plug into that core.
+- PC-side code is runtime-specific.
+- The current `pc_launcher/` is an `orchestration` runtime, not a universal runtime for every behavior.
 
-If you want the deeper version, see [docs/architecture.md](docs/architecture.md).
-If you want the operating guardrails, see [docs/checklists.md](docs/checklists.md).
+If you want the deeper structure, see [docs/architecture.md](docs/architecture.md).
+If you want the ongoing kernel split notes, see [docs/generic-kernel.md](docs/generic-kernel.md).
+If you want operating guardrails, see [docs/checklists.md](docs/checklists.md).
 
-## Framework Diagram
+## What Opscure Is
+
+Opscure is best described as:
+
+- a **channel-based state/event kernel**
+- with **behavior plugins**
+- plus **transport adapters**
+- plus **runtime adapters**
+
+That means:
+
+- the kernel does not assume tasks, handoffs, planners, or reviews
+- `orchestration` is a behavior that adds those ideas
+- `chat` is a behavior for conversational rooms
+- `ops` is a behavior for lightweight incident rooms
+
+## System Model
 
 ```mermaid
 flowchart LR
-    user["User<br/>Discord Channel / Thread"]
+    user["User / Discord"]
 
-    subgraph control["Control Plane (NAS / Bridge)"]
-        discord["Discord Bot<br/>slash commands + thread routing"]
-        bridge["Opscure Bridge<br/>session orchestration"]
-        state["Canonical State<br/>sessions / tasks / handoffs / jobs / events"]
-        queue["Ready Queue<br/>self-claim scheduling"]
-        announce["Thread Rendering<br/>OPS / ANSWER / HUMAN / ISSUE"]
+    subgraph core["Opscure Core (NAS)"]
+        transport["Discord Transport"]
+        kernel["Kernel<br/>Space / Actor / Event"]
+        behaviors["Behaviors<br/>orchestration / chat / ops"]
+        presenter["Discord Presenter<br/>status cards + thread rendering"]
+        db["Canonical DB"]
     end
 
-    subgraph execution["Execution Plane (Windows PC)"]
-        launcher["Launcher<br/>profile discovery + worker supervision"]
-
-        subgraph agents["Role Workers"]
-            planner["planner<br/>intent + decomposition"]
-            curator["curator<br/>flow + projection hygiene"]
-            coder["coder<br/>implementation"]
-            verifier["verifier<br/>run + capture + logs"]
-            reviewer["reviewer<br/>pass / fail / replan"]
-        end
+    subgraph runtimes["External Runtimes / Connectors"]
+        orch["pc_launcher<br/>orchestration runtime"]
+        chatc["chat participant connector<br/>runtime adapter"]
+        future["future runtimes / connectors"]
     end
 
-    subgraph outputs["Local Outputs"]
-        artifacts["Artifacts<br/>logs / screenshots / result.json"]
-        projections["Markdown Projections<br/>CURRENT_STATE / CURRENT_TASK / HANDOFFS / TASK_BOARD"]
-    end
+    user --> transport
+    transport --> kernel
+    kernel --> behaviors
+    behaviors --> db
+    db --> presenter
+    presenter --> transport
 
-    user --> discord
-    discord --> bridge
-    bridge --> state
-    state --> queue
-    bridge --> announce
-    announce --> discord
+    orch --> kernel
+    chatc --> kernel
+    future --> kernel
 
-    launcher --> queue
-    queue --> planner
-    queue --> curator
-    queue --> coder
-    queue --> verifier
-    queue --> reviewer
-
-    planner --> state
-    curator --> state
-    coder --> state
-    verifier --> state
-    reviewer --> state
-
-    planner --> projections
-    curator --> projections
-    verifier --> artifacts
-    reviewer --> artifacts
-
-    state -. rebuild .-> projections
-    artifacts -. evidence .-> reviewer
-    state -. render .-> announce
-    bridge -. register / heartbeat / completion .-> launcher
-
+    classDef core fill:#e8f3ff,stroke:#3b82f6,color:#0f2f57,stroke-width:1.5px;
+    classDef runtime fill:#edfdf3,stroke:#16a34a,color:#0f3b22,stroke-width:1.5px;
     classDef user fill:#fff4d6,stroke:#c68a00,color:#4a3300,stroke-width:1.5px;
-    classDef control fill:#e8f3ff,stroke:#3b82f6,color:#0f2f57,stroke-width:1.5px;
-    classDef execution fill:#edfdf3,stroke:#16a34a,color:#0f3b22,stroke-width:1.5px;
-    classDef output fill:#f6efff,stroke:#8b5cf6,color:#3c1f66,stroke-width:1.5px;
 
     class user user;
-    class discord,bridge,state,queue,announce control;
-    class launcher,planner,curator,coder,verifier,reviewer execution;
-    class artifacts,projections output;
+    class transport,kernel,behaviors,presenter,db core;
+    class orch,chatc,future runtime;
 ```
 
-This is the intended flow:
+## Current Public Behaviors
 
-1. A user speaks in Discord.
-2. The bridge translates that into canonical tasks, handoffs, jobs, and events.
-3. Windows workers self-claim ready work that matches their role.
-4. Local execution produces code, logs, screenshots, and review evidence.
-5. The bridge renders concise thread updates while keeping the database as the source of truth.
-6. The status card shows only busy workers, plus each worker's latest live activity line when available.
+### `orchestration`
 
-## What Opscure Is Trying To Solve
+This is the original Discord-based AI work orchestration framework.
 
-Opscure is built for this workflow:
+It adds:
 
-1. You talk to a Discord channel or thread.
-2. The bridge turns that into canonical tasks and handoffs.
-3. Windows workers self-claim ready work that matches their role.
-4. The local machine produces code changes, logs, screenshots, and reports.
-5. Discord remains the control surface, not the place where arbitrary shell commands run.
+- `planner`, `curator`, `coder`, `verifier`, `reviewer`
+- canonical tasks, handoffs, jobs, verification runs
+- self-claim scheduling
+- markdown workflow projections
+- `/project ...` command surface
 
-The framework is designed so that:
+Today, `pc_launcher/` exists primarily for this behavior.
 
-- Discord threads map to sessions.
-- SQLite and task events are the source of truth.
-- local markdown files are projections, not authoritative state.
-- thread messages are an async collaboration bus, not the scheduler itself.
+### `chat`
 
-## Core Model
+This is a dialogue-room behavior.
 
-### Canonical State
+It adds:
 
-Opscure now treats the bridge database as the only source of truth for orchestration state.
+- chat rooms backed by Discord threads
+- participants and chat messages
+- generic room state for Codex-to-Codex or human-to-AI chat
+- chat-specific participant registration, heartbeat, delta fetch, and message submit APIs
 
-Important concepts:
+This behavior is intentionally separate from `orchestration`. It does not require tasks or handoffs.
 
-- `sessions`: top-level Discord-thread-backed work sessions
-- `agents`: per-session agent registrations and worker heartbeats
-- `tasks`: canonical units of work with state, scope, revision, and lease metadata
-- `handoffs`: explicit queued, claimed, consumed, superseded, or failed transfers between roles
-- `task_events`: append-style task history
-- `jobs`: concrete units claimed by workers
-- `verification_runs`: execution evidence runs and review outcomes
+### `ops`
 
-The key safety features are:
+This is a lightweight incident-room behavior.
 
-- `session_epoch` to reject stale worker updates after resets or recovery
-- `task_revision` to reject outdated completions
-- `lease_token` to prevent concurrent claim collisions
-- `idempotency_key` to make duplicate completion/failure callbacks safe
+It adds:
 
-### Self-Claim Scheduling
+- issue / resolve / status events
+- a small ops room state model
+- room-style coordination without workflow semantics
 
-Opscure is moving away from pure push-style handoff and toward canonical ready queues.
+## Core Vocabulary
 
-The bridge decides which tasks are ready based on:
+The generic kernel is converging on these shared concepts:
 
-- role match
-- dependency readiness
-- file scope
-- semantic scope
-- priority and retry policy
+- `Space`
+  - a stateful room, thread, or session
+- `Actor`
+  - a human, AI, bot, or system participant
+- `Event`
+  - a recorded fact inside a space
+- `Behavior`
+  - domain logic that interprets events and maintains domain state
 
-Idle agents claim matching work instead of waiting for every next step to be directly pushed by the planner.
+The important rule is:
 
-### Thread Protocol
-
-Discord thread messages are rendered views over structured internal events.
-
-Visible line types:
-
-- `OPS:` machine-friendly async collaboration updates
-- `ANSWER:` direct answers to user questions
-- `HUMAN:` short human-readable progress lines
-- `ISSUE:` explicit blockers or escalation points
-
-`discuss` messages are reserved for short, structured anomaly or ambiguity handling, for example:
-
-- feature intent mismatch
-- review interpretation mismatch
-- runtime anomaly triage
-
-### Live Worker Activity
-
-Opscure tracks the latest live output line from each busy worker.
-
-The launcher reads the current CLI stdout or stderr line for a worker, sends that line in worker heartbeats, and the bridge stores only the latest value.
-
-The thread status card then renders:
-
-- only workers that are currently `busy`
-- only the latest sanitized activity line for each busy worker
-- no cumulative worker log spam inside the Discord thread
-
-This lets operators see what active workers are doing right now without turning the thread into a scrolling terminal log.
+- the kernel stays generic
+- domain-specific semantics live inside behaviors
+- machine-specific execution details live inside runtimes or connectors
 
 ## Repository Layout
 
 ```text
 ops-cure/
   README.md
+  docs/
+    architecture.md
+    generic-kernel.md
+    checklists.md
   nas_bridge/
-    README.md
-    Dockerfile
-    docker-compose.yml
-    requirements.txt
     app/
       api/
+      behaviors/
+        orchestration/
+        workflow/
+        chat/
+        ops/
+        game/
+      kernel/
+      presenters/
+        discord/
+      transports/
+        discord/
       capabilities/
       services/
       workflows/
-      auth.py
-      command_router.py
-      config.py
+      main.py
       db.py
       discord_gateway.py
-      drift_monitor.py
-      main.py
-      message_router.py
-      models.py
-      schemas.py
-      session_service.py
       thread_manager.py
-      transcript_service.py
-      worker_registry.py
   pc_launcher/
-    README.md
-    requirements.txt
-    artifact_workspace.py
-    bridge_client.py
-    cli_adapters.py
-    cli_worker.py
-    config_loader.py
+    connectors/
+      chat_participant/
+    runtimes/
+      local_windows/
+    domains/
+      workflow_default/
     launcher.py
-    process_io.py
-    project_finder.py
-    verification_runner.py
+    bridge_client.py
     worker_runtime.py
-    scripts/
-    projects/
-      sample/
-        project.yaml
-        prompts/
-          planner.md
-          curator.md
-          coder.md
-          verifier.md
-          reviewer.md
-          finder.md
   tests/
 ```
 
-## Current Execution Profile Model
+## Deployment Model
 
-Profiles live under `pc_launcher/projects/<profile-name>/project.yaml`.
+The intended deployment split is:
 
-The sample profile currently includes:
+- **NAS**
+  - generic core
+  - behavior plugins
+  - Discord transport
+  - DB and status rendering
+- **PCs**
+  - behavior-specific runtimes or connectors
 
-- one default top-level finder root: `C:\Users\darkh\Projects`
-- five roles: `planner`, `curator`, `coder`, `verifier`, `reviewer`
-- verification modes:
-  - `smoke`
-  - `play_capture`
-  - `repro_bug`
-- policy defaults such as:
-  - `max_parallel_agents`
-  - `auto_retry`
-  - `quiet_discord`
-  - `approval_mode`
-  - `allow_cross_agent_handoff`
+Today that means:
 
-The long-term goal is for project-specific variation to live only in:
+- `nas_bridge/` is the deployable core
+- `pc_launcher/` is the Windows runtime for `orchestration`
+- `chat participant connector` is a separate adapter, not part of the generic kernel
 
-- `project.yaml`
-- prompt files
-- local scripts or wrapper commands
+## Current Runtime Reality
+
+The codebase is generic at the core layer, but the existing production runtime is still strongest in `orchestration`.
+
+That distinction matters:
+
+- the **core** is generic
+- the **current launcher** is not
+
+So right now:
+
+- `orchestration` is production-oriented
+- `chat` and `ops` validate the kernel shape
+- additional runtimes/connectors can be added without changing the kernel vocabulary
+
+## Generic Kernel Rules
+
+These are the design rules the repo is now following:
+
+- generic kernel types should not grow behavior-specific fields casually
+- read paths should prefer existing generic APIs first
+- behavior-specific policies should stay in the behavior layer
+- local machine execution details should stay in runtime/connector layers
+- Discord is a transport, not the kernel itself
+
+For example:
+
+- participant unread state belongs to `chat`
+- local Codex invocation belongs to a connector/runtime adapter
+- task/handoff semantics belong to `orchestration`
+
+## APIs
+
+Current generic read APIs:
+
+- `/api/spaces`
+- `/api/actors`
+- `/api/events`
+- `/api/behaviors`
+
+Behavior-specific APIs exist where the kernel should stay generic.
+
+Example:
+
+- `chat` uses dedicated participant and delta endpoints instead of forcing unread state into generic kernel models
 
 ## Quick Start
 
-### 1. Start the Bridge
+### 1. Start the NAS core
 
-See the bridge-specific guide:
+See:
 
 - [C:\Users\darkh\Projects\ops-cure\nas_bridge\README.md](C:/Users/darkh/Projects/ops-cure/nas_bridge/README.md)
 
-Typical local start:
+Typical local run:
 
 ```bash
 cd nas_bridge
@@ -285,20 +253,20 @@ python -m pip install -r requirements.txt
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8080
 ```
 
-Typical Docker start:
+Typical Docker run:
 
 ```bash
 cd nas_bridge
 docker compose up --build -d
 ```
 
-### 2. Start the Launcher on Windows
+### 2. Start the orchestration runtime
 
-See the launcher-specific guide:
+See:
 
 - [C:\Users\darkh\Projects\ops-cure\pc_launcher\README.md](C:/Users/darkh/Projects/ops-cure/pc_launcher/README.md)
 
-Typical local start:
+Typical local run:
 
 ```bash
 cd pc_launcher
@@ -306,9 +274,7 @@ python -m pip install -r requirements.txt
 python launcher.py daemon --projects-dir .\projects
 ```
 
-If no launcher is registered, `/project start` will now tell you to start the PC launcher first instead of showing a misleading profile error.
-
-### 3. Start a Session from Discord
+### 3. Use the current orchestration behavior
 
 Typical command:
 
@@ -316,9 +282,7 @@ Typical command:
 /project start target:MyProject
 ```
 
-If the default `sample` profile is registered, `profile` can be omitted.
-
-Other useful commands:
+Other orchestration commands:
 
 - `/project find query:<name>`
 - `/project status`
@@ -331,48 +295,27 @@ Other useful commands:
 - `/verify run mode:smoke`
 - `/verify latest`
 
-## Verification Lane
+### 4. Use the non-workflow behaviors
 
-The verifier role exists to keep execution evidence separate from implementation.
+Behavior-specific commands exist alongside orchestration.
 
-Expected outputs from a verification run include:
+Examples:
 
-- `stdout.log`
-- `stderr.log`
-- `stdout.bin`
-- `stderr.bin`
-- `result.json`
-- screenshots such as `desktop.png`
-
-The intended flow is:
-
-```text
-planner -> coder -> verifier -> reviewer
-```
-
-This reduces the amount of runtime capture work done directly by the coder and gives the reviewer concrete evidence to inspect.
-
-## Current Design Direction
-
-The framework is currently converging on these rules:
-
-- bridge database and task events are authoritative
-- markdown files are rebuildable projections
-- thread text is rendered from structured internal events
-- self-claim is preferred over excessive push-style handoff
-- `planner` owns interpretation
-- `curator` owns flow hygiene and projection hygiene
-- `reviewer` owns decision, not implementation
-- `verifier` owns execution evidence
+- `/chat start`
+- `/chat state`
+- `/ops start`
+- `/ops state`
 
 ## Notes
 
-- The current sample profile uses Claude locally because that CLI is confirmed working in this Windows environment.
-- Verification commands in the sample profile are still generic placeholders until replaced with project-specific scripts.
-- Existing session artifacts under project `_discord_sessions/` folders are useful for debugging, but they should never be treated as canonical scheduler state.
+- The current sample workflow runtime uses Claude locally because that CLI is confirmed working in this Windows environment.
+- `pc_launcher` should be thought of as an orchestration runtime package, not a universal runtime for every behavior.
+- Existing `_discord_sessions/` markdown files are still useful for debugging orchestration runs, but they are not generic kernel truth.
 
 ## Additional Documentation
 
 - Architecture guide: [docs/architecture.md](docs/architecture.md)
+- Generic kernel notes: [docs/generic-kernel.md](docs/generic-kernel.md)
+- Guardrails and checklists: [docs/checklists.md](docs/checklists.md)
 - Bridge details: [C:\Users\darkh\Projects\ops-cure\nas_bridge\README.md](C:/Users/darkh/Projects/ops-cure/nas_bridge/README.md)
 - Launcher details: [C:\Users\darkh\Projects\ops-cure\pc_launcher\README.md](C:/Users/darkh/Projects/ops-cure/pc_launcher/README.md)
