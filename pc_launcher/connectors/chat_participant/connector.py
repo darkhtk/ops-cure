@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 
 from .bridge import ChatParticipantBridge
@@ -15,6 +16,7 @@ class ChatParticipantConfig:
     default_thread_id: str | None = None
     allow_unprompted: bool = True
     delta_limit: int = 20
+    progress_notice_delay_seconds: float = 3.0
 
 
 @dataclass(slots=True)
@@ -24,6 +26,7 @@ class ChatSyncResult:
     reason: str
     replied_message_id: str | None = None
     seen_message_id: str | None = None
+    progress_message_id: str | None = None
 
 
 class ChatParticipantConnector:
@@ -118,7 +121,11 @@ class ChatParticipantConnector:
             participants=list(delta.get("participants") or actors.get("actors") or []),
             recent_messages=messages,
         )
-        reply = self.runtime.generate_reply(context)
+        reply, progress_message_id = self._generate_reply_with_progress(
+            context=context,
+            thread_id=room_thread_id,
+            target_message=target_message,
+        )
 
         self.state_store.set_cursor(
             actor_name=self.config.actor_name,
@@ -131,6 +138,7 @@ class ChatParticipantConnector:
                 thread_id=room_thread_id,
                 reason="runtime_returned_no_reply",
                 seen_message_id=latest_seen_id,
+                progress_message_id=progress_message_id,
             )
 
         submitted = self.bridge.submit_chat_message(
@@ -146,7 +154,48 @@ class ChatParticipantConnector:
             reason="reply_submitted",
             replied_message_id=replied_message_id,
             seen_message_id=latest_seen_id,
+            progress_message_id=progress_message_id,
         )
+
+    def _generate_reply_with_progress(
+        self,
+        *,
+        context: ReplyContext,
+        thread_id: str,
+        target_message: dict[str, object],
+    ):
+        reply_holder: dict[str, object] = {}
+        error_holder: dict[str, BaseException] = {}
+        progress_message_id: str | None = None
+
+        def worker() -> None:
+            try:
+                reply_holder["reply"] = self.runtime.generate_reply(context)
+            except BaseException as exc:  # pragma: no cover - exercised through caller path
+                error_holder["error"] = exc
+
+        worker_thread = threading.Thread(target=worker, daemon=True)
+        worker_thread.start()
+        worker_thread.join(timeout=max(0.0, float(self.config.progress_notice_delay_seconds)))
+
+        if worker_thread.is_alive():
+            progress_message_id = self._submit_progress_notice(
+                thread_id=thread_id,
+                target_message=target_message,
+            )
+
+        worker_thread.join()
+
+        if "error" in error_holder:
+            if progress_message_id is not None:
+                self._submit_failure_notice(
+                    thread_id=thread_id,
+                    target_message=target_message,
+                    error=error_holder["error"],
+                )
+            raise error_holder["error"]
+
+        return reply_holder.get("reply"), progress_message_id
 
     def _select_target_message(self, *, messages: list[dict[str, object]]) -> dict[str, object] | None:
         for message in reversed(messages):
@@ -180,3 +229,48 @@ class ChatParticipantConnector:
             or lowered.startswith(f"{actor}:")
             or f"[{actor}]" in lowered
         )
+
+    def _submit_progress_notice(self, *, thread_id: str, target_message: dict[str, object]) -> str:
+        submitted = self.bridge.submit_chat_message(
+            thread_id=thread_id,
+            actor_name=self.config.actor_name,
+            actor_kind=self.config.actor_kind,
+            content=self._build_progress_notice(target_message=target_message),
+        )
+        return str(submitted["message"]["id"])
+
+    def _submit_failure_notice(
+        self,
+        *,
+        thread_id: str,
+        target_message: dict[str, object],
+        error: BaseException,
+    ) -> None:
+        self.bridge.submit_chat_message(
+            thread_id=thread_id,
+            actor_name=self.config.actor_name,
+            actor_kind=self.config.actor_kind,
+            content=self._build_failure_notice(target_message=target_message, error=error),
+        )
+
+    def _build_progress_notice(self, *, target_message: dict[str, object]) -> str:
+        content = str(target_message.get("content") or "")
+        if self._looks_like_korean(content):
+            return "확인했다. 지금 바로 확인하고 진행 중이다. 끝나면 여기 보고하겠다."
+        return "I saw the request and I'm working on it now. I'll report back here when I have a concrete result."
+
+    def _build_failure_notice(
+        self,
+        *,
+        target_message: dict[str, object],
+        error: BaseException,
+    ) -> str:
+        detail = " ".join(str(error).split()) or error.__class__.__name__
+        detail = detail[:200]
+        content = str(target_message.get("content") or "")
+        if self._looks_like_korean(content):
+            return f"작업을 진행하다가 오류가 났다: {detail}"
+        return f"I hit an error while working on it: {detail}"
+
+    def _looks_like_korean(self, content: str) -> bool:
+        return any("\uac00" <= char <= "\ud7a3" for char in content)

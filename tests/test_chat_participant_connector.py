@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from conftest import FakeThreadManager, NAS_BRIDGE_ROOT, OPS_CURE_ROOT
@@ -18,6 +19,20 @@ class FakeChatParticipantRuntime:
         self.calls.append(context)
         latest = context.recent_messages[-1]["content"]
         return ReplyResult(content=f"{context.actor_name} reply: {latest}")
+
+
+class SlowFakeChatParticipantRuntime:
+    def __init__(self, *, delay_seconds: float) -> None:
+        self.delay_seconds = delay_seconds
+        self.calls = []
+
+    def generate_reply(self, context):
+        from pc_launcher.connectors.chat_participant.runtime import ReplyResult
+
+        self.calls.append(context)
+        time.sleep(self.delay_seconds)
+        latest = context.recent_messages[-1]["content"]
+        return ReplyResult(content=f"{context.actor_name} final: {latest}")
 
 
 class ServiceBackedChatBridge:
@@ -276,6 +291,93 @@ def test_chat_participant_connector_can_still_run_targeted_only(tmp_path, monkey
     assert result.status == "skipped"
     assert result.reason == "not_addressed_to_actor"
     assert len(runtime.calls) == 0
+
+
+def test_chat_participant_connector_posts_progress_notice_for_slow_runtime(tmp_path, monkeypatch):
+    if str(NAS_BRIDGE_ROOT) not in sys.path:
+        sys.path.insert(0, str(NAS_BRIDGE_ROOT))
+    if str(OPS_CURE_ROOT) not in sys.path:
+        sys.path.insert(0, str(OPS_CURE_ROOT))
+
+    monkeypatch.setenv("BRIDGE_SHARED_AUTH_TOKEN", "test-token")
+    monkeypatch.setenv("BRIDGE_DISABLE_DISCORD", "true")
+    monkeypatch.setenv("BRIDGE_DATABASE_URL", f"sqlite:///{(tmp_path / 'bridge.db').as_posix()}")
+
+    for module_name in list(sys.modules):
+        if module_name == "app" or module_name.startswith("app."):
+            del sys.modules[module_name]
+
+    import app.config as config
+
+    config.get_settings.cache_clear()
+
+    import app.db as db
+    import app.behaviors.chat.kernel_binding as chat_kernel_binding
+    import app.behaviors.chat.service as chat_service_module
+    import app.kernel.events as events_module
+    import app.kernel.actors as actors_module
+    import app.kernel.spaces as spaces_module
+    from pc_launcher.connectors.chat_participant import (
+        ChatParticipantConfig,
+        ChatParticipantConnector,
+        InMemoryChatParticipantStateStore,
+    )
+
+    db.init_db()
+
+    thread_manager = FakeThreadManager()
+    chat_service = chat_service_module.ChatBehaviorService(thread_manager=thread_manager)
+    kernel_binding = chat_kernel_binding.build_chat_kernel_binding()
+    space_service = spaces_module.SpaceService(providers=[kernel_binding.space_provider])
+    actor_service = actors_module.ActorService(providers=[kernel_binding.actor_provider])
+    event_service = events_module.EventService(providers=[kernel_binding.event_provider])
+
+    async def scenario():
+        return await chat_service.create_chat_thread(
+            guild_id="guild-1",
+            parent_channel_id="parent-1",
+            title="codex-chat: slow runtime",
+            topic="progress notice",
+            created_by="operator",
+        )
+
+    created = asyncio.run(scenario())
+    thread_id = created.discord_thread_id
+    chat_service.record_message(
+        thread_id=thread_id,
+        actor_name="operator",
+        content="Please investigate the issue and report back.",
+    )
+
+    bridge = ServiceBackedChatBridge(
+        chat_service=chat_service,
+        space_service=space_service,
+        actor_service=actor_service,
+    )
+    runtime = SlowFakeChatParticipantRuntime(delay_seconds=0.05)
+    state_store = InMemoryChatParticipantStateStore()
+    connector = ChatParticipantConnector(
+        bridge=bridge,
+        runtime=runtime,
+        state_store=state_store,
+        config=ChatParticipantConfig(
+            actor_name="codex-b",
+            machine_label="pc-b",
+            progress_notice_delay_seconds=0.01,
+        ),
+    )
+
+    result = connector.sync_once(thread_id=thread_id)
+
+    assert result.status == "replied"
+    assert result.progress_message_id is not None
+    assert len(runtime.calls) == 1
+
+    chat_events = event_service.get_events_for_space(space_id=created.id, limit=10)
+    assert chat_events is not None
+    assert [event.actor_name for event in chat_events.events] == ["operator", "codex-b", "codex-b"]
+    assert "working on it now" in chat_events.events[1].content
+    assert chat_events.events[2].content == "codex-b final: Please investigate the issue and report back."
 
 
 def test_json_state_store_persists_cursor(tmp_path):
