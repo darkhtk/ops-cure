@@ -45,36 +45,30 @@ async def _stream_space_events(
         yield _encode_sse("reset", reset.model_dump(mode="json"))
         return
 
-    latest = services.event_service.get_events_for_space(space_id=space_id, limit=1)
-    latest_cursor = latest.next_cursor if latest is not None else None
+    subscription = services.subscription_broker.subscribe(
+        space_id=space_id,
+        after_cursor=after_cursor,
+        kinds=kinds,
+        subscriber_id=subscriber_id,
+    )
+    if subscription.reset_reason is not None:
+        reset = EventStreamResetResponse(space_id=space_id, reason=subscription.reset_reason)
+        subscription.close()
+        yield _encode_sse("reset", reset.model_dump(mode="json"))
+        return
+
+    latest_cursor = subscription.latest_cursor
+    if latest_cursor is None:
+        latest = services.event_service.get_events_for_space(space_id=space_id, limit=1)
+        latest_cursor = latest.next_cursor if latest is not None else None
     open_payload = EventStreamOpenResponse(
         space_id=space_id,
-        accepted_after_cursor=after_cursor,
+        accepted_after_cursor=subscription.accepted_after_cursor,
         latest_cursor=latest_cursor,
     )
     yield _encode_sse("open", open_payload.model_dump(mode="json"))
 
     cursor = after_cursor
-    replay = services.event_service.get_events_for_space(
-        space_id=space_id,
-        after_cursor=cursor,
-        limit=limit,
-        kinds=kinds,
-    )
-    if replay is None:
-        reset = EventStreamResetResponse(space_id=space_id, reason="space_not_found")
-        yield _encode_sse("reset", reset.model_dump(mode="json"))
-        return
-    for item in replay.items:
-        cursor = item.cursor
-        yield _encode_sse("event", item.model_dump(mode="json"))
-
-    subscription = services.subscription_broker.subscribe(
-        space_id=space_id,
-        after_cursor=cursor,
-        kinds=kinds,
-        subscriber_id=subscriber_id,
-    )
     try:
         while True:
             next_item = await subscription.next_event(timeout_seconds=15.0)

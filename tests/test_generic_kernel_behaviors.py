@@ -205,8 +205,8 @@ def test_generic_kernel_supports_workflow_chat_and_ops_without_agents(tmp_path, 
     chat_events = event_service.get_events_for_thread(thread_id=chat_row.discord_thread_id, limit=5)
     ops_events = event_service.get_events_for_thread(thread_id=ops_row.discord_thread_id, limit=5)
     workflow_events = event_service.get_events_for_thread(thread_id="thread-workflow", limit=5)
-    assert chat_events is not None and [event.actor_name for event in chat_events.events] == ["bob", "alice"]
-    assert ops_events is not None and [event.kind for event in ops_events.events] == ["resolve", "issue"]
+    assert chat_events is not None and [event.actor_name for event in chat_events.events] == ["alice", "bob"]
+    assert ops_events is not None and [event.kind for event in ops_events.events] == ["issue", "resolve"]
     assert workflow_events is not None and workflow_events.events[0].content == "workflow event one"
 
     assert ops_space.metadata["issue_count"] == 1

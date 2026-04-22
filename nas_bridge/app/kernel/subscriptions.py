@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from threading import RLock
 
 from .events import EventEnvelope, SubscriptionPresenceSummary
 
@@ -20,6 +22,9 @@ class BrokerSubscription:
     kinds: frozenset[str] = field(default_factory=frozenset)
     subscriber_id: str | None = None
     queue: asyncio.Queue[EventEnvelope] = field(default_factory=asyncio.Queue)
+    accepted_after_cursor: str | None = None
+    latest_cursor: str | None = None
+    reset_reason: str | None = None
 
     async def next_event(self, *, timeout_seconds: float | None = None) -> EventEnvelope | None:
         self.broker.touch(subscriber_id=self.subscriber_id, space_id=self.space_id)
@@ -38,13 +43,19 @@ class BrokerSubscription:
 
 
 class InProcessSubscriptionBroker:
-    def __init__(self, *, presence_ttl_seconds: int = 60) -> None:
+    def __init__(self, *, presence_ttl_seconds: int = 60, backlog_limit: int = 1024) -> None:
         self.presence_ttl_seconds = presence_ttl_seconds
+        self.backlog_limit = backlog_limit
+        self._lock = RLock()
         self._subscriptions: dict[str, dict[str, BrokerSubscription]] = {}
+        self._backlog: dict[str, deque[EventEnvelope]] = {}
         self._presence: dict[tuple[str, str], SubscriptionPresenceSummary] = {}
 
     def publish(self, *, space_id: str, item: EventEnvelope) -> None:
-        listeners = tuple(self._subscriptions.get(space_id, {}).values())
+        with self._lock:
+            backlog = self._backlog.setdefault(space_id, deque(maxlen=self.backlog_limit))
+            backlog.append(item)
+            listeners = tuple(self._subscriptions.get(space_id, {}).values())
         for subscription in listeners:
             if subscription.kinds and item.event.kind not in subscription.kinds:
                 continue
@@ -59,25 +70,42 @@ class InProcessSubscriptionBroker:
         kinds: list[str] | None = None,
         subscriber_id: str | None = None,
     ) -> BrokerSubscription:
-        del after_cursor
         subscription = BrokerSubscription(
             broker=self,
             subscription_id=str(uuid.uuid4()),
             space_id=space_id,
             kinds=frozenset(kinds or []),
             subscriber_id=subscriber_id,
+            accepted_after_cursor=after_cursor,
         )
-        self._subscriptions.setdefault(space_id, {})[subscription.subscription_id] = subscription
+        with self._lock:
+            self._subscriptions.setdefault(space_id, {})[subscription.subscription_id] = subscription
+            backlog = list(self._backlog.get(space_id, ()))
+            subscription.latest_cursor = backlog[-1].cursor if backlog else None
+            if after_cursor and backlog:
+                oldest_cursor = backlog[0].cursor
+                if after_cursor < oldest_cursor:
+                    subscription.reset_reason = "cursor_out_of_window"
+                else:
+                    replay_items = [
+                        item
+                        for item in backlog
+                        if item.cursor > after_cursor
+                        and (not subscription.kinds or item.event.kind in subscription.kinds)
+                    ]
+                    for item in replay_items:
+                        subscription.queue.put_nowait(item)
         self.touch(subscriber_id=subscriber_id, space_id=space_id)
         return subscription
 
     def unsubscribe(self, *, subscription_id: str) -> None:
-        for space_id, subscriptions in list(self._subscriptions.items()):
-            if subscription_id in subscriptions:
-                del subscriptions[subscription_id]
-                if not subscriptions:
-                    del self._subscriptions[space_id]
-                return
+        with self._lock:
+            for space_id, subscriptions in list(self._subscriptions.items()):
+                if subscription_id in subscriptions:
+                    del subscriptions[subscription_id]
+                    if not subscriptions:
+                        del self._subscriptions[space_id]
+                    return
 
     def touch(self, *, subscriber_id: str | None, space_id: str) -> None:
         if not subscriber_id:

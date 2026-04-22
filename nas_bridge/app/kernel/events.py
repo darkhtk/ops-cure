@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from datetime import datetime
+from datetime import datetime, timezone
 
 from pydantic import BaseModel, Field
 
@@ -11,6 +11,10 @@ from .contracts import EventProvider
 
 
 def encode_event_cursor(*, created_at: datetime, event_id: str) -> str:
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=timezone.utc)
+    else:
+        created_at = created_at.astimezone(timezone.utc)
     micros = int(created_at.timestamp() * 1_000_000)
     return f"{micros:020d}:{event_id}"
 
@@ -122,31 +126,24 @@ def paginate_event_envelopes(
     limit: int = 20,
     kinds: list[str] | None = None,
 ) -> EventDeltaResponse:
+    """Return a stable old-to-new event page for both snapshot and resume reads."""
     filtered_items = list(items)
     if kinds:
         allowed = set(kinds)
         filtered_items = [item for item in filtered_items if item.event.kind in allowed]
 
-    if after_cursor is not None:
+    if after_cursor is None:
+        page = filtered_items[-limit:] if limit > 0 else filtered_items
+        has_more = len(filtered_items) > len(page)
+    else:
         unread = [item for item in filtered_items if item.cursor > after_cursor]
         page = unread[:limit]
         has_more = len(unread) > limit
-        next_cursor = page[-1].cursor if page else after_cursor
-        return EventDeltaResponse(
-            space_id=space_id,
-            domain_type=domain_type,
-            items=page,
-            next_cursor=next_cursor,
-            has_more=has_more,
-        )
-
-    latest_window = filtered_items[-limit:] if limit > 0 else filtered_items
-    latest_window = list(reversed(latest_window))
-    next_cursor = latest_window[0].cursor if latest_window else None
+    next_cursor = page[-1].cursor if page else after_cursor
     return EventDeltaResponse(
         space_id=space_id,
         domain_type=domain_type,
-        items=latest_window,
+        items=page,
         next_cursor=next_cursor,
-        has_more=len(filtered_items) > len(latest_window),
+        has_more=has_more,
     )

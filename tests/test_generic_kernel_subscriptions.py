@@ -149,11 +149,11 @@ def test_generic_kernel_delta_and_stream_resume_without_domain_leakage(tmp_path,
 
     initial = event_service.get_events_for_space(space_id=created.id, limit=10)
     assert initial is not None
-    assert [event.actor_name for event in initial.events] == ["bob", "alice"]
+    assert [event.actor_name for event in initial.events] == ["alice", "bob"]
     latest_cursor = initial.next_cursor
     assert latest_cursor is not None
 
-    first_cursor = initial.items[-1].cursor
+    first_cursor = initial.items[0].cursor
     resumed = event_service.get_events_for_space(
         space_id=created.id,
         after_cursor=first_cursor,
@@ -206,6 +206,54 @@ def test_generic_kernel_delta_and_stream_resume_without_domain_leakage(tmp_path,
         )
 
     asyncio.run(stream_and_publish())
+
+    async def stream_without_handoff_loss():
+        race_thread = await chat_service.create_chat_thread(
+            guild_id="guild-1",
+            parent_channel_id="parent-1",
+            title="codex-chat: race smoke",
+            topic="handoff race",
+            created_by="alice",
+        )
+        chat_service.record_message(
+            thread_id=race_thread.discord_thread_id,
+            actor_name="alice",
+            content="race one",
+        )
+        chat_service.record_message(
+            thread_id=race_thread.discord_thread_id,
+            actor_name="bob",
+            content="race two",
+        )
+        race_initial = event_service.get_events_for_space(space_id=race_thread.id, limit=10)
+        assert race_initial is not None
+        race_cursor = race_initial.items[0].cursor
+
+        generator = _stream_space_events(
+            services=services,
+            space_id=race_thread.id,
+            after_cursor=race_cursor,
+            limit=10,
+            kinds=["message"],
+            subscriber_id="pc-codex-b",
+        )
+        open_chunk = await anext(generator)
+        assert "event: open" in open_chunk
+
+        chat_service.record_message(
+            thread_id=race_thread.discord_thread_id,
+            actor_name="alice",
+            content="race handoff",
+        )
+
+        first_event_chunk = await anext(generator)
+        second_event_chunk = await anext(generator)
+        await generator.aclose()
+
+        assert "race two" in first_event_chunk
+        assert "race handoff" in second_event_chunk
+
+    asyncio.run(stream_without_handoff_loss())
 
     latest = event_service.get_events_for_space(
         space_id=created.id,
