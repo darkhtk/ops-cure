@@ -70,6 +70,32 @@ def build_manifest_for_profile(schemas, *, profile_name: str, project_name: str 
     )
 
 
+def build_manifest_with_agents(schemas, *, agent_specs, profile_name: str = "UlalaCheese", project_name: str = "UlalaCheese"):
+    return schemas.ProjectManifest(
+        profile_name=profile_name,
+        default_target_name=project_name,
+        default_workdir=fr"C:\Users\darkh\Projects\{project_name}",
+        guild_id="guild-1",
+        parent_channel_id="parent-1",
+        allowed_user_ids=["user-1"],
+        agents=[
+            schemas.AgentManifest(
+                name=spec["name"],
+                cli=spec.get("cli", "claude"),
+                role=spec["role"],
+                prompt_file=spec["prompt_file"],
+                default=spec.get("default", False),
+            )
+            for spec in agent_specs
+        ],
+        finder=schemas.FinderManifest(
+            roots=[r"C:\Users\darkh\Projects"],
+            analyze_agent="planner",
+            prompt_file="prompts/finder.md",
+        ),
+    )
+
+
 async def _start_session(
     app_env,
     *,
@@ -203,6 +229,194 @@ def test_recovery_service_handles_naive_heartbeat_timestamps(app_env):
         )
         assert refreshed is not None
         assert refreshed.worker_id is None
+
+
+def test_partial_attachment_survives_stalled_start_and_stays_launching(app_env):
+    summary = __import__("asyncio").run(_start_session(app_env))
+
+    with app_env.db.session_scope() as db:
+        from app.models import AgentModel, JobModel, SessionModel
+
+        session_row = db.scalar(select(SessionModel).where(SessionModel.id == summary.id))
+        assert session_row is not None
+        session_row.created_at = datetime.now(timezone.utc) - timedelta(minutes=10)
+
+        planner = db.scalar(
+            select(AgentModel)
+            .where(AgentModel.session_id == summary.id)
+            .where(AgentModel.agent_name == "planner"),
+        )
+        assert planner is not None
+        planner.last_heartbeat_at = datetime.now(timezone.utc)
+        planner.status = "busy"
+
+        db.add(
+            JobModel(
+                session_id=summary.id,
+                agent_name="planner",
+                job_type="orchestration",
+                user_id="user-1",
+                input_text="startup orchestration",
+                status="in_progress",
+            ),
+        )
+
+    __import__("asyncio").run(
+        app_env.recovery_service.recover_session(
+            session_id=summary.id,
+            reason="partial-attachment-test",
+        ),
+    )
+
+    refreshed = __import__("asyncio").run(app_env.session_service.get_session_summary(summary.id))
+    assert refreshed.status == "launching"
+    assert refreshed.pause_reason is None
+
+    rendered = __import__("asyncio").run(app_env.session_service.render_session_status_text(summary.id))
+    assert "State: `launching`" in rendered
+    assert "Workers: attached=1/2, active=1" in rendered
+    assert "work has started; keep watching attachment and worker registration" in rendered
+
+
+def test_session_summary_calls_out_partial_attachment_for_planner_and_curator(app_env):
+    manifest = build_manifest_with_agents(
+        app_env.schemas,
+        agent_specs=[
+            {"name": "planner", "role": "planning", "prompt_file": "prompts/planner.md"},
+            {"name": "curator", "role": "coordination", "prompt_file": "prompts/curator.md"},
+            {"name": "coder", "role": "coding", "prompt_file": "prompts/coder.md", "default": True},
+        ],
+    )
+    app_env.registry.register_projects("launcher-1", "host-1", [manifest])
+    summary = __import__("asyncio").run(
+        app_env.session_service.create_session_from_project(
+            project_name="UlalaCheese",
+            target_project_name="UlalaCheese",
+            preset="UlalaCheese",
+            user_id="user-1",
+            guild_id="guild-1",
+            parent_channel_id="parent-1",
+        ),
+    )
+
+    __import__("asyncio").run(
+        app_env.session_service.register_worker(
+            session_id=summary.id,
+            agent_name="planner",
+            worker_id="worker-planner",
+            pid_hint=1001,
+        ),
+    )
+
+    with app_env.db.session_scope() as db:
+        from app.models import JobModel
+
+        db.add(
+            JobModel(
+                session_id=summary.id,
+                agent_name="planner",
+                job_type="orchestration",
+                user_id="user-1",
+                input_text="plan startup work",
+                status="in_progress",
+            ),
+        )
+
+    with app_env.db.session_scope() as db:
+        from app.models import SessionModel
+
+        session_row = db.scalar(select(SessionModel).where(SessionModel.id == summary.id))
+        assert session_row is not None
+        planner_summary = app_env.session_service._build_session_summary(
+            db,
+            session_row=session_row,
+            current_agent="planner",
+        )
+
+    assert "- Worker attachment: 1/3 attached" in planner_summary
+    assert "Startup note: work may already be running, but worker attachment is still incomplete (1/3, active jobs=1)" in planner_summary
+
+
+def test_curator_can_claim_partial_attachment_sweep_without_other_busy_agents(app_env):
+    manifest = build_manifest_with_agents(
+        app_env.schemas,
+        agent_specs=[
+            {"name": "planner", "role": "planning", "prompt_file": "prompts/planner.md"},
+            {"name": "curator", "role": "coordination", "prompt_file": "prompts/curator.md"},
+            {"name": "coder", "role": "coding", "prompt_file": "prompts/coder.md", "default": True},
+        ],
+    )
+    app_env.registry.register_projects("launcher-1", "host-1", [manifest])
+    summary = __import__("asyncio").run(
+        app_env.session_service.create_session_from_project(
+            project_name="UlalaCheese",
+            target_project_name="UlalaCheese",
+            preset="UlalaCheese",
+            user_id="user-1",
+            guild_id="guild-1",
+            parent_channel_id="parent-1",
+        ),
+    )
+
+    __import__("asyncio").run(
+        app_env.session_service.register_worker(
+            session_id=summary.id,
+            agent_name="planner",
+            worker_id="worker-planner",
+            pid_hint=1001,
+        ),
+    )
+    __import__("asyncio").run(
+        app_env.session_service.register_worker(
+            session_id=summary.id,
+            agent_name="curator",
+            worker_id="worker-curator",
+            pid_hint=1002,
+        ),
+    )
+
+    with app_env.db.session_scope() as db:
+        from app.models import AgentModel, SessionModel
+
+        session_row = db.scalar(select(SessionModel).where(SessionModel.id == summary.id))
+        assert session_row is not None
+        session_row.created_at = datetime.now(timezone.utc) - timedelta(minutes=2)
+        session_row.status = "launching"
+
+        planner = db.scalar(
+            select(AgentModel)
+            .where(AgentModel.session_id == summary.id)
+            .where(AgentModel.agent_name == "planner"),
+        )
+        curator = db.scalar(
+            select(AgentModel)
+            .where(AgentModel.session_id == summary.id)
+            .where(AgentModel.agent_name == "curator"),
+        )
+        coder = db.scalar(
+            select(AgentModel)
+            .where(AgentModel.session_id == summary.id)
+            .where(AgentModel.agent_name == "coder"),
+        )
+        assert planner is not None and curator is not None and coder is not None
+        planner.status = "idle"
+        curator.status = "idle"
+        coder.status = "starting"
+        planner.last_heartbeat_at = datetime.now(timezone.utc)
+        curator.last_heartbeat_at = datetime.now(timezone.utc)
+
+    claimed = __import__("asyncio").run(
+        app_env.session_service.claim_next_job(
+            session_id=summary.id,
+            agent_name="curator",
+            worker_id="worker-curator",
+        ),
+    )
+
+    assert claimed is not None
+    assert claimed.job_type == "curation_sweep"
+    assert "partial worker attachment" in claimed.input_text
+    assert "Attached workers: 2/3" in claimed.input_text
 
 
 def test_start_prefers_requested_target_over_profile_default(app_env, monkeypatch):

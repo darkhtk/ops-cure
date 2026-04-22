@@ -158,6 +158,9 @@ class RecoveryService:
                 return
 
             self._clear_stale_workers(session_row.agents)
+            now = utcnow()
+            attached_workers = self._attached_agent_count(session_row.agents, now=now)
+            total_workers = len(session_row.agents)
 
             if self._is_stalled_start(session_row):
                 cleanup_thread_id, cleanup_reason = self._fail_stalled_start(
@@ -175,15 +178,6 @@ class RecoveryService:
                         session_row.status = "awaiting_launcher"
                     return
 
-                if any(agent.worker_id is None for agent in session_row.agents):
-                    session_row.status = "waiting_for_workers"
-                    for agent in session_row.agents:
-                        agent.desired_status = "ready"
-                        if agent.worker_id is None:
-                            agent.status = "starting"
-                    self._complete_operations(db, session_row.id, "start")
-                    return
-
                 pending_jobs = list(
                     db.scalars(
                         select(JobModel)
@@ -191,6 +185,18 @@ class RecoveryService:
                         .where(JobModel.status.in_(["pending", "in_progress"])),
                     ),
                 )
+
+                if attached_workers < total_workers:
+                    session_row.status = "launching" if attached_workers > 0 else "waiting_for_workers"
+                    for agent in session_row.agents:
+                        agent.desired_status = "ready"
+                        if not self._agent_has_attachment_signal(agent, now=now):
+                            agent.status = "starting"
+                        elif agent.status in {"starting", "offline"}:
+                            agent.status = "idle"
+                    self._complete_operations(db, session_row.id, "start")
+                    return
+
                 for agent in session_row.agents:
                     agent.desired_status = "ready"
                     if agent.status == "paused":
@@ -219,6 +225,20 @@ class RecoveryService:
                 agent.pid_hint = None
                 if agent.status != "busy":
                     agent.status = "starting"
+
+    def _agent_has_attachment_signal(self, agent: AgentModel, *, now: datetime | None = None) -> bool:
+        if agent.worker_id:
+            return True
+        heartbeat_at = ensure_aware_utc(agent.last_heartbeat_at)
+        if heartbeat_at is None:
+            return False
+        effective_now = now or utcnow()
+        return heartbeat_at + self.worker_stale_after >= effective_now
+
+    def _attached_agent_count(self, agents: list[AgentModel], *, now: datetime | None = None) -> int:
+        effective_now = now or utcnow()
+        return sum(1 for agent in agents if self._agent_has_attachment_signal(agent, now=effective_now))
+
     def _is_stalled_start(self, session_row: SessionModel) -> bool:
         if session_row.status not in STARTUP_SESSION_STATUSES:
             return False
@@ -227,9 +247,10 @@ class RecoveryService:
         created_at = ensure_aware_utc(session_row.created_at)
         if created_at is None:
             return False
-        if created_at + self.stalled_start_timeout > utcnow():
+        now = utcnow()
+        if created_at + self.stalled_start_timeout > now:
             return False
-        if any(agent.worker_id for agent in session_row.agents):
+        if self._attached_agent_count(session_row.agents, now=now) > 0:
             return False
         return True
 
@@ -240,17 +261,36 @@ class RecoveryService:
         session_row: SessionModel,
         reason: str,
     ) -> tuple[str, str]:
+        workers_were_seen = any(agent.last_heartbeat_at is not None for agent in session_row.agents)
+        transcript_content = (
+            f"Startup stalled after worker heartbeats were seen, but no workers remained attached "
+            f"after {int(self.stalled_start_timeout.total_seconds())} seconds. "
+            f"Session marked failed_start during {reason} recovery."
+            if workers_were_seen
+            else (
+                f"Startup timed out with no workers attached after {int(self.stalled_start_timeout.total_seconds())} seconds. "
+                f"Session marked failed_start during {reason} recovery."
+            )
+        )
         session_row.status = "failed_start"
         session_row.desired_status = "closed"
         session_row.execution_state = "stalled_start"
         session_row.closed_at = utcnow()
-        session_row.pause_reason = "Startup timed out before any worker attached."
+        session_row.pause_reason = (
+            "Startup stalled after worker heartbeats were seen but attachment did not finish."
+            if workers_were_seen
+            else "Startup timed out before any worker attached."
+        )
         for agent in session_row.agents:
             agent.worker_id = None
             agent.pid_hint = None
             agent.status = "offline"
             agent.desired_status = "closed"
-            agent.paused_reason = "Startup timed out."
+            agent.paused_reason = (
+                "Startup stalled before attachment finished."
+                if workers_were_seen
+                else "Startup timed out."
+            )
         for job in db.scalars(
             select(JobModel)
             .where(JobModel.session_id == session_row.id)
@@ -265,10 +305,7 @@ class RecoveryService:
             session_id=session_row.id,
             direction="system",
             actor="bridge",
-            content=(
-                f"Startup timed out with no workers attached after {int(self.stalled_start_timeout.total_seconds())} seconds. "
-                f"Session marked failed_start during {reason} recovery."
-            ),
+            content=transcript_content,
         )
         self._fail_operations(
             db,

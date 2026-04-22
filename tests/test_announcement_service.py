@@ -17,10 +17,10 @@ def test_start_creates_status_card(app_env):
         message = app_env.thread_manager.message_store[session_row.status_message_id]
 
     assert message[0] == summary.discord_thread_id
-    assert "**Opscure Status**" in message[1]
-    assert "Target: `UlalaCheese`" in message[1]
-    assert "Profile: `UlalaCheese`" in message[1]
-    assert "State: `waiting_for_workers`" in message[1]
+    assert "Opscure 상태" in message[1]
+    assert "대상 `UlalaCheese`" in message[1]
+    assert "프로필 `UlalaCheese`" in message[1]
+    assert "상태: `waiting_for_workers`" in message[1]
 
 
 def test_register_worker_updates_status_card(app_env):
@@ -52,9 +52,9 @@ def test_register_worker_updates_status_card(app_env):
         message = app_env.thread_manager.message_store[session_row.status_message_id]
 
     assert app_env.thread_manager.edited_messages
-    assert "State: `ready`" in message[1]
-    assert "Workers: 2/2 attached" in message[1]
-    assert "Next: waiting for your next instruction" in message[1]
+    assert "상태: `ready`" in message[1]
+    assert "작업자 연결: attached=2/2, active=0" in message[1]
+    assert "다음 액션: waiting for your next instruction" in message[1]
 
 
 def test_render_session_status_text_uses_status_card_format(app_env):

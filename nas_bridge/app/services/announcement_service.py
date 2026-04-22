@@ -78,7 +78,6 @@ class AnnouncementService:
                 return session_row.status_message_id
             existing_message_id = session_row.status_message_id
 
-        body = self._render_status_card(snapshot)
         embed = self._build_status_embed(snapshot)
         sent: tuple[str, str] | None = None
         if existing_message_id:
@@ -164,7 +163,6 @@ class AnnouncementService:
         now = utcnow()
         attached_workers = sum(1 for agent in summary.agents if self._is_agent_attached(agent, now))
         total_agents = len(summary.agents)
-        worker_summary = f"{attached_workers}/{total_agents} attached"
         active_job_lookup = {
             row.agent_name: {
                 "task_id": row.task_id,
@@ -177,7 +175,8 @@ class AnnouncementService:
             for agent in summary.agents
             if agent.status == "busy"
         }
-        active_agent_names.update(active_job_lookup)
+        active_agent_names.update(active_job_lookup.keys())
+        worker_summary = f"attached={attached_workers}/{total_agents}, active={len(active_agent_names)}"
         active_worker_lines = tuple(
             self._render_active_worker_line(agent, active_job_lookup.get(agent.agent_name))
             for agent in sorted(summary.agents, key=lambda item: item.agent_name)
@@ -232,8 +231,19 @@ class AnnouncementService:
         if latest_verify_payload is not None:
             review_summary = f"{latest_verify_payload['mode']} -> {latest_verify_payload['status']}"
 
-        attention = self._build_attention(summary=summary, latest_verify=latest_verify_payload)
-        next_action = self._build_next_action(summary=summary, attached_workers=attached_workers, total_agents=total_agents)
+        attention = self._build_attention(
+            summary=summary,
+            latest_verify=latest_verify_payload,
+            attached_workers=attached_workers,
+            total_agents=total_agents,
+            active_jobs=active_jobs,
+        )
+        next_action = self._build_next_action(
+            summary=summary,
+            attached_workers=attached_workers,
+            total_agents=total_agents,
+            active_jobs=active_jobs,
+        )
 
         hash_payload = {
             "status": summary.status,
@@ -312,7 +322,11 @@ class AnnouncementService:
         *,
         summary: SessionSummaryResponse,
         latest_verify: dict[str, object] | None,
+        attached_workers: int,
+        total_agents: int,
+        active_jobs: int,
     ) -> str:
+        partially_attached = 0 < attached_workers < total_agents
         if summary.status == "failed_start":
             return summary.pause_reason or "startup failed before workers attached"
         if summary.pause_reason:
@@ -322,7 +336,19 @@ class AnnouncementService:
         if summary.status == "awaiting_launcher":
             return "execution plane is offline or launcher has not reconnected yet"
         if summary.status == "waiting_for_workers":
+            if partially_attached:
+                return (
+                    f"{attached_workers}/{total_agents} workers are sending heartbeats, "
+                    "but bridge attachment is still incomplete"
+                )
             return "launcher is online but workers have not all attached yet"
+        if partially_attached:
+            if active_jobs > 0:
+                return (
+                    f"{attached_workers}/{total_agents} workers are attached and work has started, "
+                    "but startup is still settling"
+                )
+            return f"{attached_workers}/{total_agents} workers are attached while the rest are still starting"
         return "none"
 
     @staticmethod
@@ -331,11 +357,19 @@ class AnnouncementService:
         summary: SessionSummaryResponse,
         attached_workers: int,
         total_agents: int,
+        active_jobs: int,
     ) -> str:
+        partially_attached = 0 < attached_workers < total_agents
         if summary.status == "awaiting_launcher":
             return "waiting for launcher reconnect"
         if summary.status == "waiting_for_workers":
+            if partially_attached:
+                return f"waiting for remaining workers to attach ({attached_workers}/{total_agents})"
             return f"waiting for workers to attach ({attached_workers}/{total_agents})"
+        if partially_attached:
+            if active_jobs > 0:
+                return "work has started; keep watching attachment and worker registration"
+            return f"waiting for remaining workers while startup continues ({attached_workers}/{total_agents})"
         if summary.status == "paused" or summary.desired_status == "paused":
             return "waiting for `/project resume`"
         if summary.status == "failed_start":
@@ -352,7 +386,10 @@ class AnnouncementService:
             return True
         if agent.last_heartbeat_at is None:
             return False
-        return (now - agent.last_heartbeat_at) <= timedelta(seconds=ATTACHED_HEARTBEAT_GRACE_SECONDS)
+        heartbeat_at = agent.last_heartbeat_at
+        if heartbeat_at.tzinfo is None:
+            heartbeat_at = heartbeat_at.replace(tzinfo=timezone.utc)
+        return (now - heartbeat_at) <= timedelta(seconds=ATTACHED_HEARTBEAT_GRACE_SECONDS)
 
     @staticmethod
     def _render_active_worker_line(agent, active_job: dict[str, str] | None = None) -> str:
@@ -406,6 +443,8 @@ class AnnouncementService:
         attention = snapshot.attention.lower()
         if snapshot.status in {"failed_start"} or "issue" in attention or "blocked" in attention:
             return discord.Color.red()
+        if "incomplete" in attention or "still settling" in attention:
+            return discord.Color.orange()
         if snapshot.active_worker_lines:
             return discord.Color.blurple()
         if snapshot.status in {"ready", "closed"}:
@@ -416,6 +455,45 @@ class AnnouncementService:
 
     @classmethod
     def _build_status_embed(cls, snapshot: SessionStatusSnapshot) -> discord.Embed:
+        workers_value = "\n".join(snapshot.active_worker_lines) if snapshot.active_worker_lines else "대기 중\n현재 활성 작업 없음"
+        if snapshot.active_worker_lines and snapshot.activity_report_line:
+            workers_value = f"{workers_value}\n{snapshot.activity_report_line}"
+
+        embed = discord.Embed(
+            title="Opscure 상태",
+            description=(
+                f"세션 `{snapshot.session_title}`\n"
+                f"대상 `{snapshot.target_project_name}`\n"
+                f"프로필 `{snapshot.profile_name}`"
+            ),
+            color=cls._status_color(snapshot),
+            timestamp=utcnow(),
+        )
+        embed.add_field(
+            name="현재 상태",
+            value=(
+                f"상태: `{snapshot.status}`\n"
+                f"희망 상태: `{snapshot.desired_status}`\n"
+                f"런처: `{snapshot.launcher_id}`\n"
+                f"작업 디렉터리: `{snapshot.workdir}`"
+            ),
+            inline=False,
+        )
+        embed.add_field(name="활성 작업자", value=workers_value, inline=False)
+        embed.add_field(
+            name="큐와 검증",
+            value=(
+                f"작업자 연결: {snapshot.worker_summary}\n"
+                f"큐: {snapshot.job_summary}\n"
+                f"검증: {snapshot.review_summary}"
+            ),
+            inline=False,
+        )
+        embed.add_field(name="주의", value=snapshot.attention or "없음", inline=False)
+        embed.add_field(name="다음 액션", value=snapshot.next_action or "없음", inline=False)
+        embed.set_footer(text="Opscure live status")
+        return embed
+
         embed = discord.Embed(
             title="Opscure 상태",
             description=(

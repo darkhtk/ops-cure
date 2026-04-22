@@ -97,8 +97,10 @@ MIN_HANDOFF_BODY_LENGTH = 40
 TERMINAL_JOB_STATES = {"completed", "failed", "cancelled"}
 READY_TASK_STATES = {"ready", "review", "verify"}
 TERMINAL_HANDOFF_STATES = {"consumed", "superseded", "failed"}
+ATTACHMENT_SIGNAL_GRACE_SECONDS = 120
 CURATION_READY_IDLE_SECONDS = 180
 CURATION_PLANNER_IMBALANCE_SECONDS = 180
+CURATION_ATTACHMENT_MISMATCH_SECONDS = 60
 CURATION_SWEEP_COOLDOWN_SECONDS = 180
 THREAD_DELTA_FETCH_LIMIT = 120
 THREAD_CURSOR_SEPARATOR = "|"
@@ -856,10 +858,11 @@ class SessionService:
             )
             previous_status = session_row.status
             agent = self._require_agent(db, session_id=session_id, agent_name=agent_name)
+            now = utcnow()
             agent.worker_id = worker_id
             agent.pid_hint = pid_hint
             agent.status = "paused" if session_row.desired_status == "paused" else "idle"
-            agent.last_heartbeat_at = utcnow()
+            agent.last_heartbeat_at = now
             agent.last_error = None
             agent.current_activity_line = None
             agent.current_activity_updated_at = None
@@ -867,11 +870,12 @@ class SessionService:
             session_row.status = "paused" if session_row.desired_status == "paused" else "launching"
             thread_id = session_row.discord_thread_id
 
-            if all(member.worker_id for member in session_row.agents):
-                session_row.status = "paused" if session_row.desired_status == "paused" else "ready"
-                if previous_status != "ready":
-                    should_send_ready = session_row.send_ready_message and session_row.desired_status != "paused"
-                    ready_message = self._format_ready_message(session_row.agents)
+            should_send_ready, ready_message = self._refresh_session_startup_state(
+                db,
+                session_row=session_row,
+                now=now,
+                previous_status=previous_status,
+            )
 
             self.transcript_service.add_entry(
                 db,
@@ -910,6 +914,7 @@ class SessionService:
                 .options(selectinload(SessionModel.agents))
                 .where(SessionModel.id == session_id),
             )
+            previous_session_status = session_row.status
             agent = self._require_agent(db, session_id=session_id, agent_name=agent_name)
             previous_status = agent.status
             agent.worker_id = worker_id
@@ -925,6 +930,13 @@ class SessionService:
                 agent.current_activity_line = None
                 agent.current_activity_updated_at = None
 
+            self._refresh_session_startup_state(
+                db,
+                session_row=session_row,
+                now=now,
+                previous_status=previous_session_status,
+            )
+
             any_busy = self._has_busy_agent(session_row.agents)
             active_job_count = int(
                 db.scalar(
@@ -937,11 +949,12 @@ class SessionService:
             )
             became_busy = previous_status != "busy" and agent.status == "busy"
             became_idle = previous_status == "busy" and agent.status != "busy"
+            startup_status_changed = previous_session_status != session_row.status
             report_due = (any_busy or active_job_count > 0) and (
                 session_row.last_announced_at is None
                 or (now - session_row.last_announced_at) >= timedelta(seconds=60)
             )
-            should_sync_status = became_busy or became_idle or report_due
+            should_sync_status = became_busy or became_idle or startup_status_changed or report_due
         self.drift_monitor.record_heartbeat(
             session_id=session_id,
             agent_name=agent_name,
@@ -2044,6 +2057,15 @@ class SessionService:
             f"- Current agent: {current_agent}",
             f"- Workdir: {session_row.workdir}",
         ]
+        attached_agents = self._attached_agent_count(session_row.agents)
+        total_agents = len(session_row.agents)
+        active_jobs = sum(1 for job in pending_jobs if job.status == "in_progress")
+        lines.append(f"- Worker attachment: {attached_agents}/{total_agents} attached")
+        if 0 < attached_agents < total_agents:
+            lines.append(
+                f"- Startup note: work may already be running, but worker attachment is still incomplete "
+                f"({attached_agents}/{total_agents}, active jobs={active_jobs})"
+            )
         if session_row.launcher_id:
             lines.append(f"- Launcher: {session_row.launcher_id}")
 
@@ -2584,10 +2606,10 @@ class SessionService:
     ) -> JobPayload | None:
         if not self._is_curator_agent(agent):
             return None
-        if not self._has_non_curator_busy_agent(session_row.agents):
-            return None
         prompt, reason = self._build_curator_sweep_prompt(db, session_row=session_row)
         if not prompt:
+            return None
+        if not self._has_non_curator_busy_agent(session_row.agents) and reason not in {"partial_attachment"}:
             return None
 
         lease_token = str(uuid4())
@@ -2680,6 +2702,38 @@ class SessionService:
                     f"Context: {summary}\n"
                 ),
                 "stale_ready_task",
+            )
+
+        total_agents = len(session_row.agents)
+        attached_agents = self._attached_agent_count(session_row.agents, now=now)
+        created_at = session_row.created_at
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+        active_job_count = int(
+            db.scalar(
+                select(func.count())
+                .select_from(JobModel)
+                .where(JobModel.session_id == session_row.id)
+                .where(JobModel.status == "in_progress"),
+            )
+            or 0,
+        )
+        if (
+            session_row.status in {"waiting_for_workers", "launching", "restarting_workers"}
+            and 0 < attached_agents < total_agents
+            and created_at <= now - timedelta(seconds=CURATION_ATTACHMENT_MISMATCH_SECONDS)
+        ):
+            return (
+                (
+                    "Curator sweep triggered because some workers are alive but the session is still not fully attached.\n\n"
+                    "Read CURRENT_STATE.md, TASK_BOARD.md, HANDOFFS.md, and the recent thread delta first.\n"
+                    "Do not create new scope. Diagnose the attachment mismatch, direct an existing agent, open discuss, or escalate.\n\n"
+                    f"Reason: partial worker attachment\n"
+                    f"Attached workers: {attached_agents}/{total_agents}\n"
+                    f"Session status: {session_row.status}\n"
+                    f"Active jobs: {active_job_count}\n"
+                ),
+                "partial_attachment",
             )
 
         planner_agent = self._find_planner_agent(session_row.agents)
@@ -3599,6 +3653,70 @@ class SessionService:
 
     def _has_non_curator_busy_agent(self, agents: Iterable[AgentModel]) -> bool:
         return any(agent.status == "busy" and not self._is_curator_agent(agent) for agent in agents)
+
+    @staticmethod
+    def _agent_has_attachment_signal(agent: AgentModel, *, now: datetime | None = None) -> bool:
+        if agent.worker_id:
+            return True
+        heartbeat_at = agent.last_heartbeat_at
+        if heartbeat_at is None:
+            return False
+        if heartbeat_at.tzinfo is None:
+            heartbeat_at = heartbeat_at.replace(tzinfo=timezone.utc)
+        effective_now = now or utcnow()
+        return heartbeat_at + timedelta(seconds=ATTACHMENT_SIGNAL_GRACE_SECONDS) >= effective_now
+
+    def _attached_agent_count(self, agents: Iterable[AgentModel], *, now: datetime | None = None) -> int:
+        effective_now = now or utcnow()
+        return sum(1 for agent in agents if self._agent_has_attachment_signal(agent, now=effective_now))
+
+    def _refresh_session_startup_state(
+        self,
+        db: Session,
+        *,
+        session_row: SessionModel,
+        now: datetime,
+        previous_status: str | None,
+    ) -> tuple[bool, str]:
+        if session_row.closed_at is not None:
+            return False, ""
+        if session_row.desired_status == "paused":
+            session_row.status = "paused"
+            return False, ""
+
+        total_agents = len(session_row.agents)
+        if total_agents <= 0:
+            session_row.status = "ready"
+            return False, ""
+
+        attached_agents = self._attached_agent_count(session_row.agents, now=now)
+        active_or_pending_jobs = int(
+            db.scalar(
+                select(func.count())
+                .select_from(JobModel)
+                .where(JobModel.session_id == session_row.id)
+                .where(JobModel.status.in_(["pending", "in_progress"])),
+            )
+            or 0,
+        )
+
+        if attached_agents >= total_agents:
+            session_row.status = "resuming_jobs" if active_or_pending_jobs else "ready"
+            should_send_ready = (
+                session_row.status == "ready"
+                and previous_status != "ready"
+                and session_row.send_ready_message
+                and session_row.desired_status != "paused"
+            )
+            ready_message = self._format_ready_message(session_row.agents) if should_send_ready else ""
+            return should_send_ready, ready_message
+
+        if attached_agents > 0:
+            session_row.status = "launching"
+            return False, ""
+
+        session_row.status = "waiting_for_workers"
+        return False, ""
 
     def _should_route_to_planner_first(
         self,

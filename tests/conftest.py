@@ -35,6 +35,22 @@ class FakeThreadManager:
         self.created_threads.append(thread_id)
         return thread_id
 
+    @staticmethod
+    def _embed_to_text(embed) -> str:
+        parts: list[str] = []
+        title = getattr(embed, "title", None)
+        if title:
+            parts.append(str(title))
+        description = getattr(embed, "description", None)
+        if description:
+            parts.append(str(description))
+        for field in getattr(embed, "fields", []):
+            parts.append(f"{field.name}: {field.value}")
+        footer = getattr(getattr(embed, "footer", None), "text", None)
+        if footer:
+            parts.append(str(footer))
+        return "\n".join(parts)
+
     async def post_message(self, thread_id: str, content: str):
         self.messages.append((thread_id, content))
         message_id = f"message-{len(self.messages)}"
@@ -47,6 +63,21 @@ class FakeThreadManager:
         self.edited_messages.append((thread_id, content))
         self.message_store[message_id] = (thread_id, content)
         return (message_id, content)
+
+    async def post_embed_message(self, thread_id: str, *, embed, content: str | None = None):
+        rendered = content or self._embed_to_text(embed)
+        self.messages.append((thread_id, rendered))
+        message_id = f"message-{len(self.messages)}"
+        self.message_store[message_id] = (thread_id, rendered)
+        return (message_id, rendered)
+
+    async def edit_embed_message(self, thread_id: str, message_id: str, *, embed, content: str | None = None):
+        if message_id not in self.message_store:
+            return None
+        rendered = content or self._embed_to_text(embed)
+        self.edited_messages.append((thread_id, rendered))
+        self.message_store[message_id] = (thread_id, rendered)
+        return (message_id, rendered)
 
     async def archive_thread(self, thread_id: str, reason: str) -> None:
         self.archived_threads.append((thread_id, reason))
