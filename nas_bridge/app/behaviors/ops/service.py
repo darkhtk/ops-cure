@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import select
 
+from ...kernel.events import EventEnvelope, EventSummary, encode_event_cursor
 from ...kernel.storage import session_scope
 from ...transcript_service import sanitize_text
 from ...transports.discord.threads import ThreadManager
@@ -39,8 +40,9 @@ def _classify_event(content: str) -> tuple[str, str | None]:
 
 
 class OpsBehaviorService:
-    def __init__(self, *, thread_manager: ThreadManager) -> None:
+    def __init__(self, *, thread_manager: ThreadManager, subscription_broker=None) -> None:
         self.thread_manager = thread_manager
+        self.subscription_broker = subscription_broker
 
     async def create_ops_thread(
         self,
@@ -95,6 +97,7 @@ class OpsBehaviorService:
             return self._summary_from_row(row)
 
     def record_message(self, *, thread_id: str, actor_name: str, content: str) -> OpsThreadSummary | None:
+        envelope: EventEnvelope | None = None
         with session_scope() as db:
             row = db.scalar(select(OpsThreadModel).where(OpsThreadModel.discord_thread_id == thread_id))
             if row is None:
@@ -118,12 +121,23 @@ class OpsBehaviorService:
             row.last_event_preview = preview
             row.last_event_at = now
 
-            db.add(
-                OpsEventModel(
-                    thread_id=row.id,
-                    actor_name=actor_name,
-                    event_kind=event_kind,
-                    content=clean_content,
+            event = OpsEventModel(
+                thread_id=row.id,
+                actor_name=actor_name,
+                event_kind=event_kind,
+                content=clean_content,
+            )
+            db.add(event)
+            db.flush()
+            envelope = EventEnvelope(
+                cursor=encode_event_cursor(created_at=event.created_at, event_id=event.id),
+                space_id=row.id,
+                event=EventSummary(
+                    id=event.id,
+                    kind=event.event_kind,
+                    actor_name=event.actor_name,
+                    content=event.content,
+                    created_at=event.created_at,
                 ),
             )
 
@@ -142,7 +156,10 @@ class OpsBehaviorService:
             participant.last_event_preview = preview
             participant.last_event_at = now
 
-            return self._summary_from_row(row)
+            summary = self._summary_from_row(row)
+        if envelope is not None and self.subscription_broker is not None:
+            self.subscription_broker.publish(space_id=envelope.space_id, item=envelope)
+        return summary
 
     def _summary_from_row(self, row: OpsThreadModel) -> OpsThreadSummary:
         return OpsThreadSummary(

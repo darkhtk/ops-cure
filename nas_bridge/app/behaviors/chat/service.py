@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import select
 
+from ...kernel.events import EventEnvelope, EventSummary, encode_event_cursor
 from ...kernel.storage import session_scope
 from ...transcript_service import sanitize_text
 from ...transports.discord.threads import ThreadManager
@@ -37,8 +38,9 @@ def _preview_text(content: str, limit: int = 120) -> str:
 
 
 class ChatBehaviorService:
-    def __init__(self, *, thread_manager: ThreadManager) -> None:
+    def __init__(self, *, thread_manager: ThreadManager, subscription_broker=None) -> None:
         self.thread_manager = thread_manager
+        self.subscription_broker = subscription_broker
 
     async def create_chat_thread(
         self,
@@ -221,6 +223,7 @@ class ChatBehaviorService:
         actor_kind: str = "ai",
     ) -> ChatMessageSubmitResponse | None:
         now = utcnow()
+        envelope: EventEnvelope | None = None
         with session_scope() as db:
             row = self._get_thread_row(db=db, thread_id=thread_id)
             if row is None:
@@ -248,11 +251,25 @@ class ChatBehaviorService:
             state.last_seen_at = now
             state.last_read_message_id = message.id
             state.last_read_message_at = message.created_at
-            return ChatMessageSubmitResponse(
+            envelope = EventEnvelope(
+                cursor=encode_event_cursor(created_at=message.created_at, event_id=message.id),
+                space_id=row.id,
+                event=EventSummary(
+                    id=message.id,
+                    kind=message.event_kind,
+                    actor_name=message.actor_name,
+                    content=message.content,
+                    created_at=message.created_at,
+                ),
+            )
+            response = ChatMessageSubmitResponse(
                 thread=self._thread_summary(row=row),
                 participant=self._participant_summary(participant=participant, state=state),
                 message=self._message_summary(message=message),
             )
+        if envelope is not None and self.subscription_broker is not None:
+            self.subscription_broker.publish(space_id=envelope.space_id, item=envelope)
+        return response
 
     def record_message(self, *, thread_id: str, actor_name: str, content: str) -> ChatThreadSummary | None:
         response = self.submit_participant_message(

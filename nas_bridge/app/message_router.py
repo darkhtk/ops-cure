@@ -1,8 +1,8 @@
-"""Backward-compatible workflow message shim."""
+"""Backward-compatible orchestration message shim."""
 
 from __future__ import annotations
 
-from .behaviors.workflow.discord_messages import WorkflowDiscordMessageHandler
+from .behaviors.orchestration.discord_messages import OrchestrationDiscordMessageHandler
 from .transports.discord.messages import MessageRouter
 
-__all__ = ["MessageRouter", "WorkflowDiscordMessageHandler"]
+__all__ = ["MessageRouter", "OrchestrationDiscordMessageHandler"]

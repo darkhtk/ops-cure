@@ -12,6 +12,13 @@ from .api import actors, behaviors, events, health, sessions, spaces, verificati
 from .behaviors.catalog import BehaviorCatalogService
 from .behaviors.chat import api as chat_api
 from .behaviors.chat.service import ChatBehaviorService
+from .behaviors.orchestration.policy import PolicyService
+from .behaviors.orchestration.recovery import RecoveryService
+from .behaviors.orchestration.service import SessionService
+from .behaviors.orchestration.verification import VerificationService
+from .behaviors.orchestration.workflows.pause import PauseWorkflow
+from .behaviors.orchestration.workflows.policy import PolicyWorkflow
+from .behaviors.orchestration.workflows.start import StartWorkflow
 from .behaviors.ops.service import OpsBehaviorService
 from .behaviors.registry import (
     BehaviorContext,
@@ -20,13 +27,6 @@ from .behaviors.registry import (
     resolve_discord_bindings,
     resolve_kernel_bindings,
 )
-from .behaviors.workflow.policy import PolicyService
-from .behaviors.workflow.recovery import RecoveryService
-from .behaviors.workflow.service import SessionService
-from .behaviors.workflow.verification import VerificationService
-from .behaviors.workflow.workflows.pause import PauseWorkflow
-from .behaviors.workflow.workflows.policy import PolicyWorkflow
-from .behaviors.workflow.workflows.start import StartWorkflow
 from .capabilities.execution.router import RoutedExecutionProvider
 from .capabilities.execution.windows_launcher import WindowsLauncherExecutionProvider
 from .capabilities.power.noop import NoopPowerProvider
@@ -40,6 +40,7 @@ from .kernel.event_log import TranscriptService
 from .kernel.events import EventService
 from .kernel.registry import WorkerRegistry
 from .kernel.spaces import SpaceService
+from .kernel.subscriptions import InProcessSubscriptionBroker
 from .presenters.discord.status_cards import AnnouncementService
 from .transports.discord.gateway import DiscordGateway
 from .transports.discord.bindings import DiscordBehaviorBinding
@@ -59,6 +60,7 @@ class ServiceContainer:
     settings: Settings
     registry: WorkerRegistry
     transcript_service: TranscriptService
+    subscription_broker: InProcessSubscriptionBroker
     actor_service: ActorService
     event_service: EventService
     space_service: SpaceService
@@ -83,11 +85,12 @@ def build_services(settings: Settings) -> ServiceContainer:
     init_db()
     registry = WorkerRegistry(settings.worker_stale_after_seconds)
     drift_monitor = DriftMonitor()
-    transcript_service = TranscriptService()
+    subscription_broker = InProcessSubscriptionBroker()
+    transcript_service = TranscriptService(subscription_broker=subscription_broker)
     thread_manager = ThreadManager(settings)
     announcement_service = AnnouncementService(thread_manager=thread_manager)
-    chat_service = ChatBehaviorService(thread_manager=thread_manager)
-    ops_service = OpsBehaviorService(thread_manager=thread_manager)
+    chat_service = ChatBehaviorService(thread_manager=thread_manager, subscription_broker=subscription_broker)
+    ops_service = OpsBehaviorService(thread_manager=thread_manager, subscription_broker=subscription_broker)
     policy_service = PolicyService()
     verification_service = VerificationService(
         registry=registry,
@@ -193,6 +196,7 @@ def build_services(settings: Settings) -> ServiceContainer:
         settings=settings,
         registry=registry,
         transcript_service=transcript_service,
+        subscription_broker=subscription_broker,
         actor_service=actor_service,
         event_service=event_service,
         thread_manager=thread_manager,

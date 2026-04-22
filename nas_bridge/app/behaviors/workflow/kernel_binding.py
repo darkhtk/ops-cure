@@ -7,7 +7,13 @@ from sqlalchemy.orm import selectinload
 
 from ...kernel.actors import ActorListResponse, ActorSummary
 from ...kernel.bindings import KernelBehaviorBinding
-from ...kernel.events import EventListResponse, EventSummary
+from ...kernel.events import (
+    EventDeltaResponse,
+    EventEnvelope,
+    EventSummary,
+    encode_event_cursor,
+    paginate_event_envelopes,
+)
 from ...kernel.spaces import ActorSummary as SpaceActorSummary
 from ...kernel.spaces import SpaceSummary
 from ...kernel.storage import session_scope
@@ -61,7 +67,14 @@ class WorkflowKernelProvider:
                 return None
             return self._actor_response(session_row)
 
-    def get_events_for_space(self, *, space_id: str, limit: int = 20) -> EventListResponse | None:
+    def get_events_for_space(
+        self,
+        *,
+        space_id: str,
+        after_cursor: str | None = None,
+        limit: int = 20,
+        kinds: list[str] | None = None,
+    ) -> EventDeltaResponse | None:
         with session_scope() as db:
             session_row = db.scalar(select(SessionModel).where(SessionModel.id == space_id))
             if session_row is None:
@@ -70,13 +83,25 @@ class WorkflowKernelProvider:
                 db.scalars(
                     select(TranscriptModel)
                     .where(TranscriptModel.session_id == session_row.id)
-                    .order_by(TranscriptModel.created_at.desc())
-                    .limit(limit),
+                    .order_by(TranscriptModel.created_at.asc(), TranscriptModel.id.asc()),
                 ),
             )
-            return self._event_response(session_id=session_row.id, events=events)
+            return self._event_response(
+                session_id=session_row.id,
+                events=events,
+                after_cursor=after_cursor,
+                limit=limit,
+                kinds=kinds,
+            )
 
-    def get_events_for_thread(self, *, thread_id: str, limit: int = 20) -> EventListResponse | None:
+    def get_events_for_thread(
+        self,
+        *,
+        thread_id: str,
+        after_cursor: str | None = None,
+        limit: int = 20,
+        kinds: list[str] | None = None,
+    ) -> EventDeltaResponse | None:
         with session_scope() as db:
             session_row = db.scalar(
                 select(SessionModel).where(SessionModel.discord_thread_id == thread_id),
@@ -87,11 +112,16 @@ class WorkflowKernelProvider:
                 db.scalars(
                     select(TranscriptModel)
                     .where(TranscriptModel.session_id == session_row.id)
-                    .order_by(TranscriptModel.created_at.desc())
-                    .limit(limit),
+                    .order_by(TranscriptModel.created_at.asc(), TranscriptModel.id.asc()),
                 ),
             )
-            return self._event_response(session_id=session_row.id, events=events)
+            return self._event_response(
+                session_id=session_row.id,
+                events=events,
+                after_cursor=after_cursor,
+                limit=limit,
+                kinds=kinds,
+            )
 
     def _space_summary(self, session_row: SessionModel) -> SpaceSummary:
         actors = [
@@ -142,20 +172,30 @@ class WorkflowKernelProvider:
         *,
         session_id: str,
         events: list[TranscriptModel],
-    ) -> EventListResponse:
-        return EventListResponse(
+        after_cursor: str | None,
+        limit: int,
+        kinds: list[str] | None,
+    ) -> EventDeltaResponse:
+        return paginate_event_envelopes(
             space_id=session_id,
             domain_type="orchestration",
-            events=[
-                EventSummary(
-                    id=event.id,
-                    kind=event.direction,
-                    actor_name=event.actor,
-                    content=event.content,
-                    created_at=event.created_at,
+            items=[
+                EventEnvelope(
+                    cursor=encode_event_cursor(created_at=event.created_at, event_id=event.id),
+                    space_id=session_id,
+                    event=EventSummary(
+                        id=event.id,
+                        kind=event.direction,
+                        actor_name=event.actor,
+                        content=event.content,
+                        created_at=event.created_at,
+                    ),
                 )
                 for event in events
             ],
+            after_cursor=after_cursor,
+            limit=limit,
+            kinds=kinds,
         )
 
 

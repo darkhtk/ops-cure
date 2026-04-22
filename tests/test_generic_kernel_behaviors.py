@@ -30,11 +30,11 @@ def test_generic_kernel_supports_workflow_chat_and_ops_without_agents(tmp_path, 
     import app.behaviors.chat.service as chat_service_module
     import app.behaviors.ops.service as ops_service_module
     import app.behaviors.registry as registry_module
-    import app.behaviors.workflow.models as workflow_models
-    import app.behaviors.workflow.policy as policy_service_module
-    import app.behaviors.workflow.recovery as recovery_service_module
-    import app.behaviors.workflow.service as session_service_module
-    import app.behaviors.workflow.verification as verification_service_module
+    import app.behaviors.orchestration.models as orchestration_models
+    import app.behaviors.orchestration.policy as policy_service_module
+    import app.behaviors.orchestration.recovery as recovery_service_module
+    import app.behaviors.orchestration.service as session_service_module
+    import app.behaviors.orchestration.verification as verification_service_module
     import app.kernel.actors as actors_module
     import app.kernel.drift as drift_monitor_module
     import app.kernel.event_log as transcript_service_module
@@ -146,7 +146,7 @@ def test_generic_kernel_supports_workflow_chat_and_ops_without_agents(tmp_path, 
     chat_row, ops_row = asyncio.run(scenario())
 
     with db.session_scope() as session:
-        workflow_session = workflow_models.SessionModel(
+        workflow_session = orchestration_models.SessionModel(
             project_name="workflow smoke",
             target_project_name="workflow smoke",
             discord_thread_id="thread-workflow",
@@ -160,7 +160,7 @@ def test_generic_kernel_supports_workflow_chat_and_ops_without_agents(tmp_path, 
         session.add(workflow_session)
         session.flush()
         session.add(
-            workflow_models.AgentModel(
+            orchestration_models.AgentModel(
                 session_id=workflow_session.id,
                 agent_name="planner",
                 cli_type="claude",
@@ -169,7 +169,7 @@ def test_generic_kernel_supports_workflow_chat_and_ops_without_agents(tmp_path, 
             ),
         )
         session.add(
-            workflow_models.TranscriptModel(
+            orchestration_models.TranscriptModel(
                 session_id=workflow_session.id,
                 direction="outbound",
                 actor="planner",
@@ -178,7 +178,7 @@ def test_generic_kernel_supports_workflow_chat_and_ops_without_agents(tmp_path, 
         )
         workflow_id = workflow_session.id
 
-        assert session.scalar(select(workflow_models.SessionModel.id)) is not None
+        assert session.scalar(select(orchestration_models.SessionModel.id)) is not None
 
     behaviors = behavior_catalog.list_behaviors()
     assert {behavior.behavior_id for behavior in behaviors} == {"orchestration", "chat", "ops"}

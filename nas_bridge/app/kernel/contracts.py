@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
     from .actors import ActorListResponse
-    from .events import EventListResponse
+    from .events import EventDeltaResponse, EventEnvelope
     from .spaces import SpaceSummary
 
 
@@ -33,13 +33,37 @@ class ActorProvider(Protocol):
 class EventProvider(Protocol):
     behavior_id: str
 
-    def get_events_for_space(self, *, space_id: str, limit: int = 20) -> "EventListResponse | None":
+    def get_events_for_space(
+        self,
+        *,
+        space_id: str,
+        after_cursor: str | None = None,
+        limit: int = 20,
+        kinds: list[str] | None = None,
+    ) -> "EventDeltaResponse | None":
         ...
 
     def get_events_for_thread(
         self,
         *,
         thread_id: str,
+        after_cursor: str | None = None,
         limit: int = 20,
-    ) -> "EventListResponse | None":
+        kinds: list[str] | None = None,
+    ) -> "EventDeltaResponse | None":
+        ...
+
+
+class SubscriptionBroker(Protocol):
+    def publish(self, *, space_id: str, item: "EventEnvelope") -> None:
+        ...
+
+    def subscribe(
+        self,
+        *,
+        space_id: str,
+        after_cursor: str | None = None,
+        kinds: list[str] | None = None,
+        subscriber_id: str | None = None,
+    ):
         ...

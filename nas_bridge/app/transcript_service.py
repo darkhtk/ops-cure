@@ -5,6 +5,7 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
+from .kernel.events import EventEnvelope, EventSummary, encode_event_cursor
 from .models import TranscriptModel
 
 TOKEN_PATTERNS = [
@@ -24,6 +25,9 @@ def sanitize_text(content: str) -> str:
 
 
 class TranscriptService:
+    def __init__(self, *, subscription_broker=None) -> None:
+        self.subscription_broker = subscription_broker
+
     def add_entry(
         self,
         db: Session,
@@ -42,5 +46,21 @@ class TranscriptService:
             source_discord_message_id=source_discord_message_id,
         )
         db.add(entry)
+        db.flush()
+        if self.subscription_broker is not None:
+            self.subscription_broker.publish(
+                space_id=session_id,
+                item=EventEnvelope(
+                    cursor=encode_event_cursor(created_at=entry.created_at, event_id=entry.id),
+                    space_id=session_id,
+                    event=EventSummary(
+                        id=entry.id,
+                        kind=entry.direction,
+                        actor_name=entry.actor,
+                        content=entry.content,
+                        created_at=entry.created_at,
+                    ),
+                ),
+            )
         return entry
 

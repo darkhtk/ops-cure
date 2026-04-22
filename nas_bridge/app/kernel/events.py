@@ -1,4 +1,4 @@
-"""Generic event vocabulary across behaviors."""
+"""Generic event vocabulary and delta contracts across behaviors."""
 
 from __future__ import annotations
 
@@ -10,6 +10,22 @@ from pydantic import BaseModel, Field
 from .contracts import EventProvider
 
 
+def encode_event_cursor(*, created_at: datetime, event_id: str) -> str:
+    micros = int(created_at.timestamp() * 1_000_000)
+    return f"{micros:020d}:{event_id}"
+
+
+def is_valid_event_cursor(cursor: str | None) -> bool:
+    if not cursor:
+        return True
+    prefix, separator, suffix = cursor.partition(":")
+    return bool(separator and prefix.isdigit() and suffix)
+
+
+class EventCursor(BaseModel):
+    value: str
+
+
 class EventSummary(BaseModel):
     id: str
     kind: str
@@ -18,26 +34,119 @@ class EventSummary(BaseModel):
     created_at: datetime
 
 
-class EventListResponse(BaseModel):
+class EventEnvelope(BaseModel):
+    cursor: str
+    space_id: str
+    event: EventSummary
+
+
+class EventDeltaResponse(BaseModel):
     space_id: str
     domain_type: str
-    events: list[EventSummary] = Field(default_factory=list)
+    items: list[EventEnvelope] = Field(default_factory=list)
+    next_cursor: str | None = None
+    has_more: bool = False
+
+    @property
+    def events(self) -> list[EventSummary]:
+        return [item.event for item in self.items]
+
+
+class EventStreamOpenResponse(BaseModel):
+    space_id: str
+    accepted_after_cursor: str | None = None
+    latest_cursor: str | None = None
+
+
+class EventStreamResetResponse(BaseModel):
+    space_id: str
+    reason: str
+
+
+class SubscriptionPresenceSummary(BaseModel):
+    subscriber_id: str
+    space_id: str
+    last_seen_at: datetime
+    expires_at: datetime | None = None
 
 
 class EventService:
     def __init__(self, *, providers: Iterable[EventProvider] = ()) -> None:
         self.providers = tuple(providers)
 
-    def get_events_for_space(self, *, space_id: str, limit: int = 20) -> EventListResponse | None:
+    def get_events_for_space(
+        self,
+        *,
+        space_id: str,
+        after_cursor: str | None = None,
+        limit: int = 20,
+        kinds: list[str] | None = None,
+    ) -> EventDeltaResponse | None:
         for provider in self.providers:
-            response = provider.get_events_for_space(space_id=space_id, limit=limit)
+            response = provider.get_events_for_space(
+                space_id=space_id,
+                after_cursor=after_cursor,
+                limit=limit,
+                kinds=kinds,
+            )
             if response is not None:
                 return response
         return None
 
-    def get_events_for_thread(self, *, thread_id: str, limit: int = 20) -> EventListResponse | None:
+    def get_events_for_thread(
+        self,
+        *,
+        thread_id: str,
+        after_cursor: str | None = None,
+        limit: int = 20,
+        kinds: list[str] | None = None,
+    ) -> EventDeltaResponse | None:
         for provider in self.providers:
-            response = provider.get_events_for_thread(thread_id=thread_id, limit=limit)
+            response = provider.get_events_for_thread(
+                thread_id=thread_id,
+                after_cursor=after_cursor,
+                limit=limit,
+                kinds=kinds,
+            )
             if response is not None:
                 return response
         return None
+
+
+def paginate_event_envelopes(
+    *,
+    space_id: str,
+    domain_type: str,
+    items: Iterable[EventEnvelope],
+    after_cursor: str | None = None,
+    limit: int = 20,
+    kinds: list[str] | None = None,
+) -> EventDeltaResponse:
+    filtered_items = list(items)
+    if kinds:
+        allowed = set(kinds)
+        filtered_items = [item for item in filtered_items if item.event.kind in allowed]
+
+    if after_cursor is not None:
+        unread = [item for item in filtered_items if item.cursor > after_cursor]
+        page = unread[:limit]
+        has_more = len(unread) > limit
+        next_cursor = page[-1].cursor if page else after_cursor
+        return EventDeltaResponse(
+            space_id=space_id,
+            domain_type=domain_type,
+            items=page,
+            next_cursor=next_cursor,
+            has_more=has_more,
+        )
+
+    latest_window = filtered_items[-limit:] if limit > 0 else filtered_items
+    latest_window = list(reversed(latest_window))
+    next_cursor = latest_window[0].cursor if latest_window else None
+    return EventDeltaResponse(
+        space_id=space_id,
+        domain_type=domain_type,
+        items=latest_window,
+        next_cursor=next_cursor,
+        has_more=len(filtered_items) > len(latest_window),
+    )
