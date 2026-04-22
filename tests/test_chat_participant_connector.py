@@ -474,3 +474,21 @@ def test_chat_service_record_message_does_not_echo_human_input_to_discord(tmp_pa
     assert chat_events is not None
     assert [event.actor_name for event in chat_events.events] == ["operator"]
     assert chat_events.events[0].content == "hello from Discord"
+
+
+def test_send_message_resolve_message_reads_utf8_file(tmp_path):
+    if str(OPS_CURE_ROOT) not in sys.path:
+        sys.path.insert(0, str(OPS_CURE_ROOT))
+
+    from pc_launcher.connectors.chat_participant.send_message import resolve_message
+
+    message_file = tmp_path / "message.txt"
+    message_file.write_text("디스코드 한글 확인", encoding="utf-8")
+
+    resolved = resolve_message(
+        inline_message=None,
+        message_file=str(message_file),
+        read_stdin=False,
+    )
+
+    assert resolved == "디스코드 한글 확인"

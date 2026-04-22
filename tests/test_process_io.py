@@ -42,3 +42,39 @@ def test_wrap_powershell_utf8_includes_utf8_prologue():
     assert "$OutputEncoding" in wrapped
     assert "chcp 65001" in wrapped
     assert wrapped.endswith("Write-Output '한글 테스트'")
+
+
+def test_configure_utf8_stdio_reconfigures_all_text_streams():
+    repo_root = Path(r"C:\Users\darkh\Projects\ops-cure")
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
+
+    import pc_launcher.process_io as process_io
+
+    class FakeStream:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def reconfigure(self, **kwargs):
+            self.calls.append(kwargs)
+
+    fake_stdin = FakeStream()
+    fake_stdout = FakeStream()
+    fake_stderr = FakeStream()
+
+    original_stdin = process_io.sys.stdin
+    original_stdout = process_io.sys.stdout
+    original_stderr = process_io.sys.stderr
+    process_io.sys.stdin = fake_stdin
+    process_io.sys.stdout = fake_stdout
+    process_io.sys.stderr = fake_stderr
+    try:
+        process_io.configure_utf8_stdio()
+    finally:
+        process_io.sys.stdin = original_stdin
+        process_io.sys.stdout = original_stdout
+        process_io.sys.stderr = original_stderr
+
+    assert fake_stdin.calls == [{"encoding": "utf-8", "errors": "replace"}]
+    assert fake_stdout.calls == [{"encoding": "utf-8", "errors": "replace"}]
+    assert fake_stderr.calls == [{"encoding": "utf-8", "errors": "replace"}]

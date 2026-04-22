@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 from collections.abc import Mapping
 
 UTF8_ENV_DEFAULTS: dict[str, str] = {
@@ -42,6 +43,18 @@ def text_subprocess_kwargs() -> dict[str, object]:
         "encoding": "utf-8",
         "errors": "replace",
     }
+
+
+def configure_utf8_stdio() -> None:
+    for stream_name in ("stdin", "stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        reconfigure = getattr(stream, "reconfigure", None)
+        if not callable(reconfigure):
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except TypeError:  # pragma: no cover - alternate TextIO implementations
+            reconfigure(encoding="utf-8")
 
 
 def decode_text_output(payload: bytes | str | None) -> str:

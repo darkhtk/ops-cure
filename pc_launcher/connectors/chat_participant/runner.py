@@ -14,6 +14,7 @@ from dotenv import load_dotenv
 try:
     from ...bridge_client import BridgeClient
     from ...config_loader import load_project
+    from ...process_io import configure_utf8_stdio
     from .bridge import BridgeChatParticipantClient
     from .connector import ChatParticipantConfig, ChatParticipantConnector
     from .runtime import (
@@ -27,6 +28,7 @@ try:
 except ImportError:  # pragma: no cover - script mode support
     from bridge_client import BridgeClient
     from config_loader import load_project
+    from pc_launcher.process_io import configure_utf8_stdio
     from pc_launcher.connectors.chat_participant.bridge import BridgeChatParticipantClient
     from pc_launcher.connectors.chat_participant.connector import (
         ChatParticipantConfig,
@@ -327,6 +329,7 @@ def run(argv: list[str] | None = None) -> int:
 
 
 def main() -> int:
+    configure_utf8_stdio()
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
