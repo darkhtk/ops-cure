@@ -81,7 +81,7 @@ async def submit_chat_message(
     request: Request,
 ) -> ChatMessageSubmitResponse:
     services = request.app.state.services
-    response = services.chat_service.submit_participant_message(
+    response = await services.chat_service.submit_participant_message_and_notify(
         thread_id=thread_id,
         actor_name=payload.actor_name,
         actor_kind=payload.actor_kind,

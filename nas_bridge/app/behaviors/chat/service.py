@@ -271,6 +271,31 @@ class ChatBehaviorService:
             self.subscription_broker.publish(space_id=envelope.space_id, item=envelope)
         return response
 
+    async def submit_participant_message_and_notify(
+        self,
+        *,
+        thread_id: str,
+        actor_name: str,
+        content: str,
+        actor_kind: str = "ai",
+    ) -> ChatMessageSubmitResponse | None:
+        response = self.submit_participant_message(
+            thread_id=thread_id,
+            actor_name=actor_name,
+            actor_kind=actor_kind,
+            content=content,
+        )
+        if response is None:
+            return None
+        await self.thread_manager.post_message(
+            thread_id,
+            self._format_discord_transport_message(
+                actor_name=response.message.actor_name,
+                content=response.message.content,
+            ),
+        )
+        return response
+
     def record_message(self, *, thread_id: str, actor_name: str, content: str) -> ChatThreadSummary | None:
         response = self.submit_participant_message(
             thread_id=thread_id,
@@ -422,3 +447,7 @@ class ChatBehaviorService:
                 break
         unread = all_messages[start_index + 1 :] if start_index >= 0 else all_messages
         return unread[:limit]
+
+    @staticmethod
+    def _format_discord_transport_message(*, actor_name: str, content: str) -> str:
+        return f"**{actor_name}**: {content}"

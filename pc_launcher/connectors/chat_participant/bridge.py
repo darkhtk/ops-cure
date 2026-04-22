@@ -11,6 +11,25 @@ class ChatParticipantBridge(Protocol):
 
     def get_actors_for_space(self, *, space_id: str) -> dict[str, Any]: ...
 
+    def get_events_for_thread(
+        self,
+        *,
+        thread_id: str,
+        after_cursor: str | None = None,
+        limit: int = 20,
+        kinds: list[str] | None = None,
+    ) -> dict[str, Any]: ...
+
+    def stream_events_for_thread(
+        self,
+        *,
+        thread_id: str,
+        after_cursor: str | None = None,
+        limit: int = 100,
+        kinds: list[str] | None = None,
+        subscriber_id: str | None = None,
+    ): ...
+
     def register_chat_participant(
         self,
         *,
@@ -50,6 +69,38 @@ class BridgeChatParticipantClient:
 
     def get_actors_for_space(self, *, space_id: str) -> dict[str, Any]:
         return self.bridge_client.get_actors_for_space(space_id=space_id)
+
+    def get_events_for_thread(
+        self,
+        *,
+        thread_id: str,
+        after_cursor: str | None = None,
+        limit: int = 20,
+        kinds: list[str] | None = None,
+    ) -> dict[str, Any]:
+        return self.bridge_client.get_events_for_thread(
+            thread_id=thread_id,
+            after_cursor=after_cursor,
+            limit=limit,
+            kinds=kinds,
+        )
+
+    def stream_events_for_thread(
+        self,
+        *,
+        thread_id: str,
+        after_cursor: str | None = None,
+        limit: int = 100,
+        kinds: list[str] | None = None,
+        subscriber_id: str | None = None,
+    ):
+        return self.bridge_client.stream_events_for_thread(
+            thread_id=thread_id,
+            after_cursor=after_cursor,
+            limit=limit,
+            kinds=kinds,
+            subscriber_id=subscriber_id,
+        )
 
     def register_chat_participant(
         self,

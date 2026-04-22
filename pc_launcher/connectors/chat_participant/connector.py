@@ -140,11 +140,6 @@ class ChatParticipantConnector:
             content=reply.content,
         )
         replied_message_id = submitted["message"]["id"]
-        self.state_store.set_cursor(
-            actor_name=self.config.actor_name,
-            thread_id=room_thread_id,
-            message_id=replied_message_id,
-        )
         return ChatSyncResult(
             status="replied",
             thread_id=room_thread_id,

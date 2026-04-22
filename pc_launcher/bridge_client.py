@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import logging
+from collections.abc import Iterator
 from typing import Any
 from urllib.parse import quote_plus
 
@@ -242,6 +244,49 @@ class BridgeClient:
     def get_events_for_space(self, *, space_id: str, limit: int = 20) -> dict[str, Any]:
         return self._get(f"/api/events/spaces/{space_id}?limit={limit}")
 
+    def get_events_for_thread(
+        self,
+        *,
+        thread_id: str,
+        after_cursor: str | None = None,
+        limit: int = 20,
+        kinds: list[str] | None = None,
+    ) -> dict[str, Any]:
+        params = [f"limit={limit}"]
+        if after_cursor:
+            params.append(f"after_cursor={quote_plus(after_cursor)}")
+        for kind in kinds or []:
+            params.append(f"kinds={quote_plus(kind)}")
+        return self._get(f"/api/events/threads/{thread_id}?{'&'.join(params)}")
+
+    def stream_events_for_thread(
+        self,
+        *,
+        thread_id: str,
+        after_cursor: str | None = None,
+        limit: int = 100,
+        kinds: list[str] | None = None,
+        subscriber_id: str | None = None,
+    ) -> Iterator[tuple[str, dict[str, Any]]]:
+        params = [f"limit={limit}"]
+        if after_cursor:
+            params.append(f"after_cursor={quote_plus(after_cursor)}")
+        for kind in kinds or []:
+            params.append(f"kinds={quote_plus(kind)}")
+        if subscriber_id:
+            params.append(f"subscriber_id={quote_plus(subscriber_id)}")
+        response = self.session.get(
+            f"{self.base_url}/api/events/threads/{thread_id}/stream?{'&'.join(params)}",
+            timeout=(self.timeout_seconds, max(self.timeout_seconds, 60)),
+            stream=True,
+        )
+        if not response.ok:
+            self._handle_response(f"/api/events/threads/{thread_id}/stream", response)
+        try:
+            yield from self._iter_sse(response)
+        finally:
+            response.close()
+
     def register_chat_participant(
         self,
         *,
@@ -329,3 +374,28 @@ class BridgeClient:
         if not response.ok:
             raise BridgeClientError(f"{path} -> {response.status_code}: {payload}")
         return payload
+
+    def _iter_sse(self, response: requests.Response) -> Iterator[tuple[str, dict[str, Any]]]:
+        event_name = "message"
+        data_lines: list[str] = []
+        for raw_line in response.iter_lines(decode_unicode=True):
+            line = raw_line if raw_line is not None else ""
+            if not line:
+                if data_lines:
+                    payload = json.loads("\n".join(data_lines))
+                    yield event_name, payload
+                event_name = "message"
+                data_lines = []
+                continue
+            if line.startswith(":"):
+                continue
+            field, _, value = line.partition(":")
+            if value.startswith(" "):
+                value = value[1:]
+            if field == "event":
+                event_name = value or "message"
+            elif field == "data":
+                data_lines.append(value)
+        if data_lines:
+            payload = json.loads("\n".join(data_lines))
+            yield event_name, payload
