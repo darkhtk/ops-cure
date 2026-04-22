@@ -436,6 +436,8 @@ def test_current_thread_runtime_uses_app_server_client_and_current_thread():
     assert started_thread_id == "codex-thread-123"
     assert "ops room" in prompt
     assert "@codex-homedev are you attached to the current thread?" in prompt
+    assert "you may inspect files, use tools, run commands, and perform the smallest local actions needed before replying." in prompt
+    assert "Do not use tools, inspect files, or perform actions." not in prompt
     assert client.read_calls == []
 
 
