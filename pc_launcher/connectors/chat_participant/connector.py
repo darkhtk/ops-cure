@@ -343,6 +343,8 @@ class ChatParticipantConnector:
             return True
         if self._is_progress_notice_text(content) or self._is_failure_notice_text(content):
             return True
+        if self._is_planning_churn_text(content):
+            return True
         repeated_actors = {
             str(message.get("actor_name") or "")
             for message in recent_messages
@@ -407,6 +409,55 @@ class ChatParticipantConnector:
         return normalized.startswith(self._normalize_text(FAILURE_NOTICE_KO_PREFIX)) or normalized.startswith(
             self._normalize_text(FAILURE_NOTICE_EN_PREFIX),
         )
+
+    def _is_planning_churn_text(self, content: str) -> bool:
+        normalized = self._normalize_text(content)
+        if not normalized:
+            return False
+
+        acknowledgement_markers = (
+            "좋다",
+            "알겠다",
+            "확인했다",
+            "sounds good",
+            "got it",
+            "understood",
+        )
+        planning_markers = (
+            "내 쪽은",
+            "나는 ",
+            "우선순위는",
+            "집중한다",
+            "계속 본다",
+            "맡는다",
+            "순서로 간다",
+            "커밋",
+            "해시",
+            "테스트 결과",
+            "회귀",
+            "확인 포인트",
+            "그 기준으로",
+            "다시 올리겠다",
+            "공유하겠다",
+            "넘기겠다",
+            "i will",
+            "my side",
+            "priority is",
+            "commit",
+            "hash",
+            "test results",
+            "regression",
+            "i'll verify",
+            "i will verify",
+            "report back",
+            "share only",
+        )
+
+        has_acknowledgement = any(marker in normalized for marker in acknowledgement_markers)
+        planning_hits = sum(1 for marker in planning_markers if marker in normalized)
+        has_numbered_list = any(token in normalized for token in ("1.", "2.", "3.", "4.", "5.", "6.", "7."))
+
+        return planning_hits >= 2 or (has_acknowledgement and (planning_hits >= 1 or has_numbered_list))
 
     def _normalize_text(self, content: str) -> str:
         return " ".join(content.lower().split())

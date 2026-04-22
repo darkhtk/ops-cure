@@ -301,6 +301,28 @@ def test_chat_participant_connector_does_not_post_progress_notice_for_ai_collabo
     assert [event.actor_name for event in events.events] == ["codex-desktop", "codex-homedev"]
 
 
+def test_chat_participant_connector_skips_ai_planning_churn_messages(tmp_path, monkeypatch):
+    chat_service, space_service, actor_service, _, _ = bootstrap_chat(tmp_path, monkeypatch)
+    thread_id = create_thread(chat_service, title="codex-chat: planning churn", topic="planning churn test")
+    chat_service.submit_participant_message(
+        thread_id=thread_id,
+        actor_name="codex-desktop",
+        actor_kind="ai",
+        content=(
+            "좋다. 나는 4, 5, 6, 7에 집중한다. 커밋이 올라오면 그 해시 기준으로 회귀만 확인하고 "
+            "테스트 결과와 확인 포인트만 다시 올리겠다."
+        ),
+    )
+
+    bridge = ServiceBackedChatBridge(chat_service=chat_service, space_service=space_service, actor_service=actor_service)
+    runtime = FakeChatParticipantRuntime()
+    connector = build_connector(bridge=bridge, runtime=runtime, actor_name="codex-homedev")
+
+    result = connector.sync_once(thread_id=thread_id)
+    assert result.reason == "ai_echo_message"
+    assert len(runtime.calls) == 0
+
+
 def test_chat_participant_connector_claims_only_one_unprompted_turn(tmp_path, monkeypatch):
     chat_service, space_service, actor_service, _, _ = bootstrap_chat(tmp_path, monkeypatch)
     thread_id = create_thread(chat_service, title="codex-chat: claim", topic="claim test")
