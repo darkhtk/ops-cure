@@ -255,6 +255,91 @@ def test_generic_kernel_delta_and_stream_resume_without_domain_leakage(tmp_path,
 
     asyncio.run(stream_without_handoff_loss())
 
+    async def stream_with_empty_backlog_uses_persisted_replay():
+        restart_thread = await chat_service.create_chat_thread(
+            guild_id="guild-1",
+            parent_channel_id="parent-1",
+            title="codex-chat: restart smoke",
+            topic="restart resume",
+            created_by="alice",
+        )
+        chat_service.record_message(
+            thread_id=restart_thread.discord_thread_id,
+            actor_name="alice",
+            content="restart one",
+        )
+        chat_service.record_message(
+            thread_id=restart_thread.discord_thread_id,
+            actor_name="bob",
+            content="restart two",
+        )
+        restart_initial = event_service.get_events_for_space(space_id=restart_thread.id, limit=10)
+        assert restart_initial is not None
+        restart_cursor = restart_initial.items[0].cursor
+
+        subscription_broker._backlog.clear()
+
+        generator = _stream_space_events(
+            services=services,
+            space_id=restart_thread.id,
+            after_cursor=restart_cursor,
+            limit=10,
+            kinds=["message"],
+            subscriber_id="pc-codex-c",
+        )
+        open_chunk = await anext(generator)
+        assert "event: open" in open_chunk
+
+        replay_chunk = await anext(generator)
+        await generator.aclose()
+        assert "restart two" in replay_chunk
+
+    asyncio.run(stream_with_empty_backlog_uses_persisted_replay())
+
+    async def stream_resets_when_replay_window_exceeds_limit():
+        limited_thread = await chat_service.create_chat_thread(
+            guild_id="guild-1",
+            parent_channel_id="parent-1",
+            title="codex-chat: limit smoke",
+            topic="limit contract",
+            created_by="alice",
+        )
+        chat_service.record_message(
+            thread_id=limited_thread.discord_thread_id,
+            actor_name="alice",
+            content="limit one",
+        )
+        chat_service.record_message(
+            thread_id=limited_thread.discord_thread_id,
+            actor_name="bob",
+            content="limit two",
+        )
+        chat_service.record_message(
+            thread_id=limited_thread.discord_thread_id,
+            actor_name="alice",
+            content="limit three",
+        )
+        limited_initial = event_service.get_events_for_space(space_id=limited_thread.id, limit=10)
+        assert limited_initial is not None
+        limited_cursor = limited_initial.items[0].cursor
+
+        generator = _stream_space_events(
+            services=services,
+            space_id=limited_thread.id,
+            after_cursor=limited_cursor,
+            limit=1,
+            kinds=["message"],
+            subscriber_id="pc-codex-d",
+        )
+        open_chunk = await anext(generator)
+        assert "event: open" in open_chunk
+        reset_chunk = await anext(generator)
+        await generator.aclose()
+        assert "event: reset" in reset_chunk
+        assert "replay_limit_exceeded" in reset_chunk
+
+    asyncio.run(stream_resets_when_replay_window_exceeds_limit())
+
     latest = event_service.get_events_for_space(
         space_id=created.id,
         after_cursor=latest_cursor,

@@ -51,11 +51,6 @@ async def _stream_space_events(
         kinds=kinds,
         subscriber_id=subscriber_id,
     )
-    if subscription.reset_reason is not None:
-        reset = EventStreamResetResponse(space_id=space_id, reason=subscription.reset_reason)
-        subscription.close()
-        yield _encode_sse("reset", reset.model_dump(mode="json"))
-        return
 
     latest_cursor = subscription.latest_cursor
     if latest_cursor is None:
@@ -70,16 +65,73 @@ async def _stream_space_events(
 
     cursor = after_cursor
     try:
+        if after_cursor is not None:
+            replay_outcome = _load_stream_replay_items(
+                event_service=services.event_service,
+                space_id=space_id,
+                after_cursor=after_cursor,
+                boundary_cursor=latest_cursor,
+                limit=limit,
+                kinds=kinds,
+            )
+            if replay_outcome is None:
+                reset = EventStreamResetResponse(space_id=space_id, reason="space_not_found")
+                yield _encode_sse("reset", reset.model_dump(mode="json"))
+                return
+            replay_items, reset_reason = replay_outcome
+            if reset_reason is not None:
+                reset = EventStreamResetResponse(space_id=space_id, reason=reset_reason)
+                yield _encode_sse("reset", reset.model_dump(mode="json"))
+                return
+            for item in replay_items:
+                cursor = item.cursor
+                yield _encode_sse("event", item.model_dump(mode="json"))
+
         while True:
             next_item = await subscription.next_event(timeout_seconds=15.0)
             if next_item is None:
                 heartbeat = {"space_id": space_id, "cursor": cursor}
                 yield _encode_sse("heartbeat", heartbeat)
                 continue
+            if cursor is not None and next_item.cursor <= cursor:
+                continue
             cursor = next_item.cursor
             yield _encode_sse("event", next_item.model_dump(mode="json"))
     finally:
         subscription.close()
+
+
+def _load_stream_replay_items(
+    *,
+    event_service,
+    space_id: str,
+    after_cursor: str,
+    boundary_cursor: str | None,
+    limit: int,
+    kinds: list[str] | None,
+) -> tuple[list[EventEnvelope], str | None] | None:
+    if boundary_cursor is not None and after_cursor >= boundary_cursor:
+        return ([], None)
+
+    response = event_service.get_events_for_space(
+        space_id=space_id,
+        after_cursor=after_cursor,
+        limit=limit + 1,
+        kinds=kinds,
+    )
+    if response is None:
+        return None
+
+    replay_items = [
+        item
+        for item in response.items
+        if boundary_cursor is None or item.cursor <= boundary_cursor
+    ]
+    if len(replay_items) > limit:
+        return ([], "replay_limit_exceeded")
+    if response.has_more and boundary_cursor is not None and replay_items and replay_items[-1].cursor < boundary_cursor:
+        return ([], "replay_limit_exceeded")
+    return (replay_items, None)
 
 
 @router.get("/spaces/{space_id}", response_model=EventDeltaResponse)

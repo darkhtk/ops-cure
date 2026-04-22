@@ -24,7 +24,6 @@ class BrokerSubscription:
     queue: asyncio.Queue[EventEnvelope] = field(default_factory=asyncio.Queue)
     accepted_after_cursor: str | None = None
     latest_cursor: str | None = None
-    reset_reason: str | None = None
 
     async def next_event(self, *, timeout_seconds: float | None = None) -> EventEnvelope | None:
         self.broker.touch(subscriber_id=self.subscriber_id, space_id=self.space_id)
@@ -82,19 +81,6 @@ class InProcessSubscriptionBroker:
             self._subscriptions.setdefault(space_id, {})[subscription.subscription_id] = subscription
             backlog = list(self._backlog.get(space_id, ()))
             subscription.latest_cursor = backlog[-1].cursor if backlog else None
-            if after_cursor and backlog:
-                oldest_cursor = backlog[0].cursor
-                if after_cursor < oldest_cursor:
-                    subscription.reset_reason = "cursor_out_of_window"
-                else:
-                    replay_items = [
-                        item
-                        for item in backlog
-                        if item.cursor > after_cursor
-                        and (not subscription.kinds or item.event.kind in subscription.kinds)
-                    ]
-                    for item in replay_items:
-                        subscription.queue.put_nowait(item)
         self.touch(subscriber_id=subscriber_id, space_id=space_id)
         return subscription
 
