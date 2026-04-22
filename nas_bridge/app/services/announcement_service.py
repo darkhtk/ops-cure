@@ -3,9 +3,10 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Awaitable, Callable
 
+import discord
 from sqlalchemy import func, select
 
 from ..db import session_scope
@@ -16,6 +17,9 @@ from ..thread_manager import ThreadManager
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+ATTACHED_HEARTBEAT_GRACE_SECONDS = 120
 
 
 @dataclass(slots=True)
@@ -75,13 +79,21 @@ class AnnouncementService:
             existing_message_id = session_row.status_message_id
 
         body = self._render_status_card(snapshot)
+        embed = self._build_status_embed(snapshot)
         sent: tuple[str, str] | None = None
         if existing_message_id:
-            sent = await self.thread_manager.edit_message(snapshot.thread_id, existing_message_id, body)
+            sent = await self.thread_manager.edit_embed_message(
+                snapshot.thread_id,
+                existing_message_id,
+                embed=embed,
+                content=None,
+            )
         if sent is None:
-            sent_chunks = await self.thread_manager.post_message(snapshot.thread_id, body)
-            if sent_chunks:
-                sent = sent_chunks[0]
+            sent = await self.thread_manager.post_embed_message(
+                snapshot.thread_id,
+                embed=embed,
+                content=None,
+            )
         if sent is None:
             return existing_message_id
 
@@ -124,6 +136,18 @@ class AnnouncementService:
                 )
                 or 0,
             )
+            active_job_rows = list(
+                db.execute(
+                    select(
+                        JobModel.agent_name,
+                        JobModel.task_id,
+                        JobModel.job_type,
+                    )
+                    .where(JobModel.session_id == session_id)
+                    .where(JobModel.status == "in_progress"),
+                    )
+                .all()
+            )
             latest_verify = db.scalar(
                 select(VerifyRunModel)
                 .where(VerifyRunModel.session_id == session_id)
@@ -137,13 +161,27 @@ class AnnouncementService:
                     "review_required": latest_verify.review_required,
                 }
 
-        attached_workers = sum(1 for agent in summary.agents if agent.worker_id)
+        now = utcnow()
+        attached_workers = sum(1 for agent in summary.agents if self._is_agent_attached(agent, now))
         total_agents = len(summary.agents)
         worker_summary = f"{attached_workers}/{total_agents} attached"
-        active_worker_lines = tuple(
-            self._render_active_worker_line(agent)
-            for agent in sorted(summary.agents, key=lambda item: item.agent_name)
+        active_job_lookup = {
+            row.agent_name: {
+                "task_id": row.task_id,
+                "job_type": row.job_type,
+            }
+            for row in active_job_rows
+        }
+        active_agent_names = {
+            agent.agent_name
+            for agent in summary.agents
             if agent.status == "busy"
+        }
+        active_agent_names.update(active_job_lookup)
+        active_worker_lines = tuple(
+            self._render_active_worker_line(agent, active_job_lookup.get(agent.agent_name))
+            for agent in sorted(summary.agents, key=lambda item: item.agent_name)
+            if agent.agent_name in active_agent_names
         )
         activity_report_line = None
         if active_worker_lines:
@@ -309,10 +347,27 @@ class AnnouncementService:
         return "reconciling session state"
 
     @staticmethod
-    def _render_active_worker_line(agent) -> str:
-        detail = agent.current_activity_line or (
-            f"working on {agent.current_task_id}" if agent.current_task_id else "working"
-        )
+    def _is_agent_attached(agent, now: datetime) -> bool:
+        if agent.worker_id:
+            return True
+        if agent.last_heartbeat_at is None:
+            return False
+        return (now - agent.last_heartbeat_at) <= timedelta(seconds=ATTACHED_HEARTBEAT_GRACE_SECONDS)
+
+    @staticmethod
+    def _render_active_worker_line(agent, active_job: dict[str, str] | None = None) -> str:
+        detail = agent.current_activity_line
+        if not detail and agent.current_task_id:
+            detail = f"working on {agent.current_task_id}"
+        if not detail and active_job is not None:
+            task_id = active_job.get("task_id")
+            job_type = active_job.get("job_type") or "work"
+            if task_id:
+                detail = f"working on {task_id} ({job_type})"
+            else:
+                detail = f"working on {job_type}"
+        if not detail:
+            detail = "working"
         return f"- `{agent.agent_name}` [{agent.cli_type}] {detail}"
 
     @staticmethod
@@ -345,3 +400,67 @@ class AnnouncementService:
             f"Attention: {snapshot.attention}\n"
             f"Next: {snapshot.next_action}"
         )
+
+    @staticmethod
+    def _status_color(snapshot: SessionStatusSnapshot) -> discord.Color:
+        attention = snapshot.attention.lower()
+        if snapshot.status in {"failed_start"} or "issue" in attention or "blocked" in attention:
+            return discord.Color.red()
+        if snapshot.active_worker_lines:
+            return discord.Color.blurple()
+        if snapshot.status in {"ready", "closed"}:
+            return discord.Color.green()
+        if snapshot.status in {"paused", "awaiting_launcher", "waiting_for_workers"}:
+            return discord.Color.orange()
+        return discord.Color.light_grey()
+
+    @classmethod
+    def _build_status_embed(cls, snapshot: SessionStatusSnapshot) -> discord.Embed:
+        embed = discord.Embed(
+            title="Opscure 상태",
+            description=(
+                f"세션 `{snapshot.session_title}`\n"
+                f"대상 `{snapshot.target_project_name}`\n"
+                f"프로필 `{snapshot.profile_name}`"
+            ),
+            color=cls._status_color(snapshot),
+            timestamp=utcnow(),
+        )
+        embed.add_field(
+            name="현재 상태",
+            value=(
+                f"상태: `{snapshot.status}`\n"
+                f"희망 상태: `{snapshot.desired_status}`\n"
+                f"실행기: `{snapshot.launcher_id}`\n"
+                f"작업 디렉터리: `{snapshot.workdir}`"
+            ),
+            inline=False,
+        )
+        if snapshot.active_worker_lines:
+            workers_value = "\n".join(snapshot.active_worker_lines)
+            if snapshot.activity_report_line:
+                workers_value = f"{workers_value}\n{snapshot.activity_report_line}"
+        else:
+            workers_value = "대기 중\n현재 활성 작업 없음"
+        embed.add_field(name="활성 작업자", value=workers_value, inline=False)
+        embed.add_field(
+            name="큐와 검증",
+            value=(
+                f"작업자 연결: {snapshot.worker_summary}\n"
+                f"큐: {snapshot.job_summary}\n"
+                f"검증: {snapshot.review_summary}"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="주의",
+            value=snapshot.attention or "없음",
+            inline=False,
+        )
+        embed.add_field(
+            name="다음 액션",
+            value=snapshot.next_action or "없음",
+            inline=False,
+        )
+        embed.set_footer(text="Opscure live status")
+        return embed

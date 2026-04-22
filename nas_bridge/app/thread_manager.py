@@ -91,6 +91,29 @@ class ThreadManager:
             sent_chunks.append((str(sent_message.id), chunk))
         return sent_chunks
 
+    async def post_embed_message(
+        self,
+        thread_id: str,
+        *,
+        embed: discord.Embed,
+        content: str | None = None,
+    ) -> tuple[str, str] | None:
+        if not self.discord_enabled:
+            LOGGER.info(
+                "Discord disabled, thread %s embed message: %s",
+                thread_id,
+                embed.title or content or "(embed)",
+            )
+            return ("disabled", embed.title or content or "(embed)")
+
+        assert self.discord_client is not None
+        channel = self.discord_client.get_channel(int(thread_id))
+        if channel is None:
+            channel = await self.discord_client.fetch_channel(int(thread_id))
+
+        sent_message = await channel.send(content=content, embed=embed)
+        return (str(sent_message.id), embed.title or content or "(embed)")
+
     async def edit_message(self, thread_id: str, message_id: str, text: str) -> tuple[str, str] | None:
         if not self.discord_enabled:
             LOGGER.info("Discord disabled, edit thread %s message %s: %s", thread_id, message_id, text)
@@ -113,6 +136,40 @@ class ThreadManager:
             LOGGER.warning("Unable to edit message %s in thread %s: %s", message_id, thread_id, exc)
             return None
         return (str(message.id), chunk)
+
+    async def edit_embed_message(
+        self,
+        thread_id: str,
+        message_id: str,
+        *,
+        embed: discord.Embed,
+        content: str | None = None,
+    ) -> tuple[str, str] | None:
+        if not self.discord_enabled:
+            LOGGER.info(
+                "Discord disabled, edit thread %s embed message %s: %s",
+                thread_id,
+                message_id,
+                embed.title or content or "(embed)",
+            )
+            return (message_id, embed.title or content or "(embed)")
+
+        channel = await self._load_thread(thread_id)
+        if channel is None:
+            return None
+
+        try:
+            message = await channel.fetch_message(int(message_id))
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException) as exc:
+            LOGGER.warning("Unable to load message %s in thread %s for embed edit: %s", message_id, thread_id, exc)
+            return None
+
+        try:
+            await message.edit(content=content, embed=embed)
+        except (discord.Forbidden, discord.HTTPException) as exc:
+            LOGGER.warning("Unable to edit embed message %s in thread %s: %s", message_id, thread_id, exc)
+            return None
+        return (str(message.id), embed.title or content or "(embed)")
 
     async def archive_thread(self, thread_id: str, reason: str) -> None:
         if not self.discord_enabled:

@@ -926,9 +926,18 @@ class SessionService:
                 agent.current_activity_updated_at = None
 
             any_busy = self._has_busy_agent(session_row.agents)
+            active_job_count = int(
+                db.scalar(
+                    select(func.count())
+                    .select_from(JobModel)
+                    .where(JobModel.session_id == session_id)
+                    .where(JobModel.status == "in_progress"),
+                )
+                or 0,
+            )
             became_busy = previous_status != "busy" and agent.status == "busy"
             became_idle = previous_status == "busy" and agent.status != "busy"
-            report_due = any_busy and (
+            report_due = (any_busy or active_job_count > 0) and (
                 session_row.last_announced_at is None
                 or (now - session_row.last_announced_at) >= timedelta(seconds=60)
             )
