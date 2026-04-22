@@ -28,6 +28,8 @@ class NamedMigration:
 
 def init_db() -> None:
     from . import models  # noqa: F401
+    from .behaviors.chat import models as _chat_models  # noqa: F401
+    from .behaviors.ops import models as _ops_models  # noqa: F401
 
     settings.sqlite_path.parent.mkdir(parents=True, exist_ok=True)
     Base.metadata.create_all(bind=engine)

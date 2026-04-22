@@ -5,13 +5,12 @@ import logging
 
 import discord
 
-from .command_router import register_commands
 from .config import Settings
-from .message_router import MessageRouter
-from .services.verification_service import VerificationService
-from .session_service import SessionService
-from .thread_manager import ThreadManager
-from .worker_registry import WorkerRegistry
+from .transports.discord.bindings import DiscordBehaviorBinding
+from .transports.discord.commands import register_commands
+from .transports.discord.messages import CompositeDiscordMessageHandler
+from .transports.discord.messages import MessageRouter
+from .transports.discord.threads import ThreadManager
 
 LOGGER = logging.getLogger(__name__)
 
@@ -21,9 +20,7 @@ class DiscordBridgeClient(discord.Client):
         self,
         *,
         settings: Settings,
-        session_service: SessionService,
-        verification_service: VerificationService,
-        registry: WorkerRegistry,
+        behavior_bindings: list[DiscordBehaviorBinding],
         thread_manager: ThreadManager,
     ) -> None:
         intents = discord.Intents.default()
@@ -33,19 +30,27 @@ class DiscordBridgeClient(discord.Client):
         super().__init__(intents=intents)
         self.settings = settings
         self.tree = discord.app_commands.CommandTree(self)
-        self.message_router = MessageRouter(session_service)
-        self._session_service = session_service
-        self._verification_service = verification_service
-        self._registry = registry
+        self._behavior_bindings = tuple(behavior_bindings)
+        self.message_router = MessageRouter(
+            CompositeDiscordMessageHandler(
+                [
+                    binding.message_handler
+                    for binding in self._behavior_bindings
+                    if binding.message_handler is not None
+                ],
+            ),
+        )
         self._thread_manager = thread_manager
 
     async def setup_hook(self) -> None:
         LOGGER.info("Starting Discord setup hook")
         register_commands(
             self.tree,
-            session_service=self._session_service,
-            verification_service=self._verification_service,
-            registry=self._registry,
+            providers=[
+                binding.command_provider
+                for binding in self._behavior_bindings
+                if binding.command_provider is not None
+            ],
         )
         if self.settings.discord_sync_guild_ids:
             for guild_id in self.settings.discord_sync_guild_ids:
@@ -71,15 +76,11 @@ class DiscordGateway:
         self,
         *,
         settings: Settings,
-        session_service: SessionService,
-        verification_service: VerificationService,
-        registry: WorkerRegistry,
+        behavior_bindings: list[DiscordBehaviorBinding],
         thread_manager: ThreadManager,
     ) -> None:
         self.settings = settings
-        self.session_service = session_service
-        self.verification_service = verification_service
-        self.registry = registry
+        self.behavior_bindings = behavior_bindings
         self.thread_manager = thread_manager
         self.client: DiscordBridgeClient | None = None
         self._task: asyncio.Task[None] | None = None
@@ -99,9 +100,7 @@ class DiscordGateway:
 
         self.client = DiscordBridgeClient(
             settings=self.settings,
-            session_service=self.session_service,
-            verification_service=self.verification_service,
-            registry=self.registry,
+            behavior_bindings=self.behavior_bindings,
             thread_manager=self.thread_manager,
         )
         self._task = asyncio.create_task(self._run_client(), name="discord-gateway")

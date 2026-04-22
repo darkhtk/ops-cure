@@ -9,9 +9,10 @@ from typing import Awaitable, Callable
 import discord
 from sqlalchemy import func, select
 
+from ..behaviors.workflow.models import JobModel, VerifyRunModel
+from ..behaviors.workflow.schemas import SessionSummaryResponse
 from ..db import session_scope
-from ..models import JobModel, SessionModel, VerifyRunModel
-from ..schemas import SessionSummaryResponse
+from ..kernel.models import SessionModel
 from ..thread_manager import ThreadManager
 
 

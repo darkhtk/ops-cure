@@ -21,6 +21,22 @@ class FakeThreadManager:
         self.cleaned_threads: list[tuple[str, str]] = []
         self.missing_threads: set[str] = set()
 
+    async def create_thread(
+        self,
+        *,
+        guild_id: str,
+        parent_channel_id: str,
+        title: str,
+        starter_text: str,
+        auto_archive_duration: int,
+    ) -> str:
+        del guild_id, parent_channel_id, auto_archive_duration
+        thread_id = f"thread-{len(self.created_threads) + 1}"
+        self.created_threads.append(thread_id)
+        if starter_text:
+            await self.post_message(thread_id, starter_text)
+        return thread_id
+
     async def create_session_thread(
         self,
         *,

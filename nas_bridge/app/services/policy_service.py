@@ -6,8 +6,8 @@ from datetime import datetime
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..models import SessionPolicyModel
-from ..schemas import ProjectManifest, ProjectPolicy, SessionPolicyResponse
+from ..behaviors.workflow.models import SessionPolicyModel
+from ..behaviors.workflow.schemas import ProjectManifest, ProjectPolicy, SessionPolicyResponse
 
 
 class PolicyService:

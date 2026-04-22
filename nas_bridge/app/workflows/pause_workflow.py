@@ -6,9 +6,10 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
+from ..behaviors.workflow.models import JobModel, SessionOperationModel
+from ..behaviors.workflow.schemas import SessionPauseResponse
 from ..db import session_scope
-from ..models import JobModel, SessionModel, SessionOperationModel
-from ..schemas import SessionPauseResponse
+from ..kernel.models import SessionModel
 from ..services.recovery_service import RecoveryService
 
 

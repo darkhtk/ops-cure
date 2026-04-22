@@ -10,15 +10,9 @@ from sqlalchemy.orm import selectinload
 
 from ..capabilities.execution.base import ExecutionProvider, ExecutionTarget
 from ..capabilities.power.base import PowerProvider, PowerTarget
+from ..behaviors.workflow.models import JobModel, SessionOperationModel
 from ..db import session_scope
-from ..models import (
-    AgentModel,
-    ExecutionTargetModel,
-    JobModel,
-    PowerTargetModel,
-    SessionModel,
-    SessionOperationModel,
-)
+from ..kernel.models import AgentModel, ExecutionTargetModel, PowerTargetModel, SessionModel
 from ..thread_manager import ThreadManager
 from ..transcript_service import TranscriptService
 from ..worker_registry import WorkerRegistry

@@ -12,41 +12,39 @@ from uuid import uuid4
 from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session, selectinload
 
-from .db import session_scope
-from .drift_monitor import ArtifactSnapshot, DriftEvaluation, DriftMonitor
-from .models import (
-    AgentModel,
-    ExecutionTargetModel,
+from .behaviors.workflow.models import (
     HandoffModel,
     JobModel,
-    PowerTargetModel,
     ProjectFindModel,
-    SessionModel,
     SessionOperationModel,
     SessionPolicyModel,
     TaskEventModel,
     TaskModel,
-    TranscriptModel,
 )
-from .schemas import (
-    AgentStatusResponse,
+from .behaviors.workflow.schemas import (
     ArtifactHeartbeatSnapshot,
-    ExecutionTargetSummary,
     HandoffStateSummary,
     JobPayload,
     PolicySetResponse,
-    PowerTargetSummary,
     ProjectFindCandidate,
     ProjectFindCompleteRequest,
     ProjectFindLaunchResponse,
+    ProjectFindSummaryResponse,
     ProjectManifest,
+    SessionLaunchResponse,
     SessionOperationResponse,
     SessionPauseResponse,
     SessionPolicyResponse,
-    SessionLaunchResponse,
-    ProjectFindSummaryResponse,
     SessionSummaryResponse,
     TaskStateSummary,
+)
+from .db import session_scope
+from .kernel.drift import ArtifactSnapshot, DriftEvaluation, DriftMonitor
+from .kernel.models import AgentModel, ExecutionTargetModel, PowerTargetModel, SessionModel, TranscriptModel
+from .kernel.schemas import (
+    AgentStatusResponse,
+    ExecutionTargetSummary,
+    PowerTargetSummary,
     ThreadDeltaEntry,
     ThreadDeltaResponse,
     TranscriptContextEntry,

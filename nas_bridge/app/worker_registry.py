@@ -9,8 +9,8 @@ from sqlalchemy import delete, distinct, func, select
 from sqlalchemy.orm import selectinload
 
 from .db import session_scope
-from .models import LauncherCatalogEntryModel, LauncherRecordModel
-from .schemas import ProjectManifest
+from .behaviors.workflow.schemas import ProjectManifest
+from .kernel.models import LauncherCatalogEntryModel, LauncherRecordModel
 
 LOGGER = logging.getLogger(__name__)
 

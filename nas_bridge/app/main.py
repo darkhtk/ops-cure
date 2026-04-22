@@ -8,27 +8,42 @@ import asyncio
 
 from fastapi import FastAPI
 
-from .api import health, sessions, verification, workers
+from .api import actors, behaviors, events, health, sessions, spaces, verification, workers
+from .behaviors.catalog import BehaviorCatalogService
+from .behaviors.chat.service import ChatBehaviorService
+from .behaviors.ops.service import OpsBehaviorService
+from .behaviors.registry import (
+    BehaviorContext,
+    BehaviorDescriptor,
+    default_behavior_descriptors,
+    resolve_discord_bindings,
+    resolve_kernel_bindings,
+)
+from .behaviors.workflow.policy import PolicyService
+from .behaviors.workflow.recovery import RecoveryService
+from .behaviors.workflow.service import SessionService
+from .behaviors.workflow.verification import VerificationService
+from .behaviors.workflow.workflows.pause import PauseWorkflow
+from .behaviors.workflow.workflows.policy import PolicyWorkflow
+from .behaviors.workflow.workflows.start import StartWorkflow
 from .capabilities.execution.router import RoutedExecutionProvider
 from .capabilities.execution.windows_launcher import WindowsLauncherExecutionProvider
 from .capabilities.power.noop import NoopPowerProvider
 from .capabilities.power.router import RoutedPowerProvider
 from .capabilities.power.wol import WakeOnLanPowerProvider
 from .config import Settings, get_settings
+from .kernel.actors import ActorService
+from .kernel.bindings import KernelBehaviorBinding
+from .kernel.drift import DriftMonitor
+from .kernel.event_log import TranscriptService
+from .kernel.events import EventService
+from .kernel.registry import WorkerRegistry
+from .kernel.spaces import SpaceService
+from .presenters.discord.status_cards import AnnouncementService
+from .transports.discord.gateway import DiscordGateway
+from .transports.discord.bindings import DiscordBehaviorBinding
+from .transports.discord.threads import ThreadManager
 from .db import init_db
-from .discord_gateway import DiscordGateway
-from .drift_monitor import DriftMonitor
-from .services.announcement_service import AnnouncementService
-from .services.policy_service import PolicyService
-from .services.recovery_service import RecoveryService
-from .services.verification_service import VerificationService
-from .session_service import SessionService
-from .thread_manager import ThreadManager
-from .transcript_service import TranscriptService
-from .worker_registry import WorkerRegistry
-from .workflows.pause_workflow import PauseWorkflow
-from .workflows.policy_workflow import PolicyWorkflow
-from .workflows.start_workflow import StartWorkflow
 
 
 def configure_logging(log_level: str) -> None:
@@ -43,8 +58,17 @@ class ServiceContainer:
     settings: Settings
     registry: WorkerRegistry
     transcript_service: TranscriptService
+    actor_service: ActorService
+    event_service: EventService
+    space_service: SpaceService
     thread_manager: ThreadManager
     announcement_service: AnnouncementService
+    chat_service: ChatBehaviorService
+    ops_service: OpsBehaviorService
+    behavior_descriptors: tuple[BehaviorDescriptor, ...]
+    kernel_behaviors: list[KernelBehaviorBinding]
+    discord_behaviors: list[DiscordBehaviorBinding]
+    behavior_catalog_service: BehaviorCatalogService
     policy_service: PolicyService
     recovery_service: RecoveryService
     verification_service: VerificationService
@@ -61,6 +85,8 @@ def build_services(settings: Settings) -> ServiceContainer:
     transcript_service = TranscriptService()
     thread_manager = ThreadManager(settings)
     announcement_service = AnnouncementService(thread_manager=thread_manager)
+    chat_service = ChatBehaviorService(thread_manager=thread_manager)
+    ops_service = OpsBehaviorService(thread_manager=thread_manager)
     policy_service = PolicyService()
     verification_service = VerificationService(
         registry=registry,
@@ -112,24 +138,76 @@ def build_services(settings: Settings) -> ServiceContainer:
         execution_provider=execution_provider,
         announcement_service=announcement_service,
     )
-    discord_gateway = DiscordGateway(
-        settings=settings,
+    behavior_descriptors = default_behavior_descriptors()
+    behavior_context = BehaviorContext(
+        registry=registry,
+        thread_manager=thread_manager,
+        chat_service=chat_service,
+        ops_service=ops_service,
+        policy_service=policy_service,
+        recovery_service=recovery_service,
         session_service=session_service,
         verification_service=verification_service,
-        registry=registry,
+    )
+    kernel_behaviors = resolve_kernel_bindings(
+        context=behavior_context,
+        descriptors=behavior_descriptors,
+    )
+    actor_service = ActorService(
+        providers=[
+            binding.actor_provider
+            for binding in kernel_behaviors
+            if binding.actor_provider is not None
+        ],
+    )
+    event_service = EventService(
+        providers=[
+            binding.event_provider
+            for binding in kernel_behaviors
+            if binding.event_provider is not None
+        ],
+    )
+    space_service = SpaceService(
+        providers=[
+            binding.space_provider
+            for binding in kernel_behaviors
+            if binding.space_provider is not None
+        ],
+    )
+    discord_behaviors = resolve_discord_bindings(
+        context=behavior_context,
+        descriptors=behavior_descriptors,
+    )
+    behavior_catalog_service = BehaviorCatalogService(
+        descriptors=behavior_descriptors,
+        kernel_bindings=kernel_behaviors,
+        discord_bindings=discord_behaviors,
+    )
+    discord_gateway = DiscordGateway(
+        settings=settings,
+        behavior_bindings=discord_behaviors,
         thread_manager=thread_manager,
     )
     return ServiceContainer(
         settings=settings,
         registry=registry,
         transcript_service=transcript_service,
+        actor_service=actor_service,
+        event_service=event_service,
         thread_manager=thread_manager,
         announcement_service=announcement_service,
+        chat_service=chat_service,
+        ops_service=ops_service,
+        behavior_descriptors=behavior_descriptors,
+        kernel_behaviors=kernel_behaviors,
+        discord_behaviors=discord_behaviors,
+        behavior_catalog_service=behavior_catalog_service,
         policy_service=policy_service,
         recovery_service=recovery_service,
         verification_service=verification_service,
         session_service=session_service,
         discord_gateway=discord_gateway,
+        space_service=space_service,
     )
 
 
@@ -157,6 +235,10 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Opscure Bridge", lifespan=lifespan)
 app.include_router(health.router)
+app.include_router(actors.router)
+app.include_router(behaviors.router)
+app.include_router(events.router)
 app.include_router(sessions.router)
+app.include_router(spaces.router)
 app.include_router(verification.router)
 app.include_router(workers.router)

@@ -1,0 +1,1 @@
+"""Discord transport adapter package."""

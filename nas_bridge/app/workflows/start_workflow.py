@@ -7,14 +7,10 @@ from pathlib import Path
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
+from ..behaviors.workflow.models import SessionOperationModel
+from ..behaviors.workflow.schemas import ProjectManifest, SessionSummaryResponse
 from ..db import session_scope
-from ..models import (
-    ExecutionTargetModel,
-    PowerTargetModel,
-    SessionModel,
-    SessionOperationModel,
-)
-from ..schemas import ProjectManifest, SessionSummaryResponse
+from ..kernel.models import ExecutionTargetModel, PowerTargetModel, SessionModel
 from ..services.policy_service import PolicyService
 from ..services.recovery_service import RecoveryService
 

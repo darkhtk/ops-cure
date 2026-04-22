@@ -8,8 +8,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from ..db import session_scope
-from ..models import ReviewDecisionModel, SessionModel, VerifyArtifactModel, VerifyRunModel
-from ..schemas import (
+from ..behaviors.workflow.models import ReviewDecisionModel, VerifyArtifactModel, VerifyRunModel
+from ..behaviors.workflow.schemas import (
     ProjectManifest,
     ReviewDecisionSummary,
     VerifyArtifactInput,
@@ -17,6 +17,7 @@ from ..schemas import (
     VerifyRunClaimResponse,
     VerifyRunSummaryResponse,
 )
+from ..kernel.models import SessionModel
 from ..transcript_service import TranscriptService
 from ..thread_manager import ThreadManager
 from ..worker_registry import WorkerRegistry

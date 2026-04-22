@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from sqlalchemy import select
 
+from ..behaviors.workflow.schemas import PolicySetResponse, SessionPolicyResponse
 from ..db import session_scope
-from ..models import SessionModel
-from ..schemas import PolicySetResponse, SessionPolicyResponse
+from ..kernel.models import SessionModel
 from ..services.policy_service import PolicyService
 
 

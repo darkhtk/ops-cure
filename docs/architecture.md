@@ -3,6 +3,7 @@
 This document explains how Opscure is structured today and how the main runtime flow is supposed to work.
 
 For practical operating guardrails, see [checklists.md](checklists.md).
+For the ongoing generic kernel split, see [generic-kernel.md](generic-kernel.md).
 
 ## Overview
 

@@ -33,6 +33,45 @@ class ThreadManager:
     def discord_enabled(self) -> bool:
         return not self.settings.disable_discord and self.discord_client is not None
 
+    async def create_thread(
+        self,
+        *,
+        guild_id: str,
+        parent_channel_id: str,
+        title: str,
+        starter_text: str,
+        auto_archive_duration: int,
+    ) -> str:
+        if not self.discord_enabled:
+            fake_id = f"dev-thread-{title}-{int(datetime.utcnow().timestamp())}"
+            LOGGER.info("Discord disabled, using fake thread id %s", fake_id)
+            return fake_id
+
+        assert self.discord_client is not None
+        parent_channel = self.discord_client.get_channel(int(parent_channel_id))
+        if parent_channel is None:
+            parent_channel = await self.discord_client.fetch_channel(int(parent_channel_id))
+
+        if isinstance(parent_channel, discord.TextChannel):
+            starter = await parent_channel.send(starter_text)
+            thread = await starter.create_thread(
+                name=title,
+                auto_archive_duration=auto_archive_duration,
+            )
+            return str(thread.id)
+
+        if isinstance(parent_channel, discord.ForumChannel):
+            thread_with_message = await parent_channel.create_thread(
+                name=title,
+                content=starter_text,
+                auto_archive_duration=auto_archive_duration,
+            )
+            return str(thread_with_message.thread.id)
+
+        raise TypeError(
+            f"Unsupported parent channel type: {type(parent_channel).__name__}",
+        )
+
     async def create_session_thread(
         self,
         *,
@@ -54,25 +93,12 @@ class ThreadManager:
 
         timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
         thread_name = template.format(project_name=project_name, timestamp=timestamp)
-
-        if isinstance(parent_channel, discord.TextChannel):
-            starter = await parent_channel.send(f"Session starting for `{project_name}`.")
-            thread = await starter.create_thread(
-                name=thread_name,
-                auto_archive_duration=auto_archive_duration,
-            )
-            return str(thread.id)
-
-        if isinstance(parent_channel, discord.ForumChannel):
-            thread_with_message = await parent_channel.create_thread(
-                name=thread_name,
-                content=f"Session starting for `{project_name}`.",
-                auto_archive_duration=auto_archive_duration,
-            )
-            return str(thread_with_message.thread.id)
-
-        raise TypeError(
-            f"Unsupported parent channel type: {type(parent_channel).__name__}",
+        return await self.create_thread(
+            guild_id=guild_id,
+            parent_channel_id=parent_channel_id,
+            title=thread_name,
+            starter_text=f"Session starting for `{project_name}`.",
+            auto_archive_duration=auto_archive_duration,
         )
 
     async def post_message(self, thread_id: str, text: str) -> list[tuple[str, str]]:
