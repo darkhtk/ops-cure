@@ -1,0 +1,42 @@
+name: chat-participant
+display_name: Chat Participant
+description: Attach a local Codex thread to an Opscure chat room as a participant.
+server_required: true
+client_required: true
+targets:
+  - client
+requirements_file: pc_launcher/requirements.txt
+runtime:
+  runner_module: pc_launcher.connectors.chat_participant.runner
+  sender_module: pc_launcher.connectors.chat_participant.send_message
+  default_project_path: pc_launcher/projects/chat_participant/project.yaml
+  default_runtime_mode: current-thread
+  default_reconnect_seconds: 3.0
+  healthcheck_path: /api/health
+env:
+  - name: BRIDGE_TOKEN
+    required: true
+    scope: client
+    description: Shared bridge authentication token used by the NAS bridge.
+  - name: CODEX_EXECUTABLE
+    required: false
+    scope: client
+    description: Optional override for the local Codex executable path.
+  - name: CODEX_THREAD_ID
+    required: false
+    scope: client
+    description: Optional current Codex desktop thread id used for current-thread mode.
+doctor_checks:
+  - env_file
+  - project_file
+  - bridge_health
+  - auth_token
+  - codex_help
+  - codex_app_server_help
+smoke_tests:
+  - event stream open
+  - current-thread runner attach
+  - UTF-8 file-based Korean message send
+install_notes:
+  - The chat participant connector is a client-side runtime adapter; the NAS bridge remains the source of truth.
+  - Use the generated project file only for chat participant connectivity, not for orchestration worker sessions.

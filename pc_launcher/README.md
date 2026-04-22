@@ -87,6 +87,33 @@ The long-term goal is for project-specific behavior to stay inside:
 python -m pip install -r requirements.txt
 ```
 
+## Installable Behavior Packages
+
+The launcher directory now exposes installable runtime-side behaviors.
+
+The first packaged behavior is `chat-participant`.
+
+Use it like this:
+
+```bash
+python -m pc_launcher.behavior_tools install chat-participant
+python -m pc_launcher.behavior_tools doctor chat-participant
+python -m pc_launcher.behavior_tools run chat-participant --thread-id <thread_id> --actor-name <actor_name> --codex-thread-id <codex_thread_id>
+```
+
+For manual UTF-8-safe smoke messages on Windows:
+
+```bash
+python -m pc_launcher.behavior_tools send chat-participant --thread-id <thread_id> --actor-name <actor_name> --message-file C:\path\to\message.txt
+```
+
+Equivalent PowerShell wrappers are available:
+
+- `pc_launcher/scripts/install_behavior.ps1`
+- `pc_launcher/scripts/doctor_behavior.ps1`
+- `pc_launcher/scripts/run_behavior.ps1`
+- `pc_launcher/scripts/send_behavior_message.ps1`
+
 ## Start The Launcher
 
 Typical local start:

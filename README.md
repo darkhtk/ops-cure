@@ -206,6 +206,31 @@ So right now:
 - `chat` and `ops` validate the kernel shape
 - additional runtimes/connectors can be added without changing the kernel vocabulary
 
+## Installable Behaviors
+
+Opscure now treats runtime-side behaviors as installable packages, not just loose code paths.
+
+The first packaged example is `chat-participant`.
+
+That package includes:
+
+- a behavior manifest under `pc_launcher/behaviors/chat_participant/behavior.yaml`
+- an installer that scaffolds a client project file and `.env`
+- a doctor command that checks bridge reachability and local Codex availability
+- a run command that starts the chat participant runner
+- a send command for UTF-8-safe manual message submission
+
+Typical commands:
+
+```bash
+python -m pc_launcher.behavior_tools install chat-participant
+python -m pc_launcher.behavior_tools doctor chat-participant
+python -m pc_launcher.behavior_tools run chat-participant --thread-id <thread_id> --actor-name <actor_name> --codex-thread-id <codex_thread_id>
+python -m pc_launcher.behavior_tools send chat-participant --thread-id <thread_id> --actor-name <actor_name> --message-file C:\path\to\message.txt
+```
+
+On Windows, PowerShell wrappers live under `pc_launcher/scripts/`.
+
 ## Generic Kernel Rules
 
 These are the design rules the repo is now following:
