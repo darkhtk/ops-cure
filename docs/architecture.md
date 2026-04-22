@@ -2,6 +2,8 @@
 
 This document explains how Opscure is structured today and how the main runtime flow is supposed to work.
 
+For practical operating guardrails, see [checklists.md](checklists.md).
+
 ## Overview
 
 Opscure is a two-plane system:

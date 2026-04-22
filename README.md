@@ -20,6 +20,7 @@ The current default runtime model is:
 Opscure keeps orchestration state on the bridge, runs AI workers on a Windows machine, and uses Discord as the operator-facing control surface.
 
 If you want the deeper version, see [docs/architecture.md](docs/architecture.md).
+If you want the operating guardrails, see [docs/checklists.md](docs/checklists.md).
 
 ## Framework Diagram
 
