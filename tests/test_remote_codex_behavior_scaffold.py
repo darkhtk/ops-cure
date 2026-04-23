@@ -219,6 +219,18 @@ def test_remote_codex_browser_and_agent_surface_round_trip(app_env) -> None:
         assert queued_followup_payload["task"]["status"] == "queued"
         assert queued_followup_payload["command"]["status"] == "queued"
 
+        queued_messages_response = client.get(
+            "/api/remote-codex/machines/machine-z/threads/thread-z/messages",
+            headers={"Authorization": "Bearer test-token"},
+        )
+        assert queued_messages_response.status_code == 200
+        assert [item["text"] for item in queued_messages_response.json()["messages"]] == [
+            "Ship this UX",
+            "Working on it.",
+            "Add a task panel.",
+            "Queue this after the in-progress turn.",
+        ]
+
         task_response = client.get(
             "/api/remote-codex/machines/machine-z/threads/thread-z/tasks",
             headers={"Authorization": "Bearer test-token"},
@@ -264,6 +276,76 @@ def test_remote_codex_browser_and_agent_surface_round_trip(app_env) -> None:
         )
         assert second_result_response.status_code == 200
         assert second_result_response.json()["command"]["status"] == "completed"
+
+        second_sync_payload = {
+            "machine": machine_payload["machine"],
+            "threads": machine_payload["threads"],
+            "snapshots": [
+                {
+                    "thread": machine_payload["snapshots"][0]["thread"],
+                    "messages": [
+                        machine_payload["snapshots"][0]["messages"][0],
+                        machine_payload["snapshots"][0]["messages"][1],
+                        {
+                            "lineNumber": 3,
+                            "timestamp": "2026-04-23T00:00:03+00:00",
+                            "role": "user",
+                            "phase": None,
+                            "text": "Add a task panel.",
+                            "images": [],
+                        },
+                        {
+                            "lineNumber": 4,
+                            "timestamp": "2026-04-23T00:00:04+00:00",
+                            "role": "assistant",
+                            "phase": "inProgress",
+                            "text": "First request accepted.",
+                            "images": [],
+                        },
+                        {
+                            "lineNumber": 5,
+                            "timestamp": "2026-04-23T00:00:05+00:00",
+                            "role": "user",
+                            "phase": None,
+                            "text": "Queue this after the in-progress turn.",
+                            "images": [],
+                        },
+                        {
+                            "lineNumber": 6,
+                            "timestamp": "2026-04-23T00:00:06+00:00",
+                            "role": "assistant",
+                            "phase": "inProgress",
+                            "text": "Queued follow-up accepted.",
+                            "images": [],
+                        },
+                    ],
+                    "totalMessages": 6,
+                    "lineCount": 6,
+                    "fileSize": 256,
+                    "syncedAt": "2026-04-23T00:00:07+00:00",
+                }
+            ],
+        }
+        second_sync_response = client.post(
+            "/api/remote-codex/agent/sync",
+            headers={"Authorization": "Bearer test-token"},
+            json=second_sync_payload,
+        )
+        assert second_sync_response.status_code == 200
+
+        synced_messages_response = client.get(
+            "/api/remote-codex/machines/machine-z/threads/thread-z/messages",
+            headers={"Authorization": "Bearer test-token"},
+        )
+        assert synced_messages_response.status_code == 200
+        assert [item["text"] for item in synced_messages_response.json()["messages"]] == [
+            "Ship this UX",
+            "Working on it.",
+            "Add a task panel.",
+            "First request accepted.",
+            "Queue this after the in-progress turn.",
+            "Queued follow-up accepted.",
+        ]
 
         delete_response = client.delete(
             "/api/remote-codex/machines/machine-z/threads/thread-z",

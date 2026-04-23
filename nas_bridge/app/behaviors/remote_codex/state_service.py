@@ -127,6 +127,10 @@ def prompt_preview(prompt: str | None, max_length: int = 160) -> str | None:
     return text if len(text) <= max_length else f"{text[: max_length - 3]}..."
 
 
+def normalize_message_text(value: Any) -> str:
+    return compact_text(value).casefold()
+
+
 @dataclass(slots=True)
 class SubscriptionHandle:
     queue: asyncio.Queue[dict[str, Any]]
@@ -233,6 +237,47 @@ class RemoteCodexStateService:
             "requestedBy": loads_json(row.requested_by_json, {}),
             "result": result,
             "error": error,
+        }
+
+    def _command_row_to_pending_message(
+        self,
+        row: RemoteCodexCommandModel,
+        *,
+        recent_user_texts: set[str],
+    ) -> dict[str, Any] | None:
+        if row.type != TURN_START:
+            return None
+
+        prompt = compact_text(row.prompt)
+        if not prompt:
+            return None
+
+        normalized_prompt = normalize_message_text(prompt)
+        if normalized_prompt in recent_user_texts:
+            return None
+
+        status = compact_text(row.status).lower()
+        result = loads_json(row.result_json, None)
+        turn_status = ""
+        if isinstance(result, dict):
+            turn_status = compact_text(result.get("turnStatus")).lower()
+
+        should_surface = status in {COMMAND_QUEUED, COMMAND_RUNNING} or (
+            status == COMMAND_COMPLETED and turn_status in {"queued", "inprogress", "in_progress", "running"}
+        )
+        if not should_surface:
+            return None
+
+        created_at = ensure_utc(row.created_at) or utcnow()
+        synthetic_line_number = -max(1, int(created_at.timestamp() * 1000))
+        recent_user_texts.add(normalized_prompt)
+        return {
+            "lineNumber": synthetic_line_number,
+            "timestamp": isoformat(created_at),
+            "role": "user",
+            "phase": None,
+            "text": prompt,
+            "images": [],
         }
 
     def _sort_public_machines(self, machines: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -346,9 +391,31 @@ class RemoteCodexStateService:
                     .order_by(RemoteCodexMessageModel.line_number.asc())
                 )
             )
+            public_messages = [self._message_row_to_public(row) for row in message_rows]
+            recent_user_texts = {
+                normalize_message_text(message.get("text"))
+                for message in public_messages[-12:]
+                if compact_text(message.get("role")) == "user"
+            }
+            pending_command_messages = [
+                message
+                for message in (
+                    self._command_row_to_pending_message(row, recent_user_texts=recent_user_texts)
+                    for row in db.scalars(
+                        select(RemoteCodexCommandModel)
+                        .where(
+                            RemoteCodexCommandModel.machine_id == machine_id,
+                            RemoteCodexCommandModel.thread_id == thread_id,
+                        )
+                        .order_by(RemoteCodexCommandModel.created_at.asc())
+                    )
+                )
+                if message is not None
+            ]
+            public_messages.extend(pending_command_messages)
             effective_limit = max(0, int(limit))
             if effective_limit > 0:
-                message_rows = message_rows[-effective_limit:]
+                public_messages = public_messages[-effective_limit:]
             return {
                 "machine": self._machine_row_to_public(
                     machine_row,
@@ -360,8 +427,8 @@ class RemoteCodexStateService:
                     or 0,
                 ),
                 "thread": self._thread_row_to_public(thread_row),
-                "messages": [self._message_row_to_public(row) for row in message_rows],
-                "totalMessages": thread_row.total_messages,
+                "messages": public_messages,
+                "totalMessages": thread_row.total_messages + len(pending_command_messages),
                 "lineCount": thread_row.line_count,
                 "fileSize": thread_row.file_size,
                 "syncedAt": isoformat(thread_row.synced_at),

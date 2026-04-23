@@ -412,7 +412,17 @@ async def stream_thread(machine_id: str, thread_id: str, request: Request, after
             elif kind == "machine":
                 yield f"event: machine\ndata: {json.dumps(payload['machine'])}\n\n"
             elif kind == "command":
-                yield f"event: command\ndata: {json.dumps(payload['command'])}\n\n"
+                command = payload["command"]
+                yield f"event: command\ndata: {json.dumps(command)}\n\n"
+                if command.get("type") == "turn.start":
+                    snapshot = service.get_thread_messages(machine_id, thread_id, limit=0, after_line_number=last_line_number)
+                    fresh_messages = snapshot["messages"]
+                    if fresh_messages:
+                        last_line_number = max(
+                            last_line_number,
+                            max(int(item.get("lineNumber") or 0) for item in fresh_messages),
+                        )
+                        yield f"event: messages\ndata: {json.dumps(fresh_messages)}\n\n"
             elif kind == "task":
                 yield f"event: task\ndata: {json.dumps(payload['task'])}\n\n"
     return StreamingResponse(event_stream(), media_type="text/event-stream")
