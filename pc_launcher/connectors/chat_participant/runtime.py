@@ -68,11 +68,15 @@ class ChatParticipantRuntime(Protocol):
 
 
 class AppServerThreadClient(Protocol):
+    def list_threads(self, *, limit: int = 60) -> dict[str, Any]: ...
+
     def resume_thread(self, thread_id: str) -> dict[str, Any]: ...
 
     def read_thread(self, thread_id: str, *, include_turns: bool = False) -> dict[str, Any]: ...
 
     def start_turn(self, thread_id: str, prompt: str) -> dict[str, Any]: ...
+
+    def interrupt_turn(self, thread_id: str, turn_id: str) -> dict[str, Any]: ...
 
     def wait_for_turn_completion(
         self,
@@ -487,6 +491,14 @@ class CodexAppServerProcessClient:
             },
         )
 
+    def list_threads(self, *, limit: int = 60) -> dict[str, Any]:
+        return self._send_request(
+            "thread/list",
+            {
+                "limit": max(1, int(limit)),
+            },
+        )
+
     def resume_thread(self, thread_id: str) -> dict[str, Any]:
         return self._send_request("thread/resume", {"threadId": thread_id})
 
@@ -501,6 +513,15 @@ class CodexAppServerProcessClient:
                         "text": prompt,
                     },
                 ],
+            },
+        )
+
+    def interrupt_turn(self, thread_id: str, turn_id: str) -> dict[str, Any]:
+        return self._send_request(
+            "turn/interrupt",
+            {
+                "threadId": thread_id,
+                "turnId": turn_id,
             },
         )
 

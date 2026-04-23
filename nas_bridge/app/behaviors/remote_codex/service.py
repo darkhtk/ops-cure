@@ -25,6 +25,7 @@ from .state_service import (
     COMMAND_FAILED,
     COMMAND_QUEUED,
     COMMAND_RUNNING,
+    THREAD_DELETE,
     TURN_INTERRUPT,
     TURN_START,
     RemoteCodexStateService,
@@ -604,6 +605,36 @@ class RemoteCodexBehaviorService:
         return {
             "ok": True,
             "task": browser_task,
+            "command": command,
+        }
+
+    def enqueue_thread_delete(
+        self,
+        *,
+        machine_id: str,
+        thread_id: str,
+        requested_by: dict[str, Any],
+    ) -> dict[str, Any]:
+        machine = self.state_service.get_machine(machine_id)
+        if machine is None:
+            raise ValueError("machine_not_found")
+        if machine["status"] != "online":
+            raise ValueError("machine_offline")
+        thread = self.state_service.get_thread(machine_id, thread_id)
+        if thread is None:
+            raise ValueError("thread_not_found")
+        active_command = self.state_service.get_active_thread_command(machine_id, thread_id)
+        if active_command is not None:
+            raise RuntimeError("turn_command_in_progress")
+
+        command = self.state_service.enqueue_command(
+            command_type=THREAD_DELETE,
+            machine_id=machine_id,
+            thread_id=thread_id,
+            requested_by=requested_by,
+        )
+        return {
+            "ok": True,
             "command": command,
         }
 

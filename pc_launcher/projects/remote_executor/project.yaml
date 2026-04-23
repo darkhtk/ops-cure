@@ -1,0 +1,30 @@
+profile_name: remote-executor
+default_target_name: remote-executor
+default_workdir: C:\Users\darkh\Projects\ops-cure
+guild_id: '1494848853441253416'
+parent_channel_id: '1494851246480298125'
+allowed_user_ids:
+- '573769589318615040'
+discord:
+  thread_name_template: '[{project_name}] {timestamp}'
+  auto_archive_duration: 1440
+bridge:
+  base_url: http://172.30.1.12:18080
+  auth_token_env: BRIDGE_TOKEN
+agents: []
+startup:
+  send_ready_message: false
+  restore_last_session: false
+  open_tools: []
+artifacts:
+  sessions_dir: _discord_sessions
+  quiet_discord: true
+policy:
+  max_parallel_agents: 1
+  auto_retry: true
+  max_retries: 1
+  quiet_discord: true
+  approval_mode: critical_only
+  allow_cross_agent_handoff: false
+verification:
+  enabled: false

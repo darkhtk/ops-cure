@@ -7,30 +7,45 @@ import socket
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from dotenv import load_dotenv
 
 try:
     from ...bridge_client import BridgeClient
     from ...config_loader import load_project
+    from ...connectors.chat_participant.runtime import (
+        CodexAppServerProcessClient,
+        CodexCurrentThreadRuntimeConfig,
+    )
     from ...process_io import configure_utf8_stdio
     from .bridge import BridgeRemoteExecutorClient
+    from .device_agent import LocalCodexBackend, RemoteCodexDeviceAgent, compact_text
     from .runtime import (
         CodexCliRemoteExecutorRuntime,
         CodexCurrentThreadRemoteExecutorRuntime,
         ExecutionTaskContext,
         RemoteExecutorRuntime,
+        _resolve_executable,
+        _runtime_env_var,
     )
 except ImportError:  # pragma: no cover - script mode support
     from pc_launcher.bridge_client import BridgeClient
     from pc_launcher.config_loader import load_project
+    from pc_launcher.connectors.chat_participant.runtime import (
+        CodexAppServerProcessClient,
+        CodexCurrentThreadRuntimeConfig,
+    )
     from pc_launcher.process_io import configure_utf8_stdio
     from pc_launcher.connectors.remote_executor.bridge import BridgeRemoteExecutorClient
+    from pc_launcher.connectors.remote_executor.device_agent import LocalCodexBackend, RemoteCodexDeviceAgent, compact_text
     from pc_launcher.connectors.remote_executor.runtime import (
         CodexCliRemoteExecutorRuntime,
         CodexCurrentThreadRemoteExecutorRuntime,
         ExecutionTaskContext,
         RemoteExecutorRuntime,
+        _resolve_executable,
+        _runtime_env_var,
     )
 
 
@@ -48,6 +63,13 @@ class RunnerConfig:
     poll_interval_seconds: float
     lease_seconds: int
     run_once: bool
+
+
+@dataclass(slots=True)
+class RunnerSession:
+    bridge: BridgeRemoteExecutorClient
+    runtime: RemoteExecutorRuntime
+    device_agent: RemoteCodexDeviceAgent
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -146,6 +168,76 @@ def build_bridge(config: RunnerConfig) -> BridgeRemoteExecutorClient:
         auth_token=auth_token,
     )
     return BridgeRemoteExecutorClient(bridge_client=bridge_client)
+
+
+def build_live_control_client(*, cwd: str | None) -> CodexAppServerProcessClient:
+    executable = _runtime_env_var(
+        "REMOTE_EXECUTOR_CODEX_EXECUTABLE",
+        "CHAT_PARTICIPANT_CODEX_EXECUTABLE",
+        "CODEX_EXECUTABLE",
+        default="codex",
+    ) or "codex"
+    config = CodexCurrentThreadRuntimeConfig(
+        executable=_resolve_executable(executable),
+        runtime_args=["app-server"],
+        cwd=cwd,
+        thread_id=None,
+    )
+    return CodexAppServerProcessClient(config=config)
+
+
+def build_device_agent(
+    *,
+    config: RunnerConfig,
+    runtime: RemoteExecutorRuntime,
+    bridge: BridgeRemoteExecutorClient,
+    default_workdir: str | None,
+) -> RemoteCodexDeviceAgent:
+    live_control_client: CodexAppServerProcessClient | None
+    if isinstance(runtime, CodexCurrentThreadRemoteExecutorRuntime):
+        live_control_client = runtime.client  # type: ignore[assignment]
+    else:
+        live_control_client = build_live_control_client(cwd=config.workdir or default_workdir)
+
+    backend = LocalCodexBackend(
+        machine_id=config.machine_id,
+        display_name=os.getenv("REMOTE_EXECUTOR_MACHINE_DISPLAY_NAME") or socket.gethostname(),
+        app_server_client=live_control_client,
+        runtime_descriptor={
+            "runtimeMode": "standalone-app-server",
+            "runtimeBin": getattr(getattr(live_control_client, "config", None), "executable", None),
+            "runtimeArgs": list(getattr(getattr(live_control_client, "config", None), "runtime_args", ["app-server"])),
+            "cwd": getattr(getattr(live_control_client, "config", None), "cwd", config.workdir or default_workdir),
+        },
+    )
+    worker_id = compact_text(
+        os.getenv("REMOTE_EXECUTOR_WORKER_ID"),
+        f"{config.machine_id}-remote-codex-agent",
+    )
+    return RemoteCodexDeviceAgent(
+        bridge=bridge,
+        backend=backend,
+        machine_id=config.machine_id,
+        display_name=backend.display_name,
+        worker_id=worker_id,
+    )
+
+
+def build_session(config: RunnerConfig) -> RunnerSession:
+    project = load_project(config.project_file)
+    bridge = build_bridge(config)
+    runtime = build_runtime(config=config, default_workdir=project.default_workdir)
+    device_agent = build_device_agent(
+        config=config,
+        runtime=runtime,
+        bridge=bridge,
+        default_workdir=project.default_workdir,
+    )
+    return RunnerSession(
+        bridge=bridge,
+        runtime=runtime,
+        device_agent=device_agent,
+    )
 
 
 def _add_activity_evidence(
@@ -282,30 +374,40 @@ def _execute_claimed_task(
         return False
 
 
-def run_once(config: RunnerConfig) -> bool:
-    project = load_project(config.project_file)
-    bridge = build_bridge(config)
-    runtime = build_runtime(config=config, default_workdir=project.default_workdir)
-    claim = bridge.claim_next_remote_task_for_machine(
+def run_cycle(session: RunnerSession, config: RunnerConfig) -> bool:
+    activity = session.device_agent.poll_once()
+
+    claim = session.bridge.claim_next_remote_task_for_machine(
         machine_id=config.machine_id,
         actor_id=config.actor_id,
         lease_seconds=config.lease_seconds,
     )
     if not claim:
-        LOGGER.info("No queued remote tasks for machine %s", config.machine_id)
-        return False
-    return _execute_claimed_task(
-        bridge=bridge,
-        runtime=runtime,
+        if not activity:
+            LOGGER.info("No queued remote tasks or browser commands for machine %s", config.machine_id)
+        return activity
+
+    worked = _execute_claimed_task(
+        bridge=session.bridge,
+        runtime=session.runtime,
         claim=claim,
         actor_id=config.actor_id,
         lease_seconds=config.lease_seconds,
     )
+    session.device_agent.mark_thread_dirty(str(claim.get("thread_id") or ""))
+    session.device_agent.perform_sync(force=True)
+    return worked or activity
+
+
+def run_once(config: RunnerConfig) -> bool:
+    session = build_session(config)
+    return run_cycle(session, config)
 
 
 def run_forever(config: RunnerConfig) -> None:
+    session = build_session(config)
     while True:
-        worked = run_once(config)
+        worked = run_cycle(session, config)
         if config.run_once:
             return
         if not worked:

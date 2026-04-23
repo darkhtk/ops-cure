@@ -171,6 +171,18 @@ async def interrupt_turn(machine_id: str, thread_id: str, request: Request) -> d
         _raise_for_error(error)
 
 
+@router.delete("/machines/{machine_id}/threads/{thread_id}")
+async def delete_thread(machine_id: str, thread_id: str, request: Request) -> dict[str, Any]:
+    try:
+        return request.app.state.services.remote_codex_service.enqueue_thread_delete(
+            machine_id=machine_id,
+            thread_id=thread_id,
+            requested_by=_requested_by(request),
+        )
+    except (ValueError, RuntimeError) as error:
+        _raise_for_error(error)
+
+
 @router.get("/tasks/{task_id}")
 async def get_task(task_id: str, request: Request) -> dict[str, Any]:
     return request.app.state.services.remote_codex_service.get_task(task_id)

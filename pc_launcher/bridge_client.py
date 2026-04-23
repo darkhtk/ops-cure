@@ -361,10 +361,16 @@ class BridgeClient:
         for status in statuses or []:
             params.append(f"statuses={quote_plus(status)}")
         query = "&".join(params)
-        return self._get(f"/api/remote/machines/{machine_id}/tasks?{query}")
+        payload = self._get(f"/api/remote/machines/{machine_id}/tasks?{query}")
+        items = payload.get("tasks") if isinstance(payload, dict) else payload
+        if not isinstance(items, list):
+            return []
+        return [self._normalize_remote_task(item) for item in items]
 
     def get_remote_task(self, *, task_id: str) -> dict[str, Any]:
-        return self._get(f"/api/remote/tasks/{task_id}")
+        payload = self._get(f"/api/remote-codex/tasks/{task_id}")
+        task = payload.get("task") if isinstance(payload, dict) else payload
+        return self._normalize_remote_task(task)
 
     def claim_remote_task(
         self,
@@ -373,13 +379,14 @@ class BridgeClient:
         actor_id: str,
         lease_seconds: int = 90,
     ) -> dict[str, Any]:
-        return self._post(
-            f"/api/remote/tasks/{task_id}/claim",
+        payload = self._post(
+            f"/api/remote-codex/tasks/{task_id}/claim",
             {
                 "actor_id": actor_id,
                 "lease_seconds": lease_seconds,
             },
         )
+        return self._normalize_remote_task(payload.get("task") if isinstance(payload, dict) else payload)
 
     def claim_next_remote_task_for_machine(
         self,
@@ -388,13 +395,17 @@ class BridgeClient:
         actor_id: str,
         lease_seconds: int = 90,
     ) -> dict[str, Any] | None:
-        return self._post(
-            f"/api/remote/machines/{machine_id}/tasks/claim-next",
+        payload = self._post(
+            f"/api/remote-codex/machines/{machine_id}/tasks/claim-next",
             {
                 "actor_id": actor_id,
                 "lease_seconds": lease_seconds,
             },
         )
+        task = payload.get("task") if isinstance(payload, dict) else payload
+        if not task:
+            return None
+        return self._normalize_remote_task(task)
 
     def heartbeat_remote_task(
         self,
@@ -411,7 +422,7 @@ class BridgeClient:
         tests_run_count: int = 0,
     ) -> dict[str, Any]:
         return self._post(
-            f"/api/remote/tasks/{task_id}/heartbeat",
+            f"/api/remote-codex/tasks/{task_id}/heartbeat",
             {
                 "actor_id": actor_id,
                 "lease_token": lease_token,
@@ -435,7 +446,7 @@ class BridgeClient:
         payload: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return self._post(
-            f"/api/remote/tasks/{task_id}/evidence",
+            f"/api/remote-codex/tasks/{task_id}/evidence",
             {
                 "actor_id": actor_id,
                 "kind": kind,
@@ -453,7 +464,7 @@ class BridgeClient:
         content: str,
     ) -> dict[str, Any]:
         return self._post(
-            f"/api/remote/tasks/{task_id}/notes",
+            f"/api/remote-codex/tasks/{task_id}/notes",
             {
                 "actor_id": actor_id,
                 "kind": kind,
@@ -470,7 +481,7 @@ class BridgeClient:
         summary: str,
     ) -> dict[str, Any]:
         return self._post(
-            f"/api/remote/tasks/{task_id}/complete",
+            f"/api/remote-codex/tasks/{task_id}/complete",
             {
                 "actor_id": actor_id,
                 "lease_token": lease_token,
@@ -487,13 +498,174 @@ class BridgeClient:
         error_text: str,
     ) -> dict[str, Any]:
         return self._post(
-            f"/api/remote/tasks/{task_id}/fail",
+            f"/api/remote-codex/tasks/{task_id}/fail",
             {
                 "actor_id": actor_id,
                 "lease_token": lease_token,
                 "error_text": error_text,
             },
         )
+
+    def sync_remote_codex_agent(
+        self,
+        *,
+        machine: dict[str, Any],
+        threads: list[dict[str, Any]],
+        snapshots: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        return self._post(
+            "/api/remote-codex/agent/sync",
+            {
+                "machine": machine,
+                "threads": threads,
+                "snapshots": snapshots,
+            },
+        )
+
+    def claim_next_remote_codex_command(
+        self,
+        *,
+        machine_id: str,
+        worker_id: str,
+    ) -> dict[str, Any] | None:
+        payload = self._post(
+            "/api/remote-codex/agent/commands/claim",
+            {
+                "machineId": machine_id,
+                "workerId": worker_id,
+            },
+        )
+        return payload.get("command")
+
+    def report_remote_codex_command_result(
+        self,
+        *,
+        command_id: str,
+        worker_id: str,
+        status: str,
+        result: dict[str, Any] | None = None,
+        error: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {
+            "workerId": worker_id,
+            "status": status,
+        }
+        if result is not None:
+            body["result"] = result
+        if error is not None:
+            body["error"] = error
+        return self._post(
+            f"/api/remote-codex/agent/commands/{command_id}/result",
+            body,
+        )
+
+    def heartbeat_remote_codex_agent_task(
+        self,
+        *,
+        task_id: str,
+        actor_id: str,
+        phase: str,
+        summary: str,
+        commands_run_count: int = 0,
+        files_read_count: int = 0,
+        files_modified_count: int = 0,
+        tests_run_count: int = 0,
+    ) -> dict[str, Any]:
+        return self._post(
+            f"/api/remote-codex/agent/tasks/{task_id}/heartbeat",
+            {
+                "actorId": actor_id,
+                "phase": phase,
+                "summary": summary,
+                "commandsRunCount": commands_run_count,
+                "filesReadCount": files_read_count,
+                "filesModifiedCount": files_modified_count,
+                "testsRunCount": tests_run_count,
+            },
+        )
+
+    def add_remote_codex_agent_task_evidence(
+        self,
+        *,
+        task_id: str,
+        actor_id: str,
+        kind: str,
+        summary: str,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return self._post(
+            f"/api/remote-codex/agent/tasks/{task_id}/evidence",
+            {
+                "actorId": actor_id,
+                "kind": kind,
+                "summary": summary,
+                "payload": payload or {},
+            },
+        )
+
+    def complete_remote_codex_agent_task(
+        self,
+        *,
+        task_id: str,
+        actor_id: str,
+        summary: str,
+    ) -> dict[str, Any]:
+        return self._post(
+            f"/api/remote-codex/agent/tasks/{task_id}/complete",
+            {
+                "actorId": actor_id,
+                "summary": summary,
+            },
+        )
+
+    def fail_remote_codex_agent_task(
+        self,
+        *,
+        task_id: str,
+        actor_id: str,
+        error_text: str,
+    ) -> dict[str, Any]:
+        return self._post(
+            f"/api/remote-codex/agent/tasks/{task_id}/fail",
+            {
+                "actorId": actor_id,
+                "error": {"message": error_text},
+            },
+        )
+
+    def _normalize_remote_task(self, task: dict[str, Any] | Any) -> dict[str, Any]:
+        if not isinstance(task, dict):
+            return {}
+        if "id" in task and "machine_id" in task:
+            return task
+        current_claim = task.get("currentClaim") if isinstance(task.get("currentClaim"), dict) else {}
+        latest_approval = task.get("latestApproval") if isinstance(task.get("latestApproval"), dict) else None
+        latest_heartbeat = task.get("latestHeartbeat") if isinstance(task.get("latestHeartbeat"), dict) else None
+        return {
+            "id": task.get("taskId"),
+            "machine_id": task.get("machineId"),
+            "thread_id": task.get("threadId"),
+            "origin_surface": task.get("sourceSurface"),
+            "objective": task.get("objective"),
+            "priority": task.get("priority"),
+            "owner_actor_id": task.get("ownerActorId"),
+            "created_by": task.get("createdBy"),
+            "status": task.get("status"),
+            "success_criteria": {},
+            "current_assignment": (
+                {
+                    "actor_id": current_claim.get("actorId"),
+                    "lease_token": current_claim.get("leaseToken"),
+                    "claimed_at": current_claim.get("claimedAt"),
+                    "lease_expires_at": current_claim.get("leaseExpiresAt"),
+                }
+                if current_claim
+                else None
+            ),
+            "latest_approval": latest_approval,
+            "latest_heartbeat": latest_heartbeat,
+            "recent_evidence": task.get("recentEvidence") or [],
+        }
 
     def _post(self, path: str, payload: dict[str, Any]) -> Any:
         response = self.session.post(

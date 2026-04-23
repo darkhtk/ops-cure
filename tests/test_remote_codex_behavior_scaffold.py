@@ -143,6 +143,9 @@ def test_remote_codex_browser_and_agent_surface_round_trip(app_env) -> None:
         machines_response = client.get("/api/remote-codex/machines", headers={"Authorization": "Bearer test-token"})
         assert machines_response.status_code == 200
         assert machines_response.json()["machines"][0]["machineId"] == "machine-z"
+        assert machines_response.json()["machines"][0]["activeTransport"] == "filesystem-storage"
+        assert machines_response.json()["machines"][0]["runtimeMode"] == "standalone"
+        assert machines_response.json()["machines"][0]["capabilities"]["liveControl"] is True
 
         threads_response = client.get(
             "/api/remote-codex/machines/machine-z/threads",
@@ -208,6 +211,13 @@ def test_remote_codex_browser_and_agent_surface_round_trip(app_env) -> None:
         assert len(tasks) == 1
         assert tasks[0]["taskId"] == turn_payload["task"]["taskId"]
         assert tasks[0]["currentClaim"]["actorId"] == "machine-z"
+
+        delete_response = client.delete(
+            "/api/remote-codex/machines/machine-z/threads/thread-z",
+            headers={"Authorization": "Bearer test-token"},
+        )
+        assert delete_response.status_code == 200
+        assert delete_response.json()["command"]["type"] == "thread.delete"
 
 
 def test_remote_codex_task_lifecycle_routes_cover_approval_interrupt_and_evidence(app_env) -> None:

@@ -26,6 +26,7 @@ COMMAND_COMPLETED = "completed"
 COMMAND_FAILED = "failed"
 TURN_START = "turn.start"
 TURN_INTERRUPT = "turn.interrupt"
+THREAD_DELETE = "thread.delete"
 
 
 def utcnow() -> datetime:
