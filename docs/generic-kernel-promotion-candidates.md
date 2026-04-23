@@ -33,6 +33,13 @@ If any of those fail, keep it out of the kernel.
 
 This is the strongest promotion candidate.
 
+Status:
+
+- a minimal generic `ActorSession` / `ResourceLease` primitive is now implemented in the kernel
+- orchestration worker/job lifecycle and browser-first remote task flow should consume the same primitive
+- browser-first remote Codex should consume that primitive rather than promoting `RemoteTask` directly into the kernel
+- higher-level operation/decision/evidence semantics still remain outside the kernel for now
+
 ### Why
 
 The same pattern already appears in:
@@ -92,6 +99,11 @@ Do not include:
 ## Candidate 2: Generic Operation
 
 This is the long-term abstraction behind product-level `RemoteTask`.
+
+Status:
+
+- a thin schema-only draft can exist in the kernel as a future-compatible shape
+- persistence and APIs should remain product-level until multiple behaviors need the same contract
 
 ### Why
 

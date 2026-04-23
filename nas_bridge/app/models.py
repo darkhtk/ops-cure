@@ -383,6 +383,43 @@ class SchemaMigrationModel(Base):
     applied_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class ActorSessionModel(Base):
+    __tablename__ = "actor_sessions"
+    __table_args__ = (
+        Index("ix_actor_sessions_scope_status_seen", "scope_kind", "scope_id", "status", "last_seen_at"),
+        Index("ix_actor_sessions_actor_scope", "actor_id", "scope_kind", "scope_id"),
+    )
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=lambda: str(uuid.uuid4()))
+    actor_id: Mapped[str] = mapped_column(index=True)
+    scope_kind: Mapped[str] = mapped_column(index=True)
+    scope_id: Mapped[str] = mapped_column(index=True)
+    status: Mapped[str] = mapped_column(index=True, default="active")
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class ResourceLeaseModel(Base):
+    __tablename__ = "resource_leases"
+    __table_args__ = (
+        Index("ix_resource_leases_resource_status_claimed", "resource_kind", "resource_id", "status", "claimed_at"),
+        Index("ix_resource_leases_holder_status", "holder_actor_id", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=lambda: str(uuid.uuid4()))
+    resource_kind: Mapped[str] = mapped_column(index=True)
+    resource_id: Mapped[str] = mapped_column(index=True)
+    holder_actor_id: Mapped[str] = mapped_column(index=True)
+    lease_token: Mapped[str] = mapped_column(index=True)
+    claimed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(index=True, default="claimed")
+    released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
 class VerifyRunModel(Base):
     __tablename__ = "verify_runs"
     __table_args__ = (

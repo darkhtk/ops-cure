@@ -41,6 +41,13 @@ from .behaviors.workflow.schemas import (
 from .db import session_scope
 from .kernel.drift import ArtifactSnapshot, DriftEvaluation, DriftMonitor
 from .kernel.models import AgentModel, ExecutionTargetModel, PowerTargetModel, SessionModel, TranscriptModel
+from .kernel.presence import (
+    ActorSessionUpsertRequest,
+    PresenceService,
+    ResourceLeaseClaimRequest,
+    ResourceLeaseHeartbeatRequest,
+    ResourceLeaseReleaseRequest,
+)
 from .kernel.schemas import (
     AgentStatusResponse,
     ExecutionTargetSummary,
@@ -103,6 +110,10 @@ CURATION_SWEEP_COOLDOWN_SECONDS = 180
 THREAD_DELTA_FETCH_LIMIT = 120
 THREAD_CURSOR_SEPARATOR = "|"
 OPS_TYPE_RE = re.compile(r"(^|\n)OPS:\s*type=(?P<type>[A-Za-z0-9_-]+)", re.IGNORECASE)
+ORCHESTRATION_SCOPE_KIND = "orchestration_session"
+ORCHESTRATION_JOB_RESOURCE_KIND = "orchestration_job"
+ORCHESTRATION_PRESENCE_TTL_SECONDS = 180
+ORCHESTRATION_LEASE_TTL_SECONDS = 180
 
 
 @dataclass(slots=True)
@@ -142,11 +153,13 @@ class SessionService:
         thread_manager: ThreadManager,
         transcript_service: TranscriptService,
         drift_monitor: DriftMonitor,
+        presence_service: PresenceService | None = None,
     ) -> None:
         self.registry = registry
         self.thread_manager = thread_manager
         self.transcript_service = transcript_service
         self.drift_monitor = drift_monitor
+        self.presence_service = presence_service or PresenceService()
         self.policy_service = None
         self.recovery_service = None
         self.start_workflow = None
@@ -173,6 +186,103 @@ class SessionService:
         self.policy_workflow = policy_workflow
         self.execution_provider = execution_provider
         self.announcement_service = announcement_service
+
+    def _upsert_orchestration_presence(
+        self,
+        *,
+        db: Session,
+        session_id: str,
+        actor_id: str,
+        status: str,
+        ttl_seconds: int = ORCHESTRATION_PRESENCE_TTL_SECONDS,
+    ) -> None:
+        self.presence_service.upsert_actor_session(
+            ActorSessionUpsertRequest(
+                actor_id=actor_id,
+                scope_kind=ORCHESTRATION_SCOPE_KIND,
+                scope_id=session_id,
+                status=status,
+                ttl_seconds=ttl_seconds,
+            ),
+            db=db,
+        )
+
+    def _claim_orchestration_job_lease(
+        self,
+        *,
+        db: Session,
+        job: JobModel,
+        actor_id: str,
+        lease_seconds: int = ORCHESTRATION_LEASE_TTL_SECONDS,
+    ) -> None:
+        if not job.lease_token:
+            return
+        self.presence_service.claim_resource_lease(
+            ResourceLeaseClaimRequest(
+                resource_kind=ORCHESTRATION_JOB_RESOURCE_KIND,
+                resource_id=job.id,
+                holder_actor_id=actor_id,
+                lease_token=job.lease_token,
+                lease_seconds=lease_seconds,
+                status=job.status,
+            ),
+            db=db,
+        )
+
+    def _heartbeat_orchestration_job_lease(
+        self,
+        *,
+        db: Session,
+        job: JobModel,
+        actor_id: str,
+        lease_seconds: int = ORCHESTRATION_LEASE_TTL_SECONDS,
+    ) -> None:
+        if not job.lease_token:
+            return
+        lease = self.presence_service.get_current_lease(
+            resource_kind=ORCHESTRATION_JOB_RESOURCE_KIND,
+            resource_id=job.id,
+            db=db,
+        )
+        if lease is None:
+            return
+        self.presence_service.heartbeat_resource_lease(
+            lease_id=lease.lease_id,
+            payload=ResourceLeaseHeartbeatRequest(
+                holder_actor_id=actor_id,
+                lease_token=job.lease_token,
+                lease_seconds=lease_seconds,
+                status=job.status,
+            ),
+            db=db,
+        )
+
+    def _release_orchestration_job_lease(
+        self,
+        *,
+        db: Session,
+        job: JobModel,
+        actor_id: str,
+        status: str = "released",
+    ) -> None:
+        if not job.lease_token:
+            return
+        lease = self.presence_service.get_current_lease(
+            resource_kind=ORCHESTRATION_JOB_RESOURCE_KIND,
+            resource_id=job.id,
+            db=db,
+        )
+        if lease is None:
+            return
+        self.presence_service.release_resource_lease(
+            lease_id=lease.lease_id,
+            payload=ResourceLeaseReleaseRequest(
+                holder_actor_id=actor_id,
+                lease_token=job.lease_token,
+                status=status,
+            ),
+            db=db,
+        )
 
     async def create_session_from_project(
         self,
@@ -709,6 +819,12 @@ class SessionService:
                 .where(JobModel.session_id == session_row.id)
                 .where(JobModel.status == "in_progress"),
             ):
+                self._release_orchestration_job_lease(
+                    db=db,
+                    job=job,
+                    actor_id=job.agent_name,
+                    status="released",
+                )
                 job.status = "cancelled"
                 job.completed_at = utcnow()
                 job.error_text = "Cancelled by session reset."
@@ -729,6 +845,13 @@ class SessionService:
                 handoff.updated_at = utcnow()
 
             for agent in session_row.agents:
+                self._upsert_orchestration_presence(
+                    db=db,
+                    session_id=session_row.id,
+                    actor_id=agent.agent_name,
+                    status="idle",
+                    ttl_seconds=60,
+                )
                 db.add(
                     JobModel(
                         session_id=session_row.id,
@@ -882,6 +1005,12 @@ class SessionService:
                 actor=agent_name,
                 content=f"Worker {worker_id} registered for agent {agent_name}.",
             )
+            self._upsert_orchestration_presence(
+                db=db,
+                session_id=session_id,
+                actor_id=agent.agent_name,
+                status=agent.status,
+            )
 
         self.drift_monitor.register_worker(
             session_id=session_id,
@@ -927,6 +1056,24 @@ class SessionService:
             else:
                 agent.current_activity_line = None
                 agent.current_activity_updated_at = None
+            self._upsert_orchestration_presence(
+                db=db,
+                session_id=session_id,
+                actor_id=agent.agent_name,
+                status=agent.status,
+            )
+            active_job = db.scalar(
+                select(JobModel)
+                .where(JobModel.session_id == session_id)
+                .where(JobModel.agent_name == agent_name)
+                .where(JobModel.status == "in_progress"),
+            )
+            if active_job is not None:
+                self._heartbeat_orchestration_job_lease(
+                    db=db,
+                    job=active_job,
+                    actor_id=agent.agent_name,
+                )
 
             self._refresh_session_startup_state(
                 db,
@@ -948,9 +1095,12 @@ class SessionService:
             became_busy = previous_status != "busy" and agent.status == "busy"
             became_idle = previous_status == "busy" and agent.status != "busy"
             startup_status_changed = previous_session_status != session_row.status
+            last_announced_at = session_row.last_announced_at
+            if last_announced_at is not None and last_announced_at.tzinfo is None:
+                last_announced_at = last_announced_at.replace(tzinfo=timezone.utc)
             report_due = (any_busy or active_job_count > 0) and (
-                session_row.last_announced_at is None
-                or (now - session_row.last_announced_at) >= timedelta(seconds=60)
+                last_announced_at is None
+                or (now - last_announced_at) >= timedelta(seconds=60)
             )
             should_sync_status = became_busy or became_idle or startup_status_changed or report_due
         self.drift_monitor.record_heartbeat(
@@ -1135,6 +1285,17 @@ class SessionService:
             agent.status = "busy"
             db.flush()
             db.refresh(job)
+            self._claim_orchestration_job_lease(
+                db=db,
+                job=job,
+                actor_id=agent.agent_name,
+            )
+            self._upsert_orchestration_presence(
+                db=db,
+                session_id=session_id,
+                actor_id=agent.agent_name,
+                status=agent.status,
+            )
             recent_transcript = self._load_recent_transcript(db, session_id=session_id)
             session_summary = self._build_session_summary(
                 db,
@@ -1209,6 +1370,12 @@ class SessionService:
             job.status = "completed"
             job.result_text = display_output
             job.completed_at = utcnow()
+            self._release_orchestration_job_lease(
+                db=db,
+                job=job,
+                actor_id=agent.agent_name,
+                status="released",
+            )
 
             agent.status = "paused" if session_row.desired_status == "paused" else "idle"
             agent.pid_hint = pid_hint
@@ -1216,6 +1383,12 @@ class SessionService:
             agent.last_error = None
             agent.current_activity_line = None
             agent.current_activity_updated_at = None
+            self._upsert_orchestration_presence(
+                db=db,
+                session_id=session_id,
+                actor_id=agent.agent_name,
+                status=agent.status,
+            )
             thread_id = session_row.discord_thread_id
 
             self._queue_handoffs(
@@ -1323,6 +1496,12 @@ class SessionService:
             job.status = "failed"
             job.error_text = sanitized
             job.completed_at = utcnow()
+            self._release_orchestration_job_lease(
+                db=db,
+                job=job,
+                actor_id=agent.agent_name,
+                status="released",
+            )
 
             agent.status = "paused" if session_row.desired_status == "paused" else "idle"
             agent.pid_hint = pid_hint
@@ -1330,6 +1509,12 @@ class SessionService:
             agent.last_error = sanitized
             agent.current_activity_line = None
             agent.current_activity_updated_at = None
+            self._upsert_orchestration_presence(
+                db=db,
+                session_id=session_id,
+                actor_id=agent.agent_name,
+                status=agent.status,
+            )
             thread_id = session_row.discord_thread_id
             self._synchronize_failed_task(
                 db,
@@ -2579,6 +2764,17 @@ class SessionService:
             actor=agent.agent_name,
             payload={"job_id": job.id, "lease_token": lease_token, "revision": task.revision},
         )
+        self._claim_orchestration_job_lease(
+            db=db,
+            job=job,
+            actor_id=agent.agent_name,
+        )
+        self._upsert_orchestration_presence(
+            db=db,
+            session_id=session_row.id,
+            actor_id=agent.agent_name,
+            status="busy",
+        )
 
         recent_transcript = self._load_recent_transcript(db, session_id=session_row.id)
         session_summary = self._build_session_summary(
@@ -2636,6 +2832,17 @@ class SessionService:
         )
         db.flush()
         db.refresh(job)
+        self._claim_orchestration_job_lease(
+            db=db,
+            job=job,
+            actor_id=agent.agent_name,
+        )
+        self._upsert_orchestration_presence(
+            db=db,
+            session_id=session_row.id,
+            actor_id=agent.agent_name,
+            status="busy",
+        )
         recent_transcript = self._load_recent_transcript(db, session_id=session_row.id)
         session_summary = self._build_session_summary(
             db,
@@ -3356,6 +3563,12 @@ class SessionService:
         )
         preview = self._trim_context_text(active_job.input_text, ORPHANED_JOB_PREVIEW_LIMIT)
         previous_worker_id = active_job.worker_id
+        self._release_orchestration_job_lease(
+            db=db,
+            job=active_job,
+            actor_id=agent.agent_name,
+            status="released",
+        )
         active_job.status = "pending"
         active_job.worker_id = None
         active_job.claimed_at = None
@@ -3599,12 +3812,25 @@ class SessionService:
         for agent in session_row.agents:
             agent.status = "offline"
             agent.desired_status = "closed"
+            self._upsert_orchestration_presence(
+                db=db,
+                session_id=session_row.id,
+                actor_id=agent.agent_name,
+                status="offline",
+                ttl_seconds=60,
+            )
 
         for job in db.scalars(
             select(JobModel)
             .where(JobModel.session_id == session_row.id)
             .where(JobModel.status.in_(["pending", "in_progress"])),
         ):
+            self._release_orchestration_job_lease(
+                db=db,
+                job=job,
+                actor_id=job.agent_name,
+                status="released",
+            )
             job.status = "cancelled"
             job.completed_at = utcnow()
             job.error_text = job_error_text

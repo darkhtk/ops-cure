@@ -91,7 +91,10 @@ python -m pip install -r requirements.txt
 
 The launcher directory now exposes installable runtime-side behaviors.
 
-The first packaged behavior is `chat-participant`.
+Current packaged behaviors are:
+
+- `chat-participant`
+- `remote-executor`
 
 Use it like this:
 
@@ -99,6 +102,9 @@ Use it like this:
 python -m pc_launcher.behavior_tools install chat-participant
 python -m pc_launcher.behavior_tools doctor chat-participant
 python -m pc_launcher.behavior_tools run chat-participant --thread-id <thread_id> --actor-name <actor_name> --codex-thread-id <codex_thread_id>
+python -m pc_launcher.behavior_tools install remote-executor
+python -m pc_launcher.behavior_tools doctor remote-executor
+python -m pc_launcher.behavior_tools run remote-executor --machine-id <machine_id> --actor-id <actor_id> --codex-thread-id <codex_thread_id>
 ```
 
 For manual UTF-8-safe smoke messages on Windows:

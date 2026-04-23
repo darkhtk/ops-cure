@@ -34,6 +34,8 @@ Opscure is moving from a project-specific orchestration bridge toward a generic 
 - A second non-workflow `ops` behavior was added to validate that the kernel can support room-style coordination without workflow semantics.
 - A kernel-level `Space` vocabulary was added so orchestration sessions, chat threads, and ops rooms can be queried through the same generic summary shape.
 - Kernel-level `Actor` and `Event` vocabularies were added so orchestration, chat, and ops spaces can expose participants and recent activity through the same generic API shape.
+- A minimal kernel-level `Presence / Lease` primitive was added so multiple behaviors can share actor session freshness and resource claim semantics without pulling product-specific task language into the kernel.
+- A thin kernel-level `Operation` schema draft was added as a future promotion target, but it is intentionally not wired to persistence or APIs yet.
 - `Space`, `Actor`, and `Event` services now resolve through behavior-owned kernel providers instead of importing orchestration/chat/ops models directly.
 - A behavior catalog layer now exposes registered behaviors and their capabilities, including Discord command/message support and kernel `Space/Actor/Event` support.
 - Old top-level modules such as `command_router.py` and `message_router.py` remain as compatibility shims.

@@ -131,6 +131,7 @@ def app_env(tmp_path, monkeypatch):
     import app.services.announcement_service as announcement_service
     import app.db as db
     import app.drift_monitor as drift_monitor
+    import app.kernel.presence as presence
     import app.schemas as schemas
     import app.session_service as session_service
     import app.services.policy_service as policy_service
@@ -151,11 +152,13 @@ def app_env(tmp_path, monkeypatch):
     thread_manager = FakeThreadManager()
     announcement_svc = announcement_service.AnnouncementService(thread_manager=thread_manager)
     drift = drift_monitor.DriftMonitor()
+    presence_svc = presence.PresenceService()
     session_svc = session_service.SessionService(
         registry=registry,
         thread_manager=thread_manager,
         transcript_service=transcript,
         drift_monitor=drift,
+        presence_service=presence_svc,
     )
     policy_svc = policy_service.PolicyService()
     power_provider = NoopPowerProvider()
@@ -210,6 +213,7 @@ def app_env(tmp_path, monkeypatch):
         schemas=schemas,
         announcement_service=announcement_svc,
         session_service=session_svc,
+        presence_service=presence_svc,
         policy_service=policy_svc,
         recovery_service=recovery_svc,
         verification_service=verification_svc,

@@ -350,6 +350,151 @@ class BridgeClient:
             },
         )
 
+    def list_remote_tasks_for_machine(
+        self,
+        *,
+        machine_id: str,
+        statuses: list[str] | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        params = [f"limit={max(1, min(limit, 200))}"]
+        for status in statuses or []:
+            params.append(f"statuses={quote_plus(status)}")
+        query = "&".join(params)
+        return self._get(f"/api/remote/machines/{machine_id}/tasks?{query}")
+
+    def get_remote_task(self, *, task_id: str) -> dict[str, Any]:
+        return self._get(f"/api/remote/tasks/{task_id}")
+
+    def claim_remote_task(
+        self,
+        *,
+        task_id: str,
+        actor_id: str,
+        lease_seconds: int = 90,
+    ) -> dict[str, Any]:
+        return self._post(
+            f"/api/remote/tasks/{task_id}/claim",
+            {
+                "actor_id": actor_id,
+                "lease_seconds": lease_seconds,
+            },
+        )
+
+    def claim_next_remote_task_for_machine(
+        self,
+        *,
+        machine_id: str,
+        actor_id: str,
+        lease_seconds: int = 90,
+    ) -> dict[str, Any] | None:
+        return self._post(
+            f"/api/remote/machines/{machine_id}/tasks/claim-next",
+            {
+                "actor_id": actor_id,
+                "lease_seconds": lease_seconds,
+            },
+        )
+
+    def heartbeat_remote_task(
+        self,
+        *,
+        task_id: str,
+        actor_id: str,
+        lease_token: str,
+        phase: str,
+        summary: str,
+        lease_seconds: int = 90,
+        commands_run_count: int = 0,
+        files_read_count: int = 0,
+        files_modified_count: int = 0,
+        tests_run_count: int = 0,
+    ) -> dict[str, Any]:
+        return self._post(
+            f"/api/remote/tasks/{task_id}/heartbeat",
+            {
+                "actor_id": actor_id,
+                "lease_token": lease_token,
+                "phase": phase,
+                "summary": summary,
+                "lease_seconds": lease_seconds,
+                "commands_run_count": commands_run_count,
+                "files_read_count": files_read_count,
+                "files_modified_count": files_modified_count,
+                "tests_run_count": tests_run_count,
+            },
+        )
+
+    def add_remote_task_evidence(
+        self,
+        *,
+        task_id: str,
+        actor_id: str,
+        kind: str,
+        summary: str,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return self._post(
+            f"/api/remote/tasks/{task_id}/evidence",
+            {
+                "actor_id": actor_id,
+                "kind": kind,
+                "summary": summary,
+                "payload": payload or {},
+            },
+        )
+
+    def add_remote_task_note(
+        self,
+        *,
+        task_id: str,
+        actor_id: str,
+        kind: str,
+        content: str,
+    ) -> dict[str, Any]:
+        return self._post(
+            f"/api/remote/tasks/{task_id}/notes",
+            {
+                "actor_id": actor_id,
+                "kind": kind,
+                "content": content,
+            },
+        )
+
+    def complete_remote_task(
+        self,
+        *,
+        task_id: str,
+        actor_id: str,
+        lease_token: str,
+        summary: str,
+    ) -> dict[str, Any]:
+        return self._post(
+            f"/api/remote/tasks/{task_id}/complete",
+            {
+                "actor_id": actor_id,
+                "lease_token": lease_token,
+                "summary": summary,
+            },
+        )
+
+    def fail_remote_task(
+        self,
+        *,
+        task_id: str,
+        actor_id: str,
+        lease_token: str,
+        error_text: str,
+    ) -> dict[str, Any]:
+        return self._post(
+            f"/api/remote/tasks/{task_id}/fail",
+            {
+                "actor_id": actor_id,
+                "lease_token": lease_token,
+                "error_text": error_text,
+            },
+        )
+
     def _post(self, path: str, payload: dict[str, Any]) -> Any:
         response = self.session.post(
             f"{self.base_url}{path}",

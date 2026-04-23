@@ -187,12 +187,23 @@ The same pattern shows up in:
 
 The product should not reimplement this forever if multiple behaviors need it.
 
+Status:
+
+- a minimal generic `ActorSession` / `ResourceLease` primitive is now present in the kernel
+- the product-layer remote task service should reuse that primitive rather than promoting `RemoteTask` directly into the kernel
+- orchestration worker/job lifecycle should also reuse the same primitive rather than growing a second ownership system
+
 ## 3. Generic Operation Primitive
 
 This is the largest optional promotion target.
 
 For now, the remote Codex product may still implement it as a product-level `RemoteTask`.
 But structurally, a generic kernel-level `Operation` model makes sense.
+
+Status:
+
+- a thin schema-only `Operation` draft may live in the kernel as a future-compatible shape
+- persistence, APIs, and product semantics should remain outside the kernel until at least two behaviors actually need them
 
 ### Responsibility
 

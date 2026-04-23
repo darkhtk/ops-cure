@@ -545,6 +545,154 @@ def test_max_parallel_agents_policy_limits_claims(app_env):
     assert coder_job is None
 
 
+def test_orchestration_presence_and_job_lease_follow_worker_lifecycle(app_env):
+    summary = __import__("asyncio").run(_start_session(app_env))
+
+    __import__("asyncio").run(
+        app_env.session_service.register_worker(
+            session_id=summary.id,
+            agent_name="planner",
+            worker_id="worker-planner",
+            pid_hint=1001,
+        ),
+    )
+
+    planner_presence = app_env.presence_service.list_presence(
+        scope_kind="orchestration_session",
+        scope_id=summary.id,
+    )
+    assert [session.actor_id for session in planner_presence.sessions] == ["planner"]
+    assert planner_presence.sessions[0].status == "idle"
+
+    from app.models import JobModel
+
+    with app_env.db.session_scope() as db:
+        job = JobModel(
+            session_id=summary.id,
+            agent_name="planner",
+            job_type="message",
+            user_id="user-1",
+            input_text="stabilize the plan",
+        )
+        db.add(job)
+        db.flush()
+        job_id = job.id
+
+    claimed = __import__("asyncio").run(
+        app_env.session_service.claim_next_job(
+            session_id=summary.id,
+            agent_name="planner",
+            worker_id="worker-planner",
+        ),
+    )
+    assert claimed is not None
+    assert claimed.id == job_id
+
+    lease = app_env.presence_service.get_current_lease(
+        resource_kind="orchestration_job",
+        resource_id=job_id,
+    )
+    assert lease is not None
+    assert lease.holder_actor_id == "planner"
+
+    __import__("asyncio").run(
+        app_env.session_service.heartbeat(
+            session_id=summary.id,
+            agent_name="planner",
+            worker_id="worker-planner",
+            status="busy",
+            pid_hint=1001,
+            activity_line="planning next orchestration step",
+        ),
+    )
+
+    planner_presence = app_env.presence_service.list_presence(
+        scope_kind="orchestration_session",
+        scope_id=summary.id,
+    )
+    assert planner_presence.sessions[0].status == "busy"
+
+    __import__("asyncio").run(
+        app_env.session_service.complete_job(
+            job_id=job_id,
+            session_id=summary.id,
+            agent_name="planner",
+            worker_id="worker-planner",
+            output_text="[[report]]Plan stabilized.[[/report]]",
+            lease_token=claimed.lease_token,
+            session_epoch=claimed.session_epoch,
+            pid_hint=1001,
+        ),
+    )
+
+    assert app_env.presence_service.get_current_lease(
+        resource_kind="orchestration_job",
+        resource_id=job_id,
+    ) is None
+    planner_presence = app_env.presence_service.list_presence(
+        scope_kind="orchestration_session",
+        scope_id=summary.id,
+    )
+    assert planner_presence.sessions[0].status == "idle"
+
+
+def test_orchestration_reset_releases_job_lease(app_env):
+    summary = __import__("asyncio").run(_start_session(app_env))
+
+    __import__("asyncio").run(
+        app_env.session_service.register_worker(
+            session_id=summary.id,
+            agent_name="planner",
+            worker_id="worker-planner",
+            pid_hint=1001,
+        ),
+    )
+
+    from app.models import JobModel
+
+    with app_env.db.session_scope() as db:
+        job = JobModel(
+            session_id=summary.id,
+            agent_name="planner",
+            job_type="message",
+            user_id="user-1",
+            input_text="recover from interrupted state",
+        )
+        db.add(job)
+        db.flush()
+        job_id = job.id
+
+    claimed = __import__("asyncio").run(
+        app_env.session_service.claim_next_job(
+            session_id=summary.id,
+            agent_name="planner",
+            worker_id="worker-planner",
+        ),
+    )
+    assert claimed is not None
+    assert app_env.presence_service.get_current_lease(
+        resource_kind="orchestration_job",
+        resource_id=job_id,
+    ) is not None
+
+    __import__("asyncio").run(
+        app_env.session_service.reset_session(
+            session_id=summary.id,
+            requested_by="user-1",
+        ),
+    )
+
+    assert app_env.presence_service.get_current_lease(
+        resource_kind="orchestration_job",
+        resource_id=job_id,
+    ) is None
+    planner_presence = app_env.presence_service.list_presence(
+        scope_kind="orchestration_session",
+        scope_id=summary.id,
+    )
+    assert planner_presence.sessions[0].status == "idle"
+
+
 def test_handoff_creates_canonical_ready_task_and_self_claims(app_env):
     summary = __import__("asyncio").run(_start_session(app_env))
 

@@ -1,0 +1,43 @@
+name: remote-executor
+display_name: Remote Executor
+description: Claim browser-first remote tasks for a machine and execute them through a local Codex runtime.
+server_required: true
+client_required: true
+targets:
+  - client
+requirements_file: pc_launcher/requirements.txt
+runtime:
+  runner_module: pc_launcher.connectors.remote_executor.runner
+  sender_module:
+  default_project_path: pc_launcher/projects/remote_executor/project.yaml
+  project_profile_kind: remote-executor
+  run_kind: remote-executor
+  default_runtime_mode: current-thread
+  default_reconnect_seconds: 5.0
+  healthcheck_path: /api/health
+env:
+  - name: BRIDGE_TOKEN
+    required: true
+    scope: client
+    description: Shared bridge authentication token used by the NAS bridge.
+  - name: CODEX_EXECUTABLE
+    required: false
+    scope: client
+    description: Optional override for the local Codex executable path.
+  - name: CODEX_THREAD_ID
+    required: false
+    scope: client
+    description: Optional current Codex desktop thread id used for current-thread mode.
+doctor_checks:
+  - env_file
+  - project_file
+  - bridge_health
+  - auth_token
+  - codex_help
+  - codex_app_server_help
+smoke_tests:
+  - remote task listing
+  - remote task claim and complete loop
+install_notes:
+  - The remote executor is a client-side runtime adapter; the NAS bridge remains the source of truth for remote task state.
+  - This behavior expects the product layer to create remote tasks first; it does not mirror Discord chat messages.

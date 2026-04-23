@@ -8,7 +8,7 @@ import asyncio
 
 from fastapi import FastAPI
 
-from .api import actors, behaviors, events, health, remote_tasks, sessions, spaces, verification, workers
+from .api import actors, behaviors, events, health, presence, remote_tasks, sessions, spaces, verification, workers
 from .behaviors.catalog import BehaviorCatalogService
 from .behaviors.chat import api as chat_api
 from .behaviors.chat.service import ChatBehaviorService
@@ -38,6 +38,7 @@ from .kernel.bindings import KernelBehaviorBinding
 from .kernel.drift import DriftMonitor
 from .kernel.event_log import TranscriptService
 from .kernel.events import EventService
+from .kernel.presence import PresenceService
 from .kernel.registry import WorkerRegistry
 from .kernel.spaces import SpaceService
 from .kernel.subscriptions import InProcessSubscriptionBroker
@@ -73,6 +74,7 @@ class ServiceContainer:
     kernel_behaviors: list[KernelBehaviorBinding]
     discord_behaviors: list[DiscordBehaviorBinding]
     behavior_catalog_service: BehaviorCatalogService
+    presence_service: PresenceService
     policy_service: PolicyService
     recovery_service: RecoveryService
     verification_service: VerificationService
@@ -100,7 +102,8 @@ def build_services(settings: Settings) -> ServiceContainer:
         thread_manager=thread_manager,
         announcement_service=announcement_service,
     )
-    remote_task_service = RemoteTaskService()
+    presence_service = PresenceService()
+    remote_task_service = RemoteTaskService(presence_service=presence_service)
     power_provider = RoutedPowerProvider([NoopPowerProvider(), WakeOnLanPowerProvider()])
     execution_provider = RoutedExecutionProvider([WindowsLauncherExecutionProvider(registry)])
     recovery_service = RecoveryService(
@@ -118,6 +121,7 @@ def build_services(settings: Settings) -> ServiceContainer:
         thread_manager=thread_manager,
         transcript_service=transcript_service,
         drift_monitor=drift_monitor,
+        presence_service=presence_service,
     )
     announcement_service.bind_summary_provider(session_service.get_session_summary)
     start_workflow = StartWorkflow(
@@ -210,6 +214,7 @@ def build_services(settings: Settings) -> ServiceContainer:
         kernel_behaviors=kernel_behaviors,
         discord_behaviors=discord_behaviors,
         behavior_catalog_service=behavior_catalog_service,
+        presence_service=presence_service,
         policy_service=policy_service,
         recovery_service=recovery_service,
         verification_service=verification_service,
@@ -247,6 +252,7 @@ app.include_router(health.router)
 app.include_router(actors.router)
 app.include_router(behaviors.router)
 app.include_router(events.router)
+app.include_router(presence.router)
 app.include_router(remote_tasks.router)
 app.include_router(chat_api.router)
 app.include_router(sessions.router)

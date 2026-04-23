@@ -1,13 +1,20 @@
 from __future__ import annotations
 
 import json
-import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import case, select
 from sqlalchemy.orm import selectinload
 
 from ..db import session_scope
+from ..kernel.presence import (
+    ActorSessionUpsertRequest,
+    PresenceService,
+    ResourceLeaseClaimRequest,
+    ResourceLeaseHeartbeatRequest,
+    ResourceLeaseReleaseRequest,
+    ResourceLeaseSummary,
+)
 from ..models import (
     RemoteTaskAssignmentModel,
     RemoteTaskApprovalModel,
@@ -22,6 +29,7 @@ from ..schemas import (
     RemoteTaskApprovalResolveRequest,
     RemoteTaskApprovalSummary,
     RemoteTaskClaimRequest,
+    RemoteTaskClaimNextRequest,
     RemoteTaskCompleteRequest,
     RemoteTaskCreateRequest,
     RemoteTaskEvidenceRequest,
@@ -56,7 +64,14 @@ WORK_EVIDENCE_KINDS = {
 }
 
 
+REMOTE_TASK_RESOURCE_KIND = "remote_task"
+MACHINE_SCOPE_KIND = "machine"
+
+
 class RemoteTaskService:
+    def __init__(self, *, presence_service: PresenceService | None = None) -> None:
+        self.presence_service = presence_service or PresenceService()
+
     def create_task(self, payload: RemoteTaskCreateRequest) -> RemoteTaskSummaryResponse:
         with session_scope() as db:
             row = RemoteTaskModel(
@@ -112,26 +127,45 @@ class RemoteTaskService:
     def claim_task(self, task_id: str, payload: RemoteTaskClaimRequest) -> RemoteTaskSummaryResponse:
         with session_scope() as db:
             row = self._require_task(db, task_id)
-            assignment = self._current_assignment(row)
-            now = utcnow()
+            self._claim_task_in_session(db=db, row=row, actor_id=payload.actor_id, lease_seconds=payload.lease_seconds)
+            db.flush()
+            db.refresh(row)
+            return self._to_summary(row)
 
-            if assignment is not None and assignment.lease_expires_at > now:
-                if assignment.actor_id != payload.actor_id:
-                    raise ValueError(f"Remote task `{task_id}` is already claimed by `{assignment.actor_id}`.")
-                assignment.lease_expires_at = now + timedelta(seconds=payload.lease_seconds)
-            else:
-                assignment = RemoteTaskAssignmentModel(
-                    task_id=row.id,
-                    actor_id=payload.actor_id,
-                    lease_token=str(uuid.uuid4()),
-                    lease_expires_at=now + timedelta(seconds=payload.lease_seconds),
-                    status="claimed",
+    def claim_next_task(
+        self,
+        *,
+        machine_id: str,
+        payload: RemoteTaskClaimNextRequest,
+    ) -> RemoteTaskSummaryResponse | None:
+        with session_scope() as db:
+            row = db.scalar(
+                select(RemoteTaskModel)
+                .options(
+                    selectinload(RemoteTaskModel.assignments),
+                    selectinload(RemoteTaskModel.heartbeats),
+                    selectinload(RemoteTaskModel.evidence_items),
+                    selectinload(RemoteTaskModel.approvals),
+                    selectinload(RemoteTaskModel.notes),
                 )
-                row.assignments.append(assignment)
-
-            row.owner_actor_id = payload.actor_id
-            row.status = "claimed"
-            row.updated_at = now
+                .where(
+                    RemoteTaskModel.machine_id == machine_id,
+                    RemoteTaskModel.status == "queued",
+                )
+                .order_by(
+                    case(
+                        (RemoteTaskModel.priority == "critical", 0),
+                        (RemoteTaskModel.priority == "high", 1),
+                        (RemoteTaskModel.priority == "normal", 2),
+                        else_=3,
+                    ),
+                    RemoteTaskModel.created_at.asc(),
+                )
+                .limit(1),
+            )
+            if row is None:
+                return None
+            self._claim_task_in_session(db=db, row=row, actor_id=payload.actor_id, lease_seconds=payload.lease_seconds)
             db.flush()
             db.refresh(row)
             return self._to_summary(row)
@@ -143,6 +177,23 @@ class RemoteTaskService:
                 row=row,
                 actor_id=payload.actor_id,
                 lease_token=payload.lease_token,
+            )
+            lease = self.presence_service.get_current_lease(
+                resource_kind=REMOTE_TASK_RESOURCE_KIND,
+                resource_id=row.id,
+                db=db,
+            )
+            if lease is None:
+                raise ValueError(f"Remote task `{task_id}` has no active kernel lease.")
+            lease = self.presence_service.heartbeat_resource_lease(
+                lease_id=lease.lease_id,
+                payload=ResourceLeaseHeartbeatRequest(
+                    holder_actor_id=payload.actor_id,
+                    lease_token=payload.lease_token,
+                    lease_seconds=payload.lease_seconds,
+                    status="claimed",
+                ),
+                db=db,
             )
 
             heartbeat = RemoteTaskHeartbeatModel(
@@ -156,10 +207,17 @@ class RemoteTaskService:
                 tests_run_count=payload.tests_run_count,
             )
             row.heartbeats.append(heartbeat)
-            assignment.lease_expires_at = utcnow() + timedelta(seconds=payload.lease_seconds)
+            assignment.lease_expires_at = lease.expires_at
             row.owner_actor_id = payload.actor_id
             row.status = self._status_for_heartbeat(payload)
             row.updated_at = utcnow()
+            self._upsert_machine_presence(
+                db=db,
+                row=row,
+                actor_id=payload.actor_id,
+                ttl_seconds=payload.lease_seconds,
+                status=row.status,
+            )
             db.flush()
             db.refresh(row)
             return self._to_summary(row)
@@ -272,11 +330,25 @@ class RemoteTaskService:
                         content=payload.note,
                     ),
                 )
+            self._release_kernel_lease_if_present(
+                db=db,
+                row=row,
+                actor_id=payload.actor_id,
+                lease_token=payload.lease_token,
+                status="released",
+            )
             assignment.status = "interrupted"
             assignment.released_at = utcnow()
             row.status = "interrupted"
             row.owner_actor_id = payload.actor_id
             row.updated_at = utcnow()
+            self._upsert_machine_presence(
+                db=db,
+                row=row,
+                actor_id=payload.actor_id,
+                ttl_seconds=60,
+                status="idle",
+            )
             db.flush()
             db.refresh(row)
             return self._to_summary(row)
@@ -299,11 +371,25 @@ class RemoteTaskService:
                         payload_json=json.dumps({"kind": "result"}, ensure_ascii=False),
                     ),
                 )
+            self._release_kernel_lease_if_present(
+                db=db,
+                row=row,
+                actor_id=payload.actor_id,
+                lease_token=payload.lease_token,
+                status="released",
+            )
             assignment.status = "completed"
             assignment.released_at = utcnow()
             row.status = "completed"
             row.owner_actor_id = payload.actor_id
             row.updated_at = utcnow()
+            self._upsert_machine_presence(
+                db=db,
+                row=row,
+                actor_id=payload.actor_id,
+                ttl_seconds=60,
+                status="idle",
+            )
             db.flush()
             db.refresh(row)
             return self._to_summary(row)
@@ -325,11 +411,25 @@ class RemoteTaskService:
                     payload_json=json.dumps({"kind": "error"}, ensure_ascii=False),
                 ),
             )
+            self._release_kernel_lease_if_present(
+                db=db,
+                row=row,
+                actor_id=payload.actor_id,
+                lease_token=payload.lease_token,
+                status="released",
+            )
             assignment.status = "failed"
             assignment.released_at = utcnow()
             row.status = "failed"
             row.owner_actor_id = payload.actor_id
             row.updated_at = utcnow()
+            self._upsert_machine_presence(
+                db=db,
+                row=row,
+                actor_id=payload.actor_id,
+                ttl_seconds=60,
+                status="idle",
+            )
             db.flush()
             db.refresh(row)
             return self._to_summary(row)
@@ -399,6 +499,129 @@ class RemoteTaskService:
         if phase in {"executing", "working", "running"}:
             return "executing" if has_work_signal else "claimed"
         return "claimed"
+
+    def _upsert_assignment_from_lease(
+        self,
+        *,
+        row: RemoteTaskModel,
+        assignment: RemoteTaskAssignmentModel | None,
+        lease: ResourceLeaseSummary,
+        now: datetime,
+    ) -> RemoteTaskAssignmentModel:
+        if assignment is not None and ensure_utc(assignment.lease_expires_at) <= now and assignment.released_at is None:
+            assignment.status = "expired"
+            assignment.released_at = now
+
+        if (
+            assignment is not None
+            and assignment.actor_id == lease.holder_actor_id
+            and assignment.released_at is None
+            and assignment.status == "claimed"
+        ):
+            assignment.lease_token = lease.lease_token
+            assignment.lease_expires_at = lease.expires_at
+            return assignment
+
+        assignment = RemoteTaskAssignmentModel(
+            task_id=row.id,
+            actor_id=lease.holder_actor_id,
+            lease_token=lease.lease_token,
+            lease_expires_at=lease.expires_at,
+            status="claimed",
+            claimed_at=lease.claimed_at,
+        )
+        row.assignments.append(assignment)
+        return assignment
+
+    def _upsert_machine_presence(
+        self,
+        *,
+        db,
+        row: RemoteTaskModel,
+        actor_id: str,
+        ttl_seconds: int,
+        status: str,
+    ) -> None:
+        self.presence_service.upsert_actor_session(
+            ActorSessionUpsertRequest(
+                actor_id=actor_id,
+                scope_kind=MACHINE_SCOPE_KIND,
+                scope_id=row.machine_id,
+                status=status,
+                ttl_seconds=ttl_seconds,
+            ),
+            db=db,
+        )
+
+    def _release_kernel_lease_if_present(
+        self,
+        *,
+        db,
+        row: RemoteTaskModel,
+        actor_id: str,
+        lease_token: str,
+        status: str,
+    ) -> None:
+        lease = self.presence_service.get_current_lease(
+            resource_kind=REMOTE_TASK_RESOURCE_KIND,
+            resource_id=row.id,
+            db=db,
+        )
+        if lease is None:
+            return
+        if lease.holder_actor_id != actor_id or lease.lease_token != lease_token:
+            raise ValueError(f"Kernel lease for remote task `{row.id}` does not match the active assignment.")
+        self.presence_service.release_resource_lease(
+            lease_id=lease.lease_id,
+            payload=ResourceLeaseReleaseRequest(
+                holder_actor_id=actor_id,
+                lease_token=lease_token,
+                status=status,
+            ),
+            db=db,
+        )
+
+    def _claim_task_in_session(
+        self,
+        *,
+        db,
+        row: RemoteTaskModel,
+        actor_id: str,
+        lease_seconds: int,
+    ) -> None:
+        assignment = self._current_assignment(row)
+        now = utcnow()
+        lease = self.presence_service.claim_resource_lease(
+            ResourceLeaseClaimRequest(
+                resource_kind=REMOTE_TASK_RESOURCE_KIND,
+                resource_id=row.id,
+                holder_actor_id=actor_id,
+                lease_token=(
+                    assignment.lease_token
+                    if assignment is not None and assignment.actor_id == actor_id
+                    else None
+                ),
+                lease_seconds=lease_seconds,
+                status="claimed",
+            ),
+            db=db,
+        )
+        self._upsert_assignment_from_lease(
+            row=row,
+            assignment=assignment,
+            lease=lease,
+            now=now,
+        )
+        self._upsert_machine_presence(
+            db=db,
+            row=row,
+            actor_id=actor_id,
+            ttl_seconds=lease_seconds,
+            status="claimed",
+        )
+        row.owner_actor_id = actor_id
+        row.status = "claimed"
+        row.updated_at = now
 
     def _to_summary(self, row: RemoteTaskModel) -> RemoteTaskSummaryResponse:
         assignment = self._current_assignment(row)

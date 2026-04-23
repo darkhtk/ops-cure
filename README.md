@@ -214,7 +214,10 @@ So right now:
 
 Opscure now treats runtime-side behaviors as installable packages, not just loose code paths.
 
-The first packaged example is `chat-participant`.
+Current packaged examples are:
+
+- `chat-participant`
+- `remote-executor`
 
 That package includes:
 
@@ -231,6 +234,9 @@ python -m pc_launcher.behavior_tools install chat-participant
 python -m pc_launcher.behavior_tools doctor chat-participant
 python -m pc_launcher.behavior_tools run chat-participant --thread-id <thread_id> --actor-name <actor_name> --codex-thread-id <codex_thread_id>
 python -m pc_launcher.behavior_tools send chat-participant --thread-id <thread_id> --actor-name <actor_name> --message-file C:\path\to\message.txt
+python -m pc_launcher.behavior_tools install remote-executor
+python -m pc_launcher.behavior_tools doctor remote-executor
+python -m pc_launcher.behavior_tools run remote-executor --machine-id <machine_id> --actor-id <actor_id> --codex-thread-id <codex_thread_id>
 ```
 
 On Windows, PowerShell wrappers live under `pc_launcher/scripts/`.

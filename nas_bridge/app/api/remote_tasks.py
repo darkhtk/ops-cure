@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, Query, Request
 from ..auth import require_bridge_token
 from ..schemas import (
     RemoteTaskClaimRequest,
+    RemoteTaskClaimNextRequest,
     RemoteTaskApprovalRequest,
     RemoteTaskApprovalResolveRequest,
     RemoteTaskApprovalSummary,
@@ -47,6 +48,18 @@ async def list_remote_tasks_for_machine(
         machine_id=machine_id,
         statuses=statuses,
         limit=limit,
+    )
+
+
+@router.post("/machines/{machine_id}/tasks/claim-next", response_model=RemoteTaskSummaryResponse | None)
+async def claim_next_remote_task_for_machine(
+    machine_id: str,
+    payload: RemoteTaskClaimNextRequest,
+    request: Request,
+) -> RemoteTaskSummaryResponse | None:
+    return request.app.state.services.remote_task_service.claim_next_task(
+        machine_id=machine_id,
+        payload=payload,
     )
 
 

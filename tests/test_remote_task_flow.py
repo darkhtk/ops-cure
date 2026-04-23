@@ -9,9 +9,11 @@ def test_remote_task_service_create_claim_heartbeat_evidence_complete(app_env):
         RemoteTaskEvidenceRequest,
         RemoteTaskHeartbeatRequest,
     )
+    from app.kernel.presence import PresenceService
     from app.services.remote_task_service import RemoteTaskService
 
     service = RemoteTaskService()
+    presence = PresenceService()
     created = service.create_task(
         RemoteTaskCreateRequest(
             machine_id="machine-a",
@@ -37,6 +39,12 @@ def test_remote_task_service_create_claim_heartbeat_evidence_complete(app_env):
     assert claimed.owner_actor_id == "codex-homedev"
     assert claimed.current_assignment is not None
     lease_token = claimed.current_assignment.lease_token
+    lease = presence.get_current_lease(resource_kind="remote_task", resource_id=created.id)
+    assert lease is not None
+    assert lease.holder_actor_id == "codex-homedev"
+    machine_presence = presence.list_presence(scope_kind="machine", scope_id="machine-a")
+    assert [session.actor_id for session in machine_presence.sessions] == ["codex-homedev"]
+    assert machine_presence.sessions[0].status == "claimed"
 
     no_evidence_heartbeat = service.heartbeat_task(
         created.id,
@@ -54,6 +62,8 @@ def test_remote_task_service_create_claim_heartbeat_evidence_complete(app_env):
     assert no_evidence_heartbeat.status == "claimed"
     assert no_evidence_heartbeat.latest_heartbeat is not None
     assert no_evidence_heartbeat.latest_heartbeat.phase == "executing"
+    machine_presence = presence.list_presence(scope_kind="machine", scope_id="machine-a")
+    assert machine_presence.sessions[0].status == "claimed"
 
     with_evidence = service.add_evidence(
         created.id,
@@ -77,13 +87,18 @@ def test_remote_task_service_create_claim_heartbeat_evidence_complete(app_env):
     )
     assert completed.status == "completed"
     assert completed.recent_evidence[0].kind == "result"
+    assert presence.get_current_lease(resource_kind="remote_task", resource_id=created.id) is None
+    machine_presence = presence.list_presence(scope_kind="machine", scope_id="machine-a")
+    assert machine_presence.sessions[0].status == "idle"
 
 
 def test_remote_task_service_fail_path_records_error_evidence(app_env):
     from app.schemas import RemoteTaskClaimRequest, RemoteTaskCreateRequest, RemoteTaskFailRequest
+    from app.kernel.presence import PresenceService
     from app.services.remote_task_service import RemoteTaskService
 
     service = RemoteTaskService()
+    presence = PresenceService()
     created = service.create_task(
         RemoteTaskCreateRequest(
             machine_id="machine-b",
@@ -110,6 +125,7 @@ def test_remote_task_service_fail_path_records_error_evidence(app_env):
     assert failed.status == "failed"
     assert failed.recent_evidence[0].kind == "error"
     assert "approval UI contract missing" in failed.recent_evidence[0].summary
+    assert presence.get_current_lease(resource_kind="remote_task", resource_id=created.id) is None
 
 
 def test_remote_task_service_supports_approval_notes_and_interrupt(app_env):
@@ -121,9 +137,11 @@ def test_remote_task_service_supports_approval_notes_and_interrupt(app_env):
         RemoteTaskInterruptRequest,
         RemoteTaskNoteRequest,
     )
+    from app.kernel.presence import PresenceService
     from app.services.remote_task_service import RemoteTaskService
 
     service = RemoteTaskService()
+    presence = PresenceService()
     created = service.create_task(
         RemoteTaskCreateRequest(
             machine_id="machine-c",
@@ -193,3 +211,4 @@ def test_remote_task_service_supports_approval_notes_and_interrupt(app_env):
     assert interrupted.status == "interrupted"
     notes_after_interrupt = service.list_notes(created.id)
     assert notes_after_interrupt[-1].kind == "interrupt"
+    assert presence.get_current_lease(resource_kind="remote_task", resource_id=created.id) is None

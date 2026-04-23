@@ -35,6 +35,8 @@ class BehaviorRuntimeConfig(BaseModel):
     runner_module: str
     sender_module: str | None = None
     default_project_path: str
+    project_profile_kind: str = "chat-participant"
+    run_kind: str = "chat-participant"
     default_runtime_mode: str = "current-thread"
     default_reconnect_seconds: float = 3.0
     healthcheck_path: str = "/api/health"
@@ -153,6 +155,79 @@ def _chat_participant_project_payload(
     }
 
 
+def _remote_executor_project_payload(
+    *,
+    behavior_name: str,
+    bridge_url: str,
+    bridge_token_env: str,
+    workdir: str,
+    repo_root: Path,
+) -> dict[str, Any]:
+    defaults = _sample_project_defaults(repo_root)
+    return {
+        "profile_name": behavior_name,
+        "default_target_name": behavior_name,
+        "default_workdir": workdir,
+        "guild_id": defaults["guild_id"],
+        "parent_channel_id": defaults["parent_channel_id"],
+        "allowed_user_ids": defaults["allowed_user_ids"],
+        "discord": defaults["discord"],
+        "bridge": {
+            "base_url": bridge_url,
+            "auth_token_env": bridge_token_env,
+        },
+        "agents": [],
+        "startup": {
+            "send_ready_message": False,
+            "restore_last_session": False,
+            "open_tools": [],
+        },
+        "artifacts": {
+            "sessions_dir": "_discord_sessions",
+            "quiet_discord": True,
+        },
+        "policy": {
+            "max_parallel_agents": 1,
+            "auto_retry": True,
+            "max_retries": 1,
+            "quiet_discord": True,
+            "approval_mode": "critical_only",
+            "allow_cross_agent_handoff": False,
+        },
+        "verification": {
+            "enabled": False,
+        },
+    }
+
+
+def _build_project_payload(
+    manifest: BehaviorManifest,
+    *,
+    bridge_url: str,
+    bridge_token_env: str,
+    workdir: str,
+    repo_root: Path,
+) -> dict[str, Any]:
+    kind = manifest.runtime.project_profile_kind
+    if kind == "chat-participant":
+        return _chat_participant_project_payload(
+            behavior_name=manifest.name,
+            bridge_url=bridge_url,
+            bridge_token_env=bridge_token_env,
+            workdir=workdir,
+            repo_root=repo_root,
+        )
+    if kind == "remote-executor":
+        return _remote_executor_project_payload(
+            behavior_name=manifest.name,
+            bridge_url=bridge_url,
+            bridge_token_env=bridge_token_env,
+            workdir=workdir,
+            repo_root=repo_root,
+        )
+    raise ValueError(f"Unsupported behavior project profile kind: {kind}")
+
+
 def install_behavior(
     name: str,
     *,
@@ -188,8 +263,8 @@ def install_behavior(
     created_project = False
     resolved_project_file.parent.mkdir(parents=True, exist_ok=True)
     if force or not resolved_project_file.exists():
-        payload = _chat_participant_project_payload(
-            behavior_name=manifest.name,
+        payload = _build_project_payload(
+            manifest,
             bridge_url=resolved_bridge_url,
             bridge_token_env=bridge_token_env,
             workdir=resolved_workdir,
@@ -342,38 +417,79 @@ def build_behavior_run_command(
     *,
     repo_root: Path = REPO_ROOT,
     project_file: Path | None = None,
-    thread_id: str,
-    actor_name: str,
+    thread_id: str | None = None,
+    actor_name: str | None = None,
+    machine_id: str | None = None,
+    actor_id: str | None = None,
     runtime_mode: str | None = None,
     codex_thread_id: str | None = None,
     poll_seconds: float | None = None,
+    lease_seconds: int | None = None,
     allow_unprompted: bool = False,
     run_once: bool = False,
 ) -> list[str]:
     manifest = load_behavior_manifest(name, repo_root=repo_root)
     resolved_project_file = project_file or (repo_root / manifest.runtime.default_project_path)
-    command = [
-        sys.executable,
-        "-m",
-        manifest.runtime.runner_module,
-        "--project-file",
-        str(resolved_project_file),
-        "--thread-id",
-        thread_id,
-        "--actor-name",
-        actor_name,
-        "--runtime-mode",
-        runtime_mode or manifest.runtime.default_runtime_mode,
-        "--poll-seconds",
-        str(poll_seconds or manifest.runtime.default_reconnect_seconds),
-    ]
-    if codex_thread_id:
-        command.extend(["--codex-thread-id", codex_thread_id])
-    if allow_unprompted:
-        command.append("--allow-unprompted")
-    if run_once:
-        command.append("--once")
-    return command
+    run_kind = manifest.runtime.run_kind
+
+    if run_kind == "chat-participant":
+        if not thread_id:
+            raise ValueError("chat-participant requires thread_id.")
+        if not actor_name:
+            raise ValueError("chat-participant requires actor_name.")
+        command = [
+            sys.executable,
+            "-m",
+            manifest.runtime.runner_module,
+            "--project-file",
+            str(resolved_project_file),
+            "--thread-id",
+            thread_id,
+            "--actor-name",
+            actor_name,
+            "--runtime-mode",
+            runtime_mode or manifest.runtime.default_runtime_mode,
+            "--poll-seconds",
+            str(poll_seconds or manifest.runtime.default_reconnect_seconds),
+        ]
+        if codex_thread_id:
+            command.extend(["--codex-thread-id", codex_thread_id])
+        if allow_unprompted:
+            command.append("--allow-unprompted")
+        if run_once:
+            command.append("--once")
+        return command
+
+    if run_kind == "remote-executor":
+        if not machine_id:
+            raise ValueError("remote-executor requires machine_id.")
+        resolved_actor_id = actor_id or actor_name
+        if not resolved_actor_id:
+            raise ValueError("remote-executor requires actor_id.")
+        command = [
+            sys.executable,
+            "-m",
+            manifest.runtime.runner_module,
+            "--project-file",
+            str(resolved_project_file),
+            "--machine-id",
+            machine_id,
+            "--actor-id",
+            resolved_actor_id,
+            "--runtime-mode",
+            runtime_mode or manifest.runtime.default_runtime_mode,
+            "--poll-seconds",
+            str(poll_seconds or manifest.runtime.default_reconnect_seconds),
+            "--lease-seconds",
+            str(lease_seconds or 90),
+        ]
+        if codex_thread_id:
+            command.extend(["--codex-thread-id", codex_thread_id])
+        if run_once:
+            command.append("--once")
+        return command
+
+    raise ValueError(f"Unsupported behavior run kind: {run_kind}")
 
 
 def build_behavior_send_command(
@@ -455,11 +571,14 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser = subparsers.add_parser("run", help="Run a behavior entrypoint.")
     run_parser.add_argument("behavior", help="Behavior name, for example chat-participant.")
     run_parser.add_argument("--project-file", help="Behavior project.yaml path.")
-    run_parser.add_argument("--thread-id", required=True, help="Target chat thread id.")
-    run_parser.add_argument("--actor-name", required=True, help="Participant actor name.")
+    run_parser.add_argument("--thread-id", help="Target chat thread id for chat-oriented behaviors.")
+    run_parser.add_argument("--actor-name", help="Participant actor name for chat-oriented behaviors.")
+    run_parser.add_argument("--machine-id", help="Target machine id for task-oriented behaviors.")
+    run_parser.add_argument("--actor-id", help="Executor actor id for task-oriented behaviors.")
     run_parser.add_argument("--runtime-mode", help="Runtime mode override.")
     run_parser.add_argument("--codex-thread-id", help="Current Codex desktop thread id.")
     run_parser.add_argument("--poll-seconds", type=float, help="Reconnect backoff seconds.")
+    run_parser.add_argument("--lease-seconds", type=int, help="Lease duration for task-oriented behaviors.")
     run_parser.add_argument("--allow-unprompted", action="store_true", help="Allow non-targeted replies.")
     run_parser.add_argument("--once", action="store_true", help="Run one sync cycle and exit.")
 
@@ -509,9 +628,12 @@ def main(argv: list[str] | None = None) -> int:
             project_file=Path(args.project_file).resolve() if args.project_file else None,
             thread_id=args.thread_id,
             actor_name=args.actor_name,
+            machine_id=args.machine_id,
+            actor_id=args.actor_id,
             runtime_mode=args.runtime_mode,
             codex_thread_id=args.codex_thread_id,
             poll_seconds=args.poll_seconds,
+            lease_seconds=args.lease_seconds,
             allow_unprompted=bool(args.allow_unprompted),
             run_once=bool(args.once),
         )

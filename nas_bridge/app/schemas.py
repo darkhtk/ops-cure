@@ -670,6 +670,16 @@ class RemoteTaskClaimRequest(BaseModel):
         return max(10, min(value, 3600))
 
 
+class RemoteTaskClaimNextRequest(BaseModel):
+    actor_id: str
+    lease_seconds: int = 120
+
+    @field_validator("lease_seconds")
+    @classmethod
+    def validate_lease_seconds(cls, value: int) -> int:
+        return max(10, min(value, 3600))
+
+
 class RemoteTaskHeartbeatRequest(BaseModel):
     actor_id: str
     lease_token: str
