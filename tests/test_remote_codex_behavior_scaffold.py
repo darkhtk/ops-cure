@@ -108,7 +108,13 @@ def test_remote_codex_browser_and_agent_surface_round_trip(app_env) -> None:
                         "role": "user",
                         "phase": None,
                         "text": "Ship this UX",
-                        "images": [],
+                        "images": [
+                            {
+                                "src": "data:image/png;base64,abc123",
+                                "alt": "Uploaded image 1",
+                                "title": None,
+                            }
+                        ],
                     },
                     {
                         "lineNumber": 2,
@@ -160,6 +166,7 @@ def test_remote_codex_browser_and_agent_surface_round_trip(app_env) -> None:
         )
         assert messages_response.status_code == 200
         assert [item["lineNumber"] for item in messages_response.json()["messages"]] == [1, 2]
+        assert messages_response.json()["messages"][0]["images"][0]["src"] == "data:image/png;base64,abc123"
 
         turn_response = client.post(
             "/api/remote-codex/machines/machine-z/threads/thread-z/turns",

@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from pc_launcher.connectors.remote_executor.device_agent import RemoteCodexDeviceAgent
+from pc_launcher.connectors.remote_executor.device_agent import (
+    RemoteCodexDeviceAgent,
+    merge_adjacent_message,
+    normalize_rollout_message,
+)
 
 
 @dataclass
@@ -195,6 +199,68 @@ def _sample_snapshot() -> dict:
         "lineCount": 1,
         "fileSize": 64,
     }
+
+
+def test_normalize_rollout_message_extracts_uploaded_images_and_filters_placeholder_text() -> None:
+    entry = {
+        "type": "response_item",
+        "payload": {
+            "type": "message",
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "Look at this screenshot.\n"},
+                {"type": "input_text", "text": "<image>"},
+                {
+                    "type": "input_image",
+                    "image_url": "data:image/png;base64,abc123",
+                    "title": "Screenshot",
+                },
+            ],
+        },
+    }
+
+    message = normalize_rollout_message(entry, line_number=7)
+
+    assert message is not None
+    assert message["text"] == "Look at this screenshot."
+    assert message["images"] == [
+        {
+            "src": "data:image/png;base64,abc123",
+            "alt": "Screenshot",
+            "title": "Screenshot",
+        }
+    ]
+
+
+def test_merge_adjacent_message_keeps_image_payload_from_duplicate_message() -> None:
+    previous = {
+        "lineNumber": 1,
+        "timestamp": "2026-04-23T00:00:00+00:00",
+        "role": "user",
+        "phase": None,
+        "text": "Look at this screenshot.",
+        "images": [],
+    }
+    current = {
+        "lineNumber": 2,
+        "timestamp": "2026-04-23T00:00:01+00:00",
+        "role": "user",
+        "phase": None,
+        "text": "Look at this screenshot.",
+        "images": [
+            {
+                "src": "data:image/png;base64,abc123",
+                "alt": "Uploaded image 1",
+                "title": None,
+            }
+        ],
+    }
+
+    merged = merge_adjacent_message(previous, current)
+
+    assert merged is True
+    assert previous["images"] == current["images"]
+    assert previous["lineNumber"] == 2
 
 
 def _sample_health(*, live_control: bool = True) -> dict[str, object]:

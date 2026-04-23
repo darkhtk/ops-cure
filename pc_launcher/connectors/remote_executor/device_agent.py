@@ -161,17 +161,57 @@ def build_thread_version(thread: dict[str, Any]) -> str:
     )
 
 
-def extract_message_text(content: Any) -> str:
+def _extract_message_image(item: dict[str, Any], *, index: int) -> dict[str, Any] | None:
+    image_url = ""
+    for key in ("image_url", "url", "src"):
+        candidate = item.get(key)
+        if isinstance(candidate, str) and candidate.strip():
+            image_url = candidate.strip()
+            break
+    if not image_url:
+        return None
+
+    alt = compact_text(
+        item.get("alt")
+        or item.get("title")
+        or item.get("label")
+        or item.get("name"),
+        f"Uploaded image {index}",
+    )
+    title = compact_text(item.get("title") or item.get("label") or item.get("name")) or None
+    return {
+        "src": image_url,
+        "alt": alt,
+        "title": title,
+    }
+
+
+def extract_message_parts(content: Any) -> tuple[str, list[dict[str, Any]]]:
     if not isinstance(content, list):
-        return ""
-    parts: list[str] = []
+        return "", []
+
+    text_parts: list[str] = []
+    images: list[dict[str, Any]] = []
     for item in content:
         if not isinstance(item, dict):
             continue
-        text = item.get("text")
-        if isinstance(text, str) and text.strip():
-            parts.append(text.strip())
-    return "\n\n".join(parts).strip()
+
+        item_type = compact_text(item.get("type")).lower()
+        if item_type in {"input_text", "output_text", "text"}:
+            text = item.get("text")
+            if isinstance(text, str) and text.strip():
+                text_parts.append(text.strip())
+            continue
+
+        if item_type in {"input_image", "output_image", "image"}:
+            image = _extract_message_image(item, index=len(images) + 1)
+            if image is not None:
+                images.append(image)
+
+    if images:
+        text_parts = [part for part in text_parts if compact_text(part) != "<image>"]
+
+    return "\n\n".join(part.strip() for part in text_parts if part.strip()).strip(), images
 
 
 def should_include_message(role: str | None, text: str) -> bool:
@@ -196,10 +236,11 @@ def normalize_rollout_message(entry: dict[str, Any], *, line_number: int) -> dic
     role: str | None = None
     phase: str | None = None
     text = ""
+    images: list[dict[str, Any]] = []
     if entry_type == "response_item" and compact_text(payload.get("type")) == "message":
         role = compact_text(payload.get("role"))
         phase = compact_text(payload.get("phase")) or None
-        text = extract_message_text(payload.get("content"))
+        text, images = extract_message_parts(payload.get("content"))
     elif entry_type == "event_msg":
         payload_type = compact_text(payload.get("type"))
         if payload_type == "user_message":
@@ -217,7 +258,7 @@ def normalize_rollout_message(entry: dict[str, Any], *, line_number: int) -> dic
         "role": role,
         "phase": phase,
         "text": text,
-        "images": [],
+        "images": images,
     }
 
 
@@ -237,6 +278,23 @@ def merge_adjacent_message(previous: dict[str, Any] | None, current: dict[str, A
         return False
     if abs(previous_line - current_line) > 2:
         return False
+    previous_images = previous.get("images") if isinstance(previous.get("images"), list) else []
+    current_images = current.get("images") if isinstance(current.get("images"), list) else []
+    if current_images:
+        seen_sources = {
+            compact_text(item.get("src"))
+            for item in previous_images
+            if isinstance(item, dict) and compact_text(item.get("src"))
+        }
+        for item in current_images:
+            if not isinstance(item, dict):
+                continue
+            source = compact_text(item.get("src"))
+            if not source or source in seen_sources:
+                continue
+            previous_images.append(item)
+            seen_sources.add(source)
+        previous["images"] = previous_images
     previous["lineNumber"] = max(previous_line, current_line)
     previous["timestamp"] = current.get("timestamp") or previous.get("timestamp")
     return True
