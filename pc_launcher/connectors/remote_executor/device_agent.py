@@ -17,6 +17,8 @@ from .bridge import RemoteExecutorBridge
 LOGGER = logging.getLogger(__name__)
 DEFAULT_MAX_THREADS = 60
 DEFAULT_MESSAGE_LIMIT = 300
+DEFAULT_TURN_MESSAGE_LOOKBACK = 24
+DEFAULT_RECENT_SIGNATURE_WINDOW = 80
 
 
 def compact_text(value: Any, fallback: str = "") -> str:
@@ -214,12 +216,17 @@ def extract_message_parts(content: Any) -> tuple[str, list[dict[str, Any]]]:
     return "\n\n".join(part.strip() for part in text_parts if part.strip()).strip(), images
 
 
-def should_include_message(role: str | None, text: str) -> bool:
+def should_include_message(
+    role: str | None,
+    text: str,
+    *,
+    images: list[dict[str, Any]] | None = None,
+) -> bool:
     if role not in {"user", "assistant"}:
         return False
     normalized = text.strip()
     if not normalized:
-        return False
+        return bool(images)
     hidden_prefixes = (
         "<environment_context>",
         "<permissions instructions>",
@@ -228,6 +235,129 @@ def should_include_message(role: str | None, text: str) -> bool:
         "<skills_instructions>",
     )
     return not any(normalized.startswith(prefix) for prefix in hidden_prefixes)
+
+
+def _extract_turn_item_message_content(item: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
+    text = ""
+    images: list[dict[str, Any]] = []
+
+    content = item.get("content")
+    if isinstance(content, list):
+        text, images = extract_message_parts(content)
+
+    if not text:
+        text = compact_text(item.get("text"))
+
+    return text, images
+
+
+def normalize_turn_item_message(
+    item: dict[str, Any],
+    *,
+    sequence_number: int,
+    phase: str | None = None,
+) -> dict[str, Any] | None:
+    item_type = compact_text(item.get("type"))
+    if item_type == "userMessage":
+        role = "user"
+    elif item_type == "agentMessage":
+        role = "assistant"
+    else:
+        return None
+
+    text, images = _extract_turn_item_message_content(item)
+    normalized_phase = compact_text(item.get("phase")) or phase or None
+    if not should_include_message(role, text, images=images):
+        return None
+    return {
+        "lineNumber": sequence_number,
+        "timestamp": item.get("timestamp"),
+        "role": role,
+        "phase": normalized_phase if role == "assistant" else None,
+        "text": text,
+        "images": images,
+    }
+
+
+def message_signature(message: dict[str, Any]) -> tuple[Any, ...]:
+    images = message.get("images") if isinstance(message.get("images"), list) else []
+    image_sources = tuple(
+        compact_text(item.get("src"))
+        for item in images
+        if isinstance(item, dict) and compact_text(item.get("src"))
+    )
+    return (
+        compact_text(message.get("role")),
+        compact_text(message.get("phase")),
+        compact_text(message.get("text")),
+        image_sources,
+    )
+
+
+def merge_missing_turn_messages(
+    rollout_messages: list[dict[str, Any]],
+    turn_messages: list[dict[str, Any]],
+    *,
+    recent_window: int = DEFAULT_RECENT_SIGNATURE_WINDOW,
+) -> list[dict[str, Any]]:
+    if not turn_messages:
+        return list(rollout_messages)
+
+    merged_messages = list(rollout_messages)
+    recent_known = {
+        message_signature(message)
+        for message in merged_messages[-max(1, recent_window) :]
+    }
+    pending_messages: list[dict[str, Any]] = []
+
+    for message in turn_messages:
+        signature = message_signature(message)
+        if signature in recent_known:
+            continue
+        previous = pending_messages[-1] if pending_messages else None
+        if not merge_adjacent_message(previous, message):
+            pending_messages.append(message)
+        recent_known.add(signature)
+
+    if pending_messages:
+        merged_messages.extend(pending_messages)
+    return merged_messages
+
+
+def build_recent_turn_messages(
+    thread_payload: dict[str, Any] | None,
+    *,
+    lookback_turns: int = DEFAULT_TURN_MESSAGE_LOOKBACK,
+) -> list[dict[str, Any]]:
+    if not isinstance(thread_payload, dict):
+        return []
+    thread = thread_payload.get("thread") if isinstance(thread_payload.get("thread"), dict) else {}
+    turns = thread.get("turns") if isinstance(thread.get("turns"), list) else []
+    if not turns:
+        return []
+
+    recent_turns = turns[-max(1, lookback_turns) :]
+    messages: list[dict[str, Any]] = []
+    sequence_number = 1_000_000
+    for turn in recent_turns:
+        if not isinstance(turn, dict):
+            continue
+        turn_phase = compact_text(turn.get("status")) or None
+        for item in turn.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            message = normalize_turn_item_message(
+                item,
+                sequence_number=sequence_number,
+                phase=turn_phase,
+            )
+            sequence_number += 1
+            if message is None:
+                continue
+            previous = messages[-1] if messages else None
+            if not merge_adjacent_message(previous, message):
+                messages.append(message)
+    return messages
 
 
 def normalize_rollout_message(entry: dict[str, Any], *, line_number: int) -> dict[str, Any] | None:
@@ -250,7 +380,7 @@ def normalize_rollout_message(entry: dict[str, Any], *, line_number: int) -> dic
             role = "assistant"
             phase = compact_text(payload.get("phase")) or None
             text = compact_text(payload.get("message") or payload.get("text"))
-    if not should_include_message(role, text):
+    if not should_include_message(role, text, images=images):
         return None
     return {
         "lineNumber": line_number,
@@ -517,12 +647,28 @@ class LocalCodexBackend:
         thread = self.get_thread_by_id(thread_id)
         if thread is None:
             return None
+        live_thread_payload: dict[str, Any] | None = None
+        if self.app_server_client is not None:
+            try:
+                live_thread_payload = self.app_server_client.read_thread(thread_id, include_turns=True)
+                self.runtime_available = True
+                self.active_transport = "standalone-app-server"
+                self.last_runtime_error = None
+            except Exception as error:  # pragma: no cover - depends on local runtime
+                self.runtime_available = False
+                self.last_runtime_error = compact_text(getattr(error, "message", None) or str(error))
+                LOGGER.warning(
+                    "Remote executor could not read thread %s turns via app-server: %s",
+                    thread_id,
+                    self.last_runtime_error,
+                )
         rollout_path = Path(normalize_windows_path(thread.get("rolloutPath"))).expanduser()
         if not rollout_path.exists():
+            messages = build_recent_turn_messages(live_thread_payload)
             return {
                 "thread": thread,
-                "messages": [],
-                "totalMessages": 0,
+                "messages": messages[-limit:] if limit > 0 else messages,
+                "totalMessages": len(messages),
                 "lineCount": 0,
                 "fileSize": 0,
             }
@@ -543,6 +689,10 @@ class LocalCodexBackend:
             previous = messages[-1] if messages else None
             if not merge_adjacent_message(previous, message):
                 messages.append(message)
+        messages = merge_missing_turn_messages(
+            messages,
+            build_recent_turn_messages(live_thread_payload),
+        )
         total_messages = len(messages)
         if limit > 0:
             messages = messages[-limit:]

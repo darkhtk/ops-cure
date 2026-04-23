@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from pc_launcher.connectors.remote_executor.device_agent import (
+    LocalCodexBackend,
     RemoteCodexDeviceAgent,
+    merge_missing_turn_messages,
     merge_adjacent_message,
     normalize_rollout_message,
+    normalize_turn_item_message,
 )
 
 
@@ -161,6 +166,33 @@ class FakeBridge:
         return {"ok": True}
 
 
+@dataclass
+class FakeAppServerClient:
+    payload: dict
+
+    def read_thread(self, thread_id: str, *, include_turns: bool = False) -> dict:
+        assert include_turns is True
+        return self.payload
+
+    def list_threads(self, *, limit: int = 60) -> dict:
+        return {"threads": []}
+
+    def resume_thread(self, thread_id: str) -> dict:
+        return {"ok": True}
+
+    def start_turn(self, thread_id: str, prompt: str) -> dict:
+        return {"turn": {"id": "turn-1", "status": "inProgress"}}
+
+    def interrupt_turn(self, thread_id: str, turn_id: str) -> dict:
+        return {"ok": True}
+
+    def wait_for_turn_completion(self, *, thread_id: str, turn_id: str, timeout_seconds: float) -> tuple[dict, str]:
+        raise NotImplementedError
+
+    def close(self) -> None:
+        return None
+
+
 def _sample_thread() -> dict:
     return {
         "id": "thread-1",
@@ -261,6 +293,118 @@ def test_merge_adjacent_message_keeps_image_payload_from_duplicate_message() -> 
     assert merged is True
     assert previous["images"] == current["images"]
     assert previous["lineNumber"] == 2
+
+
+def test_normalize_turn_item_message_extracts_user_text_from_turn_content() -> None:
+    item = {
+        "type": "userMessage",
+        "content": [
+            {
+                "type": "text",
+                "text": "컴포저 높이가 너무 커.",
+            }
+        ],
+    }
+
+    message = normalize_turn_item_message(item, sequence_number=10, phase="inProgress")
+
+    assert message is not None
+    assert message["role"] == "user"
+    assert message["text"] == "컴포저 높이가 너무 커."
+    assert message["images"] == []
+
+
+def test_merge_missing_turn_messages_appends_recent_prompt_not_in_rollout_tail() -> None:
+    rollout_messages = [
+        {
+            "lineNumber": 1,
+            "timestamp": "2026-04-23T00:00:00+00:00",
+            "role": "user",
+            "phase": None,
+            "text": "기존 프롬프트",
+            "images": [],
+        }
+    ]
+    turn_messages = [
+        {
+            "lineNumber": 1_000_000,
+            "timestamp": None,
+            "role": "user",
+            "phase": None,
+            "text": "컴포저 높이가 너무 커.",
+            "images": [],
+        }
+    ]
+
+    merged = merge_missing_turn_messages(rollout_messages, turn_messages, recent_window=20)
+
+    assert [message["text"] for message in merged] == [
+        "기존 프롬프트",
+        "컴포저 높이가 너무 커.",
+    ]
+
+
+def test_local_backend_read_thread_messages_merges_live_turn_messages_into_snapshot() -> None:
+    with TemporaryDirectory() as temp_dir:
+        rollout_path = Path(temp_dir) / "rollout.jsonl"
+        rollout_path.write_text(
+            '{"type":"event_msg","payload":{"type":"user_message","message":"기존 프롬프트"}}\n',
+            encoding="utf-8",
+        )
+        thread = {
+            "id": "thread-1",
+            "title": "Thread 1",
+            "cwd": r"C:\\Users\\darkh\\Projects\\ops-cure",
+            "rolloutPath": str(rollout_path),
+            "updatedAtMs": 1700000000000,
+            "createdAtMs": 1699999999000,
+            "source": "app-server",
+            "modelProvider": "openai",
+            "model": "gpt-5.4",
+            "reasoningEffort": "medium",
+            "cliVersion": "1.0.0",
+            "firstUserMessage": "기존 프롬프트",
+            "status": {"type": "notLoaded"},
+            "agentNickname": None,
+            "agentRole": None,
+        }
+        app_server_payload = {
+            "thread": {
+                "id": "thread-1",
+                "turns": [
+                    {
+                        "id": "turn-live",
+                        "status": "inProgress",
+                        "items": [
+                            {
+                                "type": "userMessage",
+                                "content": [
+                                    {
+                                        "type": "text",
+                                        "text": "컴포저 높이가 너무 커.",
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            }
+        }
+        backend = LocalCodexBackend(
+            machine_id="homedev",
+            display_name="Home Dev",
+            app_server_client=FakeAppServerClient(payload=app_server_payload),
+            codex_home=temp_dir,
+        )
+        backend.get_thread_by_id = lambda thread_id: dict(thread)
+
+        snapshot = backend.read_thread_messages("thread-1", limit=20)
+
+    assert snapshot is not None
+    assert [message["text"] for message in snapshot["messages"]] == [
+        "기존 프롬프트",
+        "컴포저 높이가 너무 커.",
+    ]
 
 
 def _sample_health(*, live_control: bool = True) -> dict[str, object]:
