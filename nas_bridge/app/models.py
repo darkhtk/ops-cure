@@ -627,3 +627,117 @@ class RemoteTaskNoteModel(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     task: Mapped[RemoteTaskModel] = relationship(back_populates="notes")
+
+
+class RemoteCodexMachineModel(Base):
+    __tablename__ = "remote_codex_machines"
+
+    machine_id: Mapped[str] = mapped_column(primary_key=True)
+    display_name: Mapped[str] = mapped_column(index=True)
+    source: Mapped[str] = mapped_column(index=True, default="agent")
+    active_transport: Mapped[str] = mapped_column(index=True, default="filesystem-storage")
+    runtime_mode: Mapped[str] = mapped_column(index=True, default="filesystem-readonly")
+    runtime_available: Mapped[bool] = mapped_column(Boolean(), default=False)
+    capabilities_json: Mapped[str] = mapped_column(Text(), default="{}")
+    runtime_descriptor_json: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    last_runtime_error: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    last_diagnostic: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    last_sync_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+    threads: Mapped[list["RemoteCodexThreadModel"]] = relationship(
+        back_populates="machine",
+        cascade="all, delete-orphan",
+    )
+
+
+class RemoteCodexThreadModel(Base):
+    __tablename__ = "remote_codex_threads"
+    __table_args__ = (
+        UniqueConstraint("machine_id", "thread_id", name="uq_remote_codex_machine_thread"),
+        Index("ix_remote_codex_threads_machine_updated", "machine_id", "updated_at_ms"),
+    )
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=lambda: str(uuid.uuid4()))
+    machine_id: Mapped[str] = mapped_column(
+        ForeignKey("remote_codex_machines.machine_id", ondelete="CASCADE"),
+        index=True,
+    )
+    thread_id: Mapped[str] = mapped_column(index=True)
+    title: Mapped[str] = mapped_column(Text(), default="(untitled)")
+    cwd: Mapped[str] = mapped_column(Text(), default="")
+    rollout_path: Mapped[str] = mapped_column(Text(), default="")
+    updated_at_ms: Mapped[int] = mapped_column(Integer(), default=0)
+    created_at_ms: Mapped[int] = mapped_column(Integer(), default=0)
+    source: Mapped[str | None] = mapped_column(index=True, nullable=True)
+    model_provider: Mapped[str | None] = mapped_column(index=True, nullable=True)
+    model: Mapped[str | None] = mapped_column(index=True, nullable=True)
+    reasoning_effort: Mapped[str | None] = mapped_column(index=True, nullable=True)
+    cli_version: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    first_user_message: Mapped[str] = mapped_column(Text(), default="")
+    forked_from_id: Mapped[str | None] = mapped_column(index=True, nullable=True)
+    ephemeral: Mapped[bool] = mapped_column(Boolean(), default=False)
+    status_json: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    agent_nickname: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    agent_role: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    total_messages: Mapped[int] = mapped_column(Integer(), default=0)
+    line_count: Mapped[int] = mapped_column(Integer(), default=0)
+    file_size: Mapped[int] = mapped_column(Integer(), default=0)
+    synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+    machine: Mapped[RemoteCodexMachineModel] = relationship(back_populates="threads")
+    messages: Mapped[list["RemoteCodexMessageModel"]] = relationship(
+        back_populates="thread",
+        cascade="all, delete-orphan",
+    )
+
+
+class RemoteCodexMessageModel(Base):
+    __tablename__ = "remote_codex_messages"
+    __table_args__ = (
+        UniqueConstraint("thread_row_id", "line_number", name="uq_remote_codex_thread_line"),
+        Index("ix_remote_codex_messages_thread_line", "thread_row_id", "line_number"),
+    )
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=lambda: str(uuid.uuid4()))
+    thread_row_id: Mapped[str] = mapped_column(
+        ForeignKey("remote_codex_threads.id", ondelete="CASCADE"),
+        index=True,
+    )
+    line_number: Mapped[int] = mapped_column(Integer(), index=True)
+    timestamp: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    role: Mapped[str] = mapped_column(index=True, default="assistant")
+    phase: Mapped[str | None] = mapped_column(index=True, nullable=True)
+    text: Mapped[str] = mapped_column(Text(), default="")
+    images_json: Mapped[str] = mapped_column(Text(), default="[]")
+
+    thread: Mapped[RemoteCodexThreadModel] = relationship(back_populates="messages")
+
+
+class RemoteCodexCommandModel(Base):
+    __tablename__ = "remote_codex_commands"
+    __table_args__ = (
+        Index("ix_remote_codex_commands_machine_status_created", "machine_id", "status", "created_at"),
+        Index("ix_remote_codex_commands_thread_updated", "thread_id", "updated_at"),
+    )
+
+    command_id: Mapped[str] = mapped_column(primary_key=True, default=lambda: str(uuid.uuid4()))
+    type: Mapped[str] = mapped_column(index=True)
+    status: Mapped[str] = mapped_column(index=True, default="queued")
+    machine_id: Mapped[str] = mapped_column(index=True)
+    thread_id: Mapped[str] = mapped_column(index=True)
+    task_id: Mapped[str | None] = mapped_column(index=True, nullable=True)
+    turn_id: Mapped[str | None] = mapped_column(index=True, nullable=True)
+    prompt: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    requested_by_json: Mapped[str] = mapped_column(Text(), default="{}")
+    worker_id: Mapped[str | None] = mapped_column(index=True, nullable=True)
+    result_json: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    error_json: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
