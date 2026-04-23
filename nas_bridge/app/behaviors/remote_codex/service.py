@@ -139,12 +139,30 @@ class RemoteCodexBehaviorService:
             "latestApproval": latest_approval,
         }
 
-    def _requested_by(self, *, auth_method: str | None, email: str | None, name: str | None) -> dict[str, Any]:
+    def _requested_by(
+        self,
+        *,
+        auth_method: str | None,
+        email: str | None,
+        name: str | None,
+        subject: str | None = None,
+        asserted_client_id: str | None = None,
+    ) -> dict[str, Any]:
         return {
             "authMethod": compact_text(auth_method, "unknown"),
             "email": compact_text(email) or None,
             "name": compact_text(name) or None,
+            "subject": compact_text(subject) or None,
+            "assertedClientId": compact_text(asserted_client_id) or None,
         }
+
+    def _created_by(self, requested_by: dict[str, Any]) -> str:
+        return (
+            compact_text(requested_by.get("email"))
+            or compact_text(requested_by.get("name"))
+            or compact_text(requested_by.get("subject"))
+            or "bridge-service"
+        )
 
     def get_health(self) -> dict[str, Any]:
         machine_summary = self.state_service.get_machine_summary(active_only=True)
@@ -532,7 +550,7 @@ class RemoteCodexBehaviorService:
                 thread_id=thread_id,
                 objective=prompt,
                 success_criteria={"browser": ["task row", "command queue", "transcript update"]},
-                created_by=requested_by.get("email") or requested_by.get("name") or "browser-user",
+                created_by=self._created_by(requested_by),
                 origin_surface="browser",
             )
         )
@@ -583,7 +601,7 @@ class RemoteCodexBehaviorService:
                 thread_id=thread_id,
                 objective=f"Interrupt turn {next_turn_id}",
                 success_criteria={"browser": ["interrupt task", "command result"]},
-                created_by=requested_by.get("email") or requested_by.get("name") or "browser-user",
+                created_by=self._created_by(requested_by),
                 origin_surface="browser",
             )
         )

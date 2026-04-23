@@ -119,6 +119,11 @@ def normalize_requested_by(payload: dict[str, Any] | None = None) -> dict[str, A
         "authMethod": compact_text(payload.get("authMethod") or payload.get("auth_method"), "unknown"),
         "email": compact_text(payload.get("email")) or None,
         "name": compact_text(payload.get("name")) or None,
+        "subject": compact_text(payload.get("subject")) or None,
+        "assertedClientId": compact_text(
+            payload.get("assertedClientId") or payload.get("asserted_client_id")
+        )
+        or None,
     }
 
 

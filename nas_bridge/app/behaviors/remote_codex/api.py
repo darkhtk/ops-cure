@@ -4,26 +4,30 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
-from ...auth import require_bridge_token
+from ...auth import (
+    BridgeCaller,
+    build_bridge_audit_fields,
+    require_bridge_permissions,
+)
 
 router = APIRouter(
     prefix="/api/remote-codex",
     tags=["remote_codex"],
-    dependencies=[Depends(require_bridge_token)],
 )
 
+ReadBridgeCaller = Annotated[BridgeCaller, Depends(require_bridge_permissions("bridge:read"))]
+WriteBridgeCaller = Annotated[BridgeCaller, Depends(require_bridge_permissions("bridge:write"))]
+StreamBridgeCaller = Annotated[BridgeCaller, Depends(require_bridge_permissions("bridge:stream"))]
+ControlBridgeCaller = Annotated[BridgeCaller, Depends(require_bridge_permissions("bridge:control"))]
 
-def _requested_by(request: Request) -> dict[str, Any]:
-    return {
-        "authMethod": "bridge-token",
-        "email": request.headers.get("x-remote-codex-user-email"),
-        "name": request.headers.get("x-remote-codex-user-name"),
-    }
+
+def _requested_by(caller: BridgeCaller) -> dict[str, Any]:
+    return build_bridge_audit_fields(caller)
 
 
 def _raise_for_error(error: Exception) -> None:
@@ -46,17 +50,17 @@ def _raise_for_error(error: Exception) -> None:
 
 
 @router.get("/health")
-async def health(request: Request) -> dict[str, Any]:
+async def health(request: Request, _caller: ReadBridgeCaller) -> dict[str, Any]:
     return request.app.state.services.remote_codex_service.get_health()
 
 
 @router.get("/control-status")
-async def control_status(request: Request) -> dict[str, Any]:
+async def control_status(request: Request, _caller: ReadBridgeCaller) -> dict[str, Any]:
     return request.app.state.services.remote_codex_service.get_control_status()
 
 
 @router.get("/machines")
-async def list_machines(request: Request) -> dict[str, Any]:
+async def list_machines(request: Request, _caller: ReadBridgeCaller) -> dict[str, Any]:
     return request.app.state.services.remote_codex_service.list_machines()
 
 
@@ -64,6 +68,7 @@ async def list_machines(request: Request) -> dict[str, Any]:
 async def list_machine_threads(
     machine_id: str,
     request: Request,
+    _caller: ReadBridgeCaller,
     q: str | None = Query(default=""),
     limit: int = Query(default=60, ge=1, le=200),
 ) -> dict[str, Any]:
@@ -78,7 +83,12 @@ async def list_machine_threads(
 
 
 @router.get("/machines/{machine_id}/threads/{thread_id}")
-async def get_thread(machine_id: str, thread_id: str, request: Request) -> dict[str, Any]:
+async def get_thread(
+    machine_id: str,
+    thread_id: str,
+    request: Request,
+    _caller: ReadBridgeCaller,
+) -> dict[str, Any]:
     try:
         return request.app.state.services.remote_codex_service.get_thread(machine_id, thread_id)
     except ValueError as error:
@@ -90,6 +100,7 @@ async def get_thread_messages(
     machine_id: str,
     thread_id: str,
     request: Request,
+    _caller: ReadBridgeCaller,
     limit: int = Query(default=250, ge=0, le=1000),
     afterLineNumber: int = Query(default=0, ge=0),
 ) -> dict[str, Any]:
@@ -109,6 +120,7 @@ async def get_thread_commands(
     machine_id: str,
     thread_id: str,
     request: Request,
+    _caller: ReadBridgeCaller,
     limit: int = Query(default=8, ge=1, le=30),
 ) -> dict[str, Any]:
     try:
@@ -126,6 +138,7 @@ async def get_thread_tasks(
     machine_id: str,
     thread_id: str,
     request: Request,
+    _caller: ReadBridgeCaller,
     status: list[str] | None = Query(default=None),
     limit: int = Query(default=8, ge=1, le=30),
 ) -> dict[str, Any]:
@@ -141,7 +154,12 @@ async def get_thread_tasks(
 
 
 @router.post("/machines/{machine_id}/threads/{thread_id}/turns")
-async def start_turn(machine_id: str, thread_id: str, request: Request) -> dict[str, Any]:
+async def start_turn(
+    machine_id: str,
+    thread_id: str,
+    request: Request,
+    caller: ControlBridgeCaller,
+) -> dict[str, Any]:
     body = await request.json()
     prompt = str(body.get("prompt") or "").strip()
     if not prompt:
@@ -151,45 +169,55 @@ async def start_turn(machine_id: str, thread_id: str, request: Request) -> dict[
             machine_id=machine_id,
             thread_id=thread_id,
             prompt=prompt,
-            requested_by=_requested_by(request),
+            requested_by=_requested_by(caller),
         )
     except (ValueError, RuntimeError) as error:
         _raise_for_error(error)
 
 
 @router.post("/machines/{machine_id}/threads/{thread_id}/interrupt")
-async def interrupt_turn(machine_id: str, thread_id: str, request: Request) -> dict[str, Any]:
+async def interrupt_turn(
+    machine_id: str,
+    thread_id: str,
+    request: Request,
+    caller: ControlBridgeCaller,
+) -> dict[str, Any]:
     body = await request.json()
     try:
         return request.app.state.services.remote_codex_service.enqueue_interrupt(
             machine_id=machine_id,
             thread_id=thread_id,
             turn_id=body.get("turnId"),
-            requested_by=_requested_by(request),
+            requested_by=_requested_by(caller),
         )
     except (ValueError, RuntimeError) as error:
         _raise_for_error(error)
 
 
 @router.delete("/machines/{machine_id}/threads/{thread_id}")
-async def delete_thread(machine_id: str, thread_id: str, request: Request) -> dict[str, Any]:
+async def delete_thread(
+    machine_id: str,
+    thread_id: str,
+    request: Request,
+    caller: ControlBridgeCaller,
+) -> dict[str, Any]:
     try:
         return request.app.state.services.remote_codex_service.enqueue_thread_delete(
             machine_id=machine_id,
             thread_id=thread_id,
-            requested_by=_requested_by(request),
+            requested_by=_requested_by(caller),
         )
     except (ValueError, RuntimeError) as error:
         _raise_for_error(error)
 
 
 @router.get("/tasks/{task_id}")
-async def get_task(task_id: str, request: Request) -> dict[str, Any]:
+async def get_task(task_id: str, request: Request, _caller: ReadBridgeCaller) -> dict[str, Any]:
     return request.app.state.services.remote_codex_service.get_task(task_id)
 
 
 @router.post("/tasks")
-async def create_task(request: Request) -> dict[str, Any]:
+async def create_task(request: Request, _caller: WriteBridgeCaller) -> dict[str, Any]:
     body = await request.json()
     from ...schemas import RemoteTaskCreateRequest
 
@@ -198,7 +226,7 @@ async def create_task(request: Request) -> dict[str, Any]:
 
 
 @router.post("/tasks/{task_id}/claim")
-async def claim_task(task_id: str, request: Request) -> dict[str, Any]:
+async def claim_task(task_id: str, request: Request, _caller: WriteBridgeCaller) -> dict[str, Any]:
     body = await request.json()
     from ...schemas import RemoteTaskClaimRequest
 
@@ -207,7 +235,11 @@ async def claim_task(task_id: str, request: Request) -> dict[str, Any]:
 
 
 @router.post("/machines/{machine_id}/tasks/claim-next")
-async def claim_next_machine_task(machine_id: str, request: Request) -> dict[str, Any]:
+async def claim_next_machine_task(
+    machine_id: str,
+    request: Request,
+    _caller: ControlBridgeCaller,
+) -> dict[str, Any]:
     body = await request.json()
     from ...schemas import RemoteTaskClaimNextRequest
 
@@ -220,7 +252,7 @@ async def claim_next_machine_task(machine_id: str, request: Request) -> dict[str
 
 
 @router.post("/tasks/{task_id}/heartbeat")
-async def heartbeat_task(task_id: str, request: Request) -> dict[str, Any]:
+async def heartbeat_task(task_id: str, request: Request, _caller: WriteBridgeCaller) -> dict[str, Any]:
     body = await request.json()
     from ...schemas import RemoteTaskHeartbeatRequest
 
@@ -229,7 +261,7 @@ async def heartbeat_task(task_id: str, request: Request) -> dict[str, Any]:
 
 
 @router.post("/tasks/{task_id}/evidence")
-async def add_evidence(task_id: str, request: Request) -> dict[str, Any]:
+async def add_evidence(task_id: str, request: Request, _caller: WriteBridgeCaller) -> dict[str, Any]:
     body = await request.json()
     from ...schemas import RemoteTaskEvidenceRequest
 
@@ -238,7 +270,7 @@ async def add_evidence(task_id: str, request: Request) -> dict[str, Any]:
 
 
 @router.post("/tasks/{task_id}/approval")
-async def request_approval(task_id: str, request: Request) -> dict[str, Any]:
+async def request_approval(task_id: str, request: Request, _caller: WriteBridgeCaller) -> dict[str, Any]:
     body = await request.json()
     from ...schemas import RemoteTaskApprovalRequest
 
@@ -247,7 +279,7 @@ async def request_approval(task_id: str, request: Request) -> dict[str, Any]:
 
 
 @router.post("/tasks/{task_id}/approval/resolve")
-async def resolve_approval(task_id: str, request: Request) -> dict[str, Any]:
+async def resolve_approval(task_id: str, request: Request, _caller: WriteBridgeCaller) -> dict[str, Any]:
     body = await request.json()
     resolution = str(body.get("status") or body.get("resolution") or "").strip().lower()
     if resolution == "rejected":
@@ -263,7 +295,7 @@ async def resolve_approval(task_id: str, request: Request) -> dict[str, Any]:
 
 
 @router.post("/tasks/{task_id}/notes")
-async def add_note(task_id: str, request: Request) -> dict[str, Any]:
+async def add_note(task_id: str, request: Request, _caller: WriteBridgeCaller) -> dict[str, Any]:
     body = await request.json()
     from ...schemas import RemoteTaskNoteRequest
 
@@ -272,12 +304,12 @@ async def add_note(task_id: str, request: Request) -> dict[str, Any]:
 
 
 @router.get("/tasks/{task_id}/notes")
-async def list_notes(task_id: str, request: Request) -> dict[str, Any]:
+async def list_notes(task_id: str, request: Request, _caller: ReadBridgeCaller) -> dict[str, Any]:
     return request.app.state.services.remote_codex_service.list_notes(task_id)
 
 
 @router.post("/tasks/{task_id}/interrupt")
-async def interrupt_task(task_id: str, request: Request) -> dict[str, Any]:
+async def interrupt_task(task_id: str, request: Request, _caller: ControlBridgeCaller) -> dict[str, Any]:
     body = await request.json()
     from ...schemas import RemoteTaskInterruptRequest
 
@@ -286,7 +318,7 @@ async def interrupt_task(task_id: str, request: Request) -> dict[str, Any]:
 
 
 @router.post("/tasks/{task_id}/complete")
-async def complete_task(task_id: str, request: Request) -> dict[str, Any]:
+async def complete_task(task_id: str, request: Request, _caller: WriteBridgeCaller) -> dict[str, Any]:
     body = await request.json()
     from ...schemas import RemoteTaskCompleteRequest
 
@@ -295,7 +327,7 @@ async def complete_task(task_id: str, request: Request) -> dict[str, Any]:
 
 
 @router.post("/tasks/{task_id}/fail")
-async def fail_task(task_id: str, request: Request) -> dict[str, Any]:
+async def fail_task(task_id: str, request: Request, _caller: WriteBridgeCaller) -> dict[str, Any]:
     body = await request.json()
     from ...schemas import RemoteTaskFailRequest
 
@@ -304,7 +336,7 @@ async def fail_task(task_id: str, request: Request) -> dict[str, Any]:
 
 
 @router.post("/agent/sync")
-async def agent_sync(request: Request) -> dict[str, Any]:
+async def agent_sync(request: Request, _caller: WriteBridgeCaller) -> dict[str, Any]:
     body = await request.json()
     return request.app.state.services.remote_codex_service.apply_agent_sync(
         machine=body.get("machine") or {},
@@ -314,7 +346,7 @@ async def agent_sync(request: Request) -> dict[str, Any]:
 
 
 @router.post("/agent/commands/claim")
-async def agent_claim_next_command(request: Request) -> dict[str, Any]:
+async def agent_claim_next_command(request: Request, _caller: ControlBridgeCaller) -> dict[str, Any]:
     body = await request.json()
     return request.app.state.services.remote_codex_service.claim_next_command(
         machine_id=str(body.get("machineId") or body.get("machine_id") or ""),
@@ -323,7 +355,11 @@ async def agent_claim_next_command(request: Request) -> dict[str, Any]:
 
 
 @router.post("/agent/commands/{command_id}/result")
-async def agent_command_result(command_id: str, request: Request) -> dict[str, Any]:
+async def agent_command_result(
+    command_id: str,
+    request: Request,
+    _caller: WriteBridgeCaller,
+) -> dict[str, Any]:
     body = await request.json()
     return request.app.state.services.remote_codex_service.record_command_result(
         command_id,
@@ -335,7 +371,11 @@ async def agent_command_result(command_id: str, request: Request) -> dict[str, A
 
 
 @router.post("/agent/tasks/{task_id}/heartbeat")
-async def agent_task_heartbeat(task_id: str, request: Request) -> dict[str, Any]:
+async def agent_task_heartbeat(
+    task_id: str,
+    request: Request,
+    _caller: WriteBridgeCaller,
+) -> dict[str, Any]:
     body = await request.json()
     try:
         return request.app.state.services.remote_codex_service.agent_heartbeat_task(
@@ -353,7 +393,11 @@ async def agent_task_heartbeat(task_id: str, request: Request) -> dict[str, Any]
 
 
 @router.post("/agent/tasks/{task_id}/evidence")
-async def agent_task_evidence(task_id: str, request: Request) -> dict[str, Any]:
+async def agent_task_evidence(
+    task_id: str,
+    request: Request,
+    _caller: WriteBridgeCaller,
+) -> dict[str, Any]:
     body = await request.json()
     return request.app.state.services.remote_codex_service.agent_add_evidence(
         task_id,
@@ -365,7 +409,11 @@ async def agent_task_evidence(task_id: str, request: Request) -> dict[str, Any]:
 
 
 @router.post("/agent/tasks/{task_id}/complete")
-async def agent_task_complete(task_id: str, request: Request) -> dict[str, Any]:
+async def agent_task_complete(
+    task_id: str,
+    request: Request,
+    _caller: WriteBridgeCaller,
+) -> dict[str, Any]:
     body = await request.json()
     try:
         return request.app.state.services.remote_codex_service.agent_complete_task(
@@ -378,7 +426,11 @@ async def agent_task_complete(task_id: str, request: Request) -> dict[str, Any]:
 
 
 @router.post("/agent/tasks/{task_id}/fail")
-async def agent_task_fail(task_id: str, request: Request) -> dict[str, Any]:
+async def agent_task_fail(
+    task_id: str,
+    request: Request,
+    _caller: WriteBridgeCaller,
+) -> dict[str, Any]:
     body = await request.json()
     try:
         return request.app.state.services.remote_codex_service.agent_fail_task(
@@ -391,7 +443,13 @@ async def agent_task_fail(task_id: str, request: Request) -> dict[str, Any]:
 
 
 @router.get("/machines/{machine_id}/threads/{thread_id}/live")
-async def stream_thread(machine_id: str, thread_id: str, request: Request, afterLineNumber: int = Query(default=0, ge=0)):
+async def stream_thread(
+    machine_id: str,
+    thread_id: str,
+    request: Request,
+    _caller: StreamBridgeCaller,
+    afterLineNumber: int = Query(default=0, ge=0),
+):
     service = request.app.state.services.remote_codex_service
     handle = await service.subscribe_thread(machine_id, thread_id)
 

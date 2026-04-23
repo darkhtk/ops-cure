@@ -82,6 +82,26 @@ docker compose up --build -d
 
 The SQLite database is persisted under `./data/bridge.db`.
 
+## Shared Server Auth Layer
+
+The bridge only owns shared server-side auth primitives.
+
+That means this repo is the right place for:
+
+- shared bearer validation
+- service-to-service auth dependencies
+- reusable permission helpers
+- protected-route audit hooks
+
+It is **not** the place for:
+
+- browser sign-in UI
+- Google Sign-In flows
+- cookie session UX
+- site-specific sign in / sign out behavior
+
+Site products can keep their own login/session stack and call the bridge through the shared server auth layer.
+
 ## API Surface
 
 The bridge exposes API routes for:
