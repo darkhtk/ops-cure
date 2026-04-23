@@ -1,0 +1,484 @@
+from __future__ import annotations
+
+import json
+import uuid
+from datetime import datetime, timedelta, timezone
+
+from sqlalchemy import select
+from sqlalchemy.orm import selectinload
+
+from ..db import session_scope
+from ..models import (
+    RemoteTaskAssignmentModel,
+    RemoteTaskApprovalModel,
+    RemoteTaskEvidenceModel,
+    RemoteTaskHeartbeatModel,
+    RemoteTaskNoteModel,
+    RemoteTaskModel,
+)
+from ..schemas import (
+    RemoteTaskAssignmentSummary,
+    RemoteTaskApprovalRequest,
+    RemoteTaskApprovalResolveRequest,
+    RemoteTaskApprovalSummary,
+    RemoteTaskClaimRequest,
+    RemoteTaskCompleteRequest,
+    RemoteTaskCreateRequest,
+    RemoteTaskEvidenceRequest,
+    RemoteTaskEvidenceSummary,
+    RemoteTaskFailRequest,
+    RemoteTaskHeartbeatRequest,
+    RemoteTaskHeartbeatSummary,
+    RemoteTaskInterruptRequest,
+    RemoteTaskNoteRequest,
+    RemoteTaskNoteSummary,
+    RemoteTaskSummaryResponse,
+)
+
+
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def ensure_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+WORK_EVIDENCE_KINDS = {
+    "command_execution",
+    "file_read",
+    "file_write",
+    "test_result",
+    "runtime_turn_started",
+    "runtime_turn_completed",
+}
+
+
+class RemoteTaskService:
+    def create_task(self, payload: RemoteTaskCreateRequest) -> RemoteTaskSummaryResponse:
+        with session_scope() as db:
+            row = RemoteTaskModel(
+                machine_id=payload.machine_id,
+                thread_id=payload.thread_id,
+                origin_surface=payload.origin_surface,
+                origin_message_id=payload.origin_message_id,
+                objective=payload.objective,
+                success_criteria_json=json.dumps(payload.success_criteria, ensure_ascii=False),
+                priority=payload.priority,
+                created_by=payload.created_by,
+            )
+            db.add(row)
+            db.flush()
+            db.refresh(row)
+            return self._to_summary(row)
+
+    def list_tasks(
+        self,
+        *,
+        machine_id: str | None = None,
+        thread_id: str | None = None,
+        statuses: list[str] | None = None,
+        limit: int = 50,
+    ) -> list[RemoteTaskSummaryResponse]:
+        with session_scope() as db:
+            query = (
+                select(RemoteTaskModel)
+                .options(
+                    selectinload(RemoteTaskModel.assignments),
+                    selectinload(RemoteTaskModel.heartbeats),
+                    selectinload(RemoteTaskModel.evidence_items),
+                    selectinload(RemoteTaskModel.approvals),
+                    selectinload(RemoteTaskModel.notes),
+                )
+                .order_by(RemoteTaskModel.updated_at.desc(), RemoteTaskModel.created_at.desc())
+                .limit(max(1, min(limit, 200)))
+            )
+            if machine_id:
+                query = query.where(RemoteTaskModel.machine_id == machine_id)
+            if thread_id:
+                query = query.where(RemoteTaskModel.thread_id == thread_id)
+            if statuses:
+                query = query.where(RemoteTaskModel.status.in_(tuple(statuses)))
+            rows = list(db.scalars(query))
+            return [self._to_summary(row) for row in rows]
+
+    def get_task(self, task_id: str) -> RemoteTaskSummaryResponse:
+        with session_scope() as db:
+            row = self._require_task(db, task_id)
+            return self._to_summary(row)
+
+    def claim_task(self, task_id: str, payload: RemoteTaskClaimRequest) -> RemoteTaskSummaryResponse:
+        with session_scope() as db:
+            row = self._require_task(db, task_id)
+            assignment = self._current_assignment(row)
+            now = utcnow()
+
+            if assignment is not None and assignment.lease_expires_at > now:
+                if assignment.actor_id != payload.actor_id:
+                    raise ValueError(f"Remote task `{task_id}` is already claimed by `{assignment.actor_id}`.")
+                assignment.lease_expires_at = now + timedelta(seconds=payload.lease_seconds)
+            else:
+                assignment = RemoteTaskAssignmentModel(
+                    task_id=row.id,
+                    actor_id=payload.actor_id,
+                    lease_token=str(uuid.uuid4()),
+                    lease_expires_at=now + timedelta(seconds=payload.lease_seconds),
+                    status="claimed",
+                )
+                row.assignments.append(assignment)
+
+            row.owner_actor_id = payload.actor_id
+            row.status = "claimed"
+            row.updated_at = now
+            db.flush()
+            db.refresh(row)
+            return self._to_summary(row)
+
+    def heartbeat_task(self, task_id: str, payload: RemoteTaskHeartbeatRequest) -> RemoteTaskSummaryResponse:
+        with session_scope() as db:
+            row = self._require_task(db, task_id)
+            assignment = self._require_active_assignment(
+                row=row,
+                actor_id=payload.actor_id,
+                lease_token=payload.lease_token,
+            )
+
+            heartbeat = RemoteTaskHeartbeatModel(
+                task_id=row.id,
+                actor_id=payload.actor_id,
+                phase=payload.phase,
+                summary=payload.summary,
+                commands_run_count=payload.commands_run_count,
+                files_read_count=payload.files_read_count,
+                files_modified_count=payload.files_modified_count,
+                tests_run_count=payload.tests_run_count,
+            )
+            row.heartbeats.append(heartbeat)
+            assignment.lease_expires_at = utcnow() + timedelta(seconds=payload.lease_seconds)
+            row.owner_actor_id = payload.actor_id
+            row.status = self._status_for_heartbeat(payload)
+            row.updated_at = utcnow()
+            db.flush()
+            db.refresh(row)
+            return self._to_summary(row)
+
+    def add_evidence(self, task_id: str, payload: RemoteTaskEvidenceRequest) -> RemoteTaskSummaryResponse:
+        with session_scope() as db:
+            row = self._require_task(db, task_id)
+            row.evidence_items.append(
+                RemoteTaskEvidenceModel(
+                    task_id=row.id,
+                    actor_id=payload.actor_id,
+                    kind=payload.kind,
+                    summary=payload.summary,
+                    payload_json=json.dumps(payload.payload, ensure_ascii=False),
+                ),
+            )
+            if payload.kind in WORK_EVIDENCE_KINDS and row.status in {"queued", "claimed"}:
+                row.status = "executing"
+            row.updated_at = utcnow()
+            db.flush()
+            db.refresh(row)
+            return self._to_summary(row)
+
+    def request_approval(self, task_id: str, payload: RemoteTaskApprovalRequest) -> RemoteTaskSummaryResponse:
+        with session_scope() as db:
+            row = self._require_task(db, task_id)
+            self._require_active_assignment(
+                row=row,
+                actor_id=payload.actor_id,
+                lease_token=payload.lease_token,
+            )
+            row.approvals.append(
+                RemoteTaskApprovalModel(
+                    task_id=row.id,
+                    actor_id=payload.actor_id,
+                    reason=payload.reason,
+                    note=payload.note,
+                    status="pending",
+                ),
+            )
+            row.status = "blocked_approval"
+            row.owner_actor_id = payload.actor_id
+            row.updated_at = utcnow()
+            db.flush()
+            db.refresh(row)
+            return self._to_summary(row)
+
+    def get_latest_approval(self, task_id: str) -> RemoteTaskApprovalSummary | None:
+        with session_scope() as db:
+            row = self._require_task(db, task_id)
+            approval = self._latest_approval(row)
+            return self._to_approval_summary(approval) if approval is not None else None
+
+    def resolve_approval(
+        self,
+        task_id: str,
+        payload: RemoteTaskApprovalResolveRequest,
+    ) -> RemoteTaskSummaryResponse:
+        with session_scope() as db:
+            row = self._require_task(db, task_id)
+            approval = self._latest_approval(row)
+            if approval is None or approval.status != "pending":
+                raise ValueError(f"Remote task `{task_id}` has no pending approval.")
+            approval.status = "resolved"
+            approval.note = payload.note or approval.note
+            approval.resolved_at = utcnow()
+            approval.resolved_by = payload.resolved_by
+            approval.resolution = payload.resolution
+            row.status = "claimed" if payload.resolution == "approved" else "failed"
+            row.updated_at = utcnow()
+            db.flush()
+            db.refresh(row)
+            return self._to_summary(row)
+
+    def add_note(self, task_id: str, payload: RemoteTaskNoteRequest) -> RemoteTaskNoteSummary:
+        with session_scope() as db:
+            row = self._require_task(db, task_id)
+            note = RemoteTaskNoteModel(
+                task_id=row.id,
+                actor_id=payload.actor_id,
+                kind=payload.kind,
+                content=payload.content,
+            )
+            row.notes.append(note)
+            row.updated_at = utcnow()
+            db.flush()
+            db.refresh(note)
+            return self._to_note_summary(note)
+
+    def list_notes(self, task_id: str) -> list[RemoteTaskNoteSummary]:
+        with session_scope() as db:
+            row = self._require_task(db, task_id)
+            notes = sorted(row.notes, key=lambda item: item.created_at)
+            return [self._to_note_summary(item) for item in notes]
+
+    def interrupt_task(self, task_id: str, payload: RemoteTaskInterruptRequest) -> RemoteTaskSummaryResponse:
+        with session_scope() as db:
+            row = self._require_task(db, task_id)
+            assignment = self._require_active_assignment(
+                row=row,
+                actor_id=payload.actor_id,
+                lease_token=payload.lease_token,
+            )
+            if payload.note:
+                row.notes.append(
+                    RemoteTaskNoteModel(
+                        task_id=row.id,
+                        actor_id=payload.actor_id,
+                        kind="interrupt",
+                        content=payload.note,
+                    ),
+                )
+            assignment.status = "interrupted"
+            assignment.released_at = utcnow()
+            row.status = "interrupted"
+            row.owner_actor_id = payload.actor_id
+            row.updated_at = utcnow()
+            db.flush()
+            db.refresh(row)
+            return self._to_summary(row)
+
+    def complete_task(self, task_id: str, payload: RemoteTaskCompleteRequest) -> RemoteTaskSummaryResponse:
+        with session_scope() as db:
+            row = self._require_task(db, task_id)
+            assignment = self._require_active_assignment(
+                row=row,
+                actor_id=payload.actor_id,
+                lease_token=payload.lease_token,
+            )
+            if payload.summary:
+                row.evidence_items.append(
+                    RemoteTaskEvidenceModel(
+                        task_id=row.id,
+                        actor_id=payload.actor_id,
+                        kind="result",
+                        summary=payload.summary,
+                        payload_json=json.dumps({"kind": "result"}, ensure_ascii=False),
+                    ),
+                )
+            assignment.status = "completed"
+            assignment.released_at = utcnow()
+            row.status = "completed"
+            row.owner_actor_id = payload.actor_id
+            row.updated_at = utcnow()
+            db.flush()
+            db.refresh(row)
+            return self._to_summary(row)
+
+    def fail_task(self, task_id: str, payload: RemoteTaskFailRequest) -> RemoteTaskSummaryResponse:
+        with session_scope() as db:
+            row = self._require_task(db, task_id)
+            assignment = self._require_active_assignment(
+                row=row,
+                actor_id=payload.actor_id,
+                lease_token=payload.lease_token,
+            )
+            row.evidence_items.append(
+                RemoteTaskEvidenceModel(
+                    task_id=row.id,
+                    actor_id=payload.actor_id,
+                    kind="error",
+                    summary=payload.error_text,
+                    payload_json=json.dumps({"kind": "error"}, ensure_ascii=False),
+                ),
+            )
+            assignment.status = "failed"
+            assignment.released_at = utcnow()
+            row.status = "failed"
+            row.owner_actor_id = payload.actor_id
+            row.updated_at = utcnow()
+            db.flush()
+            db.refresh(row)
+            return self._to_summary(row)
+
+    def _require_task(self, db, task_id: str) -> RemoteTaskModel:
+        row = db.scalar(
+            select(RemoteTaskModel)
+            .options(
+                selectinload(RemoteTaskModel.assignments),
+                selectinload(RemoteTaskModel.heartbeats),
+                selectinload(RemoteTaskModel.evidence_items),
+                selectinload(RemoteTaskModel.approvals),
+                selectinload(RemoteTaskModel.notes),
+            )
+            .where(RemoteTaskModel.id == task_id),
+        )
+        if row is None:
+            raise ValueError(f"Remote task `{task_id}` was not found.")
+        return row
+
+    def _current_assignment(self, row: RemoteTaskModel) -> RemoteTaskAssignmentModel | None:
+        claimed = [item for item in row.assignments if item.status == "claimed"]
+        if not claimed:
+            return None
+        claimed.sort(key=lambda item: item.claimed_at, reverse=True)
+        return claimed[0]
+
+    def _latest_approval(self, row: RemoteTaskModel) -> RemoteTaskApprovalModel | None:
+        if not row.approvals:
+            return None
+        return max(row.approvals, key=lambda item: item.requested_at)
+
+    def _require_active_assignment(
+        self,
+        *,
+        row: RemoteTaskModel,
+        actor_id: str,
+        lease_token: str,
+    ) -> RemoteTaskAssignmentModel:
+        assignment = self._current_assignment(row)
+        if assignment is None:
+            raise ValueError(f"Remote task `{row.id}` has no active assignment.")
+        if assignment.actor_id != actor_id:
+            raise ValueError(f"Remote task `{row.id}` is owned by `{assignment.actor_id}`, not `{actor_id}`.")
+        if assignment.lease_token != lease_token:
+            raise ValueError("Lease token does not match the active assignment.")
+        if ensure_utc(assignment.lease_expires_at) <= utcnow():
+            raise ValueError(f"Lease for remote task `{row.id}` has expired.")
+        return assignment
+
+    def _status_for_heartbeat(self, payload: RemoteTaskHeartbeatRequest) -> str:
+        phase = payload.phase.strip().lower()
+        has_work_signal = any(
+            [
+                payload.commands_run_count > 0,
+                payload.files_read_count > 0,
+                payload.files_modified_count > 0,
+                payload.tests_run_count > 0,
+            ],
+        )
+        if phase in {"blocked_approval", "approval", "waiting_approval"}:
+            return "blocked_approval"
+        if phase in {"interrupted", "interrupting"}:
+            return "interrupted"
+        if phase == "verifying":
+            return "verifying" if has_work_signal else "claimed"
+        if phase in {"executing", "working", "running"}:
+            return "executing" if has_work_signal else "claimed"
+        return "claimed"
+
+    def _to_summary(self, row: RemoteTaskModel) -> RemoteTaskSummaryResponse:
+        assignment = self._current_assignment(row)
+        approval = self._latest_approval(row)
+        latest_heartbeat = None
+        if row.heartbeats:
+            latest = max(row.heartbeats, key=lambda item: item.created_at)
+            latest_heartbeat = RemoteTaskHeartbeatSummary(
+                id=latest.id,
+                actor_id=latest.actor_id,
+                phase=latest.phase,
+                summary=latest.summary,
+                commands_run_count=latest.commands_run_count,
+                files_read_count=latest.files_read_count,
+                files_modified_count=latest.files_modified_count,
+                tests_run_count=latest.tests_run_count,
+                created_at=latest.created_at,
+            )
+
+        recent_evidence = sorted(row.evidence_items, key=lambda item: item.created_at, reverse=True)[:10]
+        return RemoteTaskSummaryResponse(
+            id=row.id,
+            machine_id=row.machine_id,
+            thread_id=row.thread_id,
+            origin_surface=row.origin_surface,
+            origin_message_id=row.origin_message_id,
+            objective=row.objective,
+            success_criteria=json.loads(row.success_criteria_json or "{}"),
+            status=row.status,
+            priority=row.priority,
+            owner_actor_id=row.owner_actor_id,
+            created_by=row.created_by,
+            created_at=row.created_at,
+            updated_at=row.updated_at,
+            latest_approval=self._to_approval_summary(approval) if approval is not None else None,
+            current_assignment=(
+                RemoteTaskAssignmentSummary(
+                    id=assignment.id,
+                    actor_id=assignment.actor_id,
+                    lease_token=assignment.lease_token,
+                    lease_expires_at=assignment.lease_expires_at,
+                    status=assignment.status,
+                    claimed_at=assignment.claimed_at,
+                    released_at=assignment.released_at,
+                )
+                if assignment is not None
+                else None
+            ),
+            latest_heartbeat=latest_heartbeat,
+            recent_evidence=[
+                RemoteTaskEvidenceSummary(
+                    id=item.id,
+                    actor_id=item.actor_id,
+                    kind=item.kind,
+                    summary=item.summary,
+                    payload=json.loads(item.payload_json or "{}"),
+                    created_at=item.created_at,
+                )
+                for item in recent_evidence
+            ],
+        )
+
+    def _to_approval_summary(self, approval: RemoteTaskApprovalModel) -> RemoteTaskApprovalSummary:
+        return RemoteTaskApprovalSummary(
+            id=approval.id,
+            actor_id=approval.actor_id,
+            reason=approval.reason,
+            status=approval.status,
+            note=approval.note,
+            requested_at=approval.requested_at,
+            resolved_at=approval.resolved_at,
+            resolved_by=approval.resolved_by,
+            resolution=approval.resolution,
+        )
+
+    def _to_note_summary(self, note: RemoteTaskNoteModel) -> RemoteTaskNoteSummary:
+        return RemoteTaskNoteSummary(
+            id=note.id,
+            actor_id=note.actor_id,
+            kind=note.kind,
+            content=note.content,
+            created_at=note.created_at,
+        )

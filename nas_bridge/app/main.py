@@ -8,7 +8,7 @@ import asyncio
 
 from fastapi import FastAPI
 
-from .api import actors, behaviors, events, health, sessions, spaces, verification, workers
+from .api import actors, behaviors, events, health, remote_tasks, sessions, spaces, verification, workers
 from .behaviors.catalog import BehaviorCatalogService
 from .behaviors.chat import api as chat_api
 from .behaviors.chat.service import ChatBehaviorService
@@ -42,6 +42,7 @@ from .kernel.registry import WorkerRegistry
 from .kernel.spaces import SpaceService
 from .kernel.subscriptions import InProcessSubscriptionBroker
 from .presenters.discord.status_cards import AnnouncementService
+from .services.remote_task_service import RemoteTaskService
 from .transports.discord.gateway import DiscordGateway
 from .transports.discord.bindings import DiscordBehaviorBinding
 from .transports.discord.threads import ThreadManager
@@ -75,6 +76,7 @@ class ServiceContainer:
     policy_service: PolicyService
     recovery_service: RecoveryService
     verification_service: VerificationService
+    remote_task_service: RemoteTaskService
     session_service: SessionService
     discord_gateway: DiscordGateway
     recovery_loop_task: asyncio.Task[None] | None = None
@@ -98,6 +100,7 @@ def build_services(settings: Settings) -> ServiceContainer:
         thread_manager=thread_manager,
         announcement_service=announcement_service,
     )
+    remote_task_service = RemoteTaskService()
     power_provider = RoutedPowerProvider([NoopPowerProvider(), WakeOnLanPowerProvider()])
     execution_provider = RoutedExecutionProvider([WindowsLauncherExecutionProvider(registry)])
     recovery_service = RecoveryService(
@@ -210,6 +213,7 @@ def build_services(settings: Settings) -> ServiceContainer:
         policy_service=policy_service,
         recovery_service=recovery_service,
         verification_service=verification_service,
+        remote_task_service=remote_task_service,
         session_service=session_service,
         discord_gateway=discord_gateway,
         space_service=space_service,
@@ -243,6 +247,7 @@ app.include_router(health.router)
 app.include_router(actors.router)
 app.include_router(behaviors.router)
 app.include_router(events.router)
+app.include_router(remote_tasks.router)
 app.include_router(chat_api.router)
 app.include_router(sessions.router)
 app.include_router(spaces.router)

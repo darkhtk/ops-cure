@@ -14,7 +14,11 @@ It treats a Discord channel or thread as a stateful space, then lets different b
 
 If you want the deeper structure, see [docs/architecture.md](docs/architecture.md).
 If you want the ongoing kernel split notes, see [docs/generic-kernel.md](docs/generic-kernel.md).
+If you want the generic kernel vs product/service boundary for browser-first remote Codex, see [docs/generic-kernel-product-boundary.md](docs/generic-kernel-product-boundary.md).
+If you want only the later kernel-promotion candidates, see [docs/generic-kernel-promotion-candidates.md](docs/generic-kernel-promotion-candidates.md).
 If you want operating guardrails, see [docs/checklists.md](docs/checklists.md).
+If you want the browser-first remote Codex product design, see [docs/browser-first-remote-codex.md](docs/browser-first-remote-codex.md).
+If you want the execution backlog for that design, see [docs/browser-first-remote-codex-execution-plan.md](docs/browser-first-remote-codex-execution-plan.md).
 
 ## What Opscure Is
 

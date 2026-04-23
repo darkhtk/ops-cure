@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 
 import ntpath
 from pathlib import Path
@@ -574,6 +575,173 @@ class VerifyRunCompleteRequest(BaseModel):
 
 class VerifyReviewRequest(BaseModel):
     reviewer: str
+    note: str | None = None
+
+
+class RemoteTaskAssignmentSummary(BaseModel):
+    id: str
+    actor_id: str
+    lease_token: str
+    lease_expires_at: datetime
+    status: str
+    claimed_at: datetime
+    released_at: datetime | None = None
+
+
+class RemoteTaskHeartbeatSummary(BaseModel):
+    id: str
+    actor_id: str
+    phase: str
+    summary: str | None = None
+    commands_run_count: int = 0
+    files_read_count: int = 0
+    files_modified_count: int = 0
+    tests_run_count: int = 0
+    created_at: datetime
+
+
+class RemoteTaskEvidenceSummary(BaseModel):
+    id: str
+    actor_id: str
+    kind: str
+    summary: str
+    payload: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+
+
+class RemoteTaskApprovalSummary(BaseModel):
+    id: str
+    actor_id: str
+    reason: str
+    status: str
+    note: str | None = None
+    requested_at: datetime
+    resolved_at: datetime | None = None
+    resolved_by: str | None = None
+    resolution: str | None = None
+
+
+class RemoteTaskNoteSummary(BaseModel):
+    id: str
+    actor_id: str
+    kind: str
+    content: str
+    created_at: datetime
+
+
+class RemoteTaskSummaryResponse(BaseModel):
+    id: str
+    machine_id: str
+    thread_id: str
+    origin_surface: str
+    origin_message_id: str | None = None
+    objective: str
+    success_criteria: dict[str, Any] = Field(default_factory=dict)
+    status: str
+    priority: str
+    owner_actor_id: str | None = None
+    created_by: str
+    created_at: datetime
+    updated_at: datetime
+    current_assignment: RemoteTaskAssignmentSummary | None = None
+    latest_heartbeat: RemoteTaskHeartbeatSummary | None = None
+    recent_evidence: list[RemoteTaskEvidenceSummary] = Field(default_factory=list)
+    latest_approval: RemoteTaskApprovalSummary | None = None
+
+
+class RemoteTaskCreateRequest(BaseModel):
+    machine_id: str
+    thread_id: str
+    objective: str
+    success_criteria: dict[str, Any] = Field(default_factory=dict)
+    origin_surface: str = "browser"
+    origin_message_id: str | None = None
+    priority: str = "normal"
+    created_by: str = "browser"
+
+
+class RemoteTaskClaimRequest(BaseModel):
+    actor_id: str
+    lease_seconds: int = 120
+
+    @field_validator("lease_seconds")
+    @classmethod
+    def validate_lease_seconds(cls, value: int) -> int:
+        return max(10, min(value, 3600))
+
+
+class RemoteTaskHeartbeatRequest(BaseModel):
+    actor_id: str
+    lease_token: str
+    phase: str
+    summary: str | None = None
+    commands_run_count: int = 0
+    files_read_count: int = 0
+    files_modified_count: int = 0
+    tests_run_count: int = 0
+    lease_seconds: int = 120
+
+    @field_validator(
+        "commands_run_count",
+        "files_read_count",
+        "files_modified_count",
+        "tests_run_count",
+        "lease_seconds",
+    )
+    @classmethod
+    def validate_non_negative(cls, value: int) -> int:
+        return max(0, value)
+
+
+class RemoteTaskEvidenceRequest(BaseModel):
+    actor_id: str
+    kind: str
+    summary: str
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class RemoteTaskCompleteRequest(BaseModel):
+    actor_id: str
+    lease_token: str
+    summary: str | None = None
+
+
+class RemoteTaskFailRequest(BaseModel):
+    actor_id: str
+    lease_token: str
+    error_text: str
+
+
+class RemoteTaskApprovalRequest(BaseModel):
+    actor_id: str
+    lease_token: str
+    reason: str
+    note: str | None = None
+
+
+class RemoteTaskApprovalResolveRequest(BaseModel):
+    resolved_by: str
+    resolution: str
+    note: str | None = None
+
+    @field_validator("resolution")
+    @classmethod
+    def validate_resolution(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in {"approved", "denied"}:
+            raise ValueError("resolution must be `approved` or `denied`.")
+        return normalized
+
+
+class RemoteTaskNoteRequest(BaseModel):
+    actor_id: str
+    kind: str = "note"
+    content: str
+
+
+class RemoteTaskInterruptRequest(BaseModel):
+    actor_id: str
+    lease_token: str
     note: str | None = None
 
 
