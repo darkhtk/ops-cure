@@ -96,11 +96,30 @@ class OpsBehaviorDescriptor:
         return build_ops_kernel_binding()
 
 
+@dataclass(frozen=True, slots=True)
+class RemoteCodexBehaviorDescriptor:
+    behavior_id: str = "remote_codex"
+    display_name: str = "Remote Codex"
+    description: str = (
+        "Browser-first remote Codex behavior scaffold. "
+        "Canonical task/evidence truth is migrating here, but live bindings are not enabled yet."
+    )
+
+    def build_discord_binding(self, context: BehaviorContext) -> DiscordBehaviorBinding | None:
+        del context
+        return None
+
+    def build_kernel_binding(self, context: BehaviorContext) -> KernelBehaviorBinding | None:
+        del context
+        return None
+
+
 def default_behavior_descriptors() -> tuple[BehaviorDescriptor, ...]:
     return (
         OrchestrationBehaviorDescriptor(),
         ChatBehaviorDescriptor(),
         OpsBehaviorDescriptor(),
+        RemoteCodexBehaviorDescriptor(),
     )
 
 

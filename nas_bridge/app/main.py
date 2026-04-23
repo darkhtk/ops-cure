@@ -11,6 +11,8 @@ from fastapi import FastAPI
 from .api import actors, behaviors, events, health, presence, remote_tasks, sessions, spaces, verification, workers
 from .behaviors.catalog import BehaviorCatalogService
 from .behaviors.chat import api as chat_api
+from .behaviors.remote_codex import api as remote_codex_api
+from .behaviors.remote_codex.service import RemoteCodexBehaviorService
 from .behaviors.chat.service import ChatBehaviorService
 from .behaviors.orchestration.policy import PolicyService
 from .behaviors.orchestration.recovery import RecoveryService
@@ -79,6 +81,7 @@ class ServiceContainer:
     recovery_service: RecoveryService
     verification_service: VerificationService
     remote_task_service: RemoteTaskService
+    remote_codex_service: RemoteCodexBehaviorService
     session_service: SessionService
     discord_gateway: DiscordGateway
     recovery_loop_task: asyncio.Task[None] | None = None
@@ -104,6 +107,7 @@ def build_services(settings: Settings) -> ServiceContainer:
     )
     presence_service = PresenceService()
     remote_task_service = RemoteTaskService(presence_service=presence_service)
+    remote_codex_service = RemoteCodexBehaviorService(remote_task_service=remote_task_service)
     power_provider = RoutedPowerProvider([NoopPowerProvider(), WakeOnLanPowerProvider()])
     execution_provider = RoutedExecutionProvider([WindowsLauncherExecutionProvider(registry)])
     recovery_service = RecoveryService(
@@ -219,6 +223,7 @@ def build_services(settings: Settings) -> ServiceContainer:
         recovery_service=recovery_service,
         verification_service=verification_service,
         remote_task_service=remote_task_service,
+        remote_codex_service=remote_codex_service,
         session_service=session_service,
         discord_gateway=discord_gateway,
         space_service=space_service,
@@ -254,6 +259,7 @@ app.include_router(behaviors.router)
 app.include_router(events.router)
 app.include_router(presence.router)
 app.include_router(remote_tasks.router)
+app.include_router(remote_codex_api.router)
 app.include_router(chat_api.router)
 app.include_router(sessions.router)
 app.include_router(spaces.router)

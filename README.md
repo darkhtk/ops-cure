@@ -19,6 +19,9 @@ If you want only the later kernel-promotion candidates, see [docs/generic-kernel
 If you want operating guardrails, see [docs/checklists.md](docs/checklists.md).
 If you want the browser-first remote Codex product design, see [docs/browser-first-remote-codex.md](docs/browser-first-remote-codex.md).
 If you want the execution backlog for that design, see [docs/browser-first-remote-codex-execution-plan.md](docs/browser-first-remote-codex-execution-plan.md).
+If you want the live migration checklist for moving a Discord room onto remote-task execution, see [docs/remote-task-cutover-checklist.md](docs/remote-task-cutover-checklist.md).
+If you want the planned landing zone for the `remote_codex` behavior itself, see [nas_bridge/app/behaviors/remote_codex/README.md](nas_bridge/app/behaviors/remote_codex/README.md).
+That package now contains a thin behavior scaffold over the current remote task service, without changing live wiring yet.
 
 ## What Opscure Is
 

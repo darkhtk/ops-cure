@@ -4,6 +4,7 @@ This document describes the product and system design needed to make remote Code
 
 For the implementation backlog and landing order, see [browser-first-remote-codex-execution-plan.md](browser-first-remote-codex-execution-plan.md).
 For the kernel vs product split and schema boundary, see [generic-kernel-product-boundary.md](generic-kernel-product-boundary.md).
+For the repo ownership split between the behavior and the site, see [../nas_bridge/app/behaviors/remote_codex/README.md](../nas_bridge/app/behaviors/remote_codex/README.md).
 
 The target surface is:
 
@@ -47,6 +48,25 @@ The browser is the product surface.
 The bridge API is the truth source for state and events.
 Device-side Codex runtimes are the execution plane.
 Discord is a collaboration plane only.
+
+## Repository Ownership Split
+
+The long-term repository split is:
+
+- `Opscure` owns the `remote_codex` behavior.
+- `codex-remote` owns the browser site and site-local UI code.
+
+That means:
+
+- canonical work truth, approval truth, assignment truth, and evidence truth must land in `Opscure`
+- browser interaction, rendering, optimistic UI, and site packaging stay in `codex-remote`
+- device executors consume the behavior contract instead of inventing their own browser-only state model
+
+In short:
+
+- behavior lives in `Opscure`
+- site lives in `codex-remote`
+- the site must not become the canonical owner of remote execution state
 
 ## Design Principles
 

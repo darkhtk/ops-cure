@@ -181,12 +181,20 @@ def test_generic_kernel_supports_workflow_chat_and_ops_without_agents(tmp_path, 
         assert session.scalar(select(orchestration_models.SessionModel.id)) is not None
 
     behaviors = behavior_catalog.list_behaviors()
-    assert {behavior.behavior_id for behavior in behaviors} == {"orchestration", "chat", "ops"}
-    assert all(behavior.supports_spaces for behavior in behaviors)
-    assert all(behavior.supports_actors for behavior in behaviors)
-    assert all(behavior.supports_events for behavior in behaviors)
-    assert all(behavior.supports_discord_commands for behavior in behaviors)
-    assert all(behavior.supports_discord_messages for behavior in behaviors)
+    behavior_map = {behavior.behavior_id: behavior for behavior in behaviors}
+    assert set(behavior_map) == {"orchestration", "chat", "ops", "remote_codex"}
+    for behavior_id in ("orchestration", "chat", "ops"):
+        assert behavior_map[behavior_id].supports_spaces
+        assert behavior_map[behavior_id].supports_actors
+        assert behavior_map[behavior_id].supports_events
+        assert behavior_map[behavior_id].supports_discord_commands
+        assert behavior_map[behavior_id].supports_discord_messages
+
+    assert not behavior_map["remote_codex"].supports_spaces
+    assert not behavior_map["remote_codex"].supports_actors
+    assert not behavior_map["remote_codex"].supports_events
+    assert not behavior_map["remote_codex"].supports_discord_commands
+    assert not behavior_map["remote_codex"].supports_discord_messages
 
     chat_space = space_service.get_space(space_id=chat_row.id)
     ops_space = space_service.get_space(space_id=ops_row.id)
