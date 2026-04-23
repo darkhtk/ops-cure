@@ -152,11 +152,17 @@ def build_thread_version(thread: dict[str, Any]) -> str:
     status_text = (
         compact_text(status.get("type")) if isinstance(status, dict) else compact_text(status)
     )
+    rollout_path = Path(normalize_windows_path(thread.get("rolloutPath"))).expanduser()
+    rollout_stat = ""
+    if rollout_path.exists():
+        stat_result = rollout_path.stat()
+        rollout_stat = f"{stat_result.st_mtime_ns}:{stat_result.st_size}"
     return ":".join(
         [
             str(int(thread.get("updatedAtMs") or 0)),
             status_text,
             compact_text(thread.get("rolloutPath")),
+            rollout_stat,
             compact_text(thread.get("cliVersion")),
             compact_text(thread.get("title")),
         ]
@@ -689,10 +695,6 @@ class LocalCodexBackend:
             previous = messages[-1] if messages else None
             if not merge_adjacent_message(previous, message):
                 messages.append(message)
-        messages = merge_missing_turn_messages(
-            messages,
-            build_recent_turn_messages(live_thread_payload),
-        )
         total_messages = len(messages)
         if limit > 0:
             messages = messages[-limit:]

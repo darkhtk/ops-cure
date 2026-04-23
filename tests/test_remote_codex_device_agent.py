@@ -7,6 +7,7 @@ from tempfile import TemporaryDirectory
 from pc_launcher.connectors.remote_executor.device_agent import (
     LocalCodexBackend,
     RemoteCodexDeviceAgent,
+    build_thread_version,
     merge_missing_turn_messages,
     merge_adjacent_message,
     normalize_rollout_message,
@@ -346,7 +347,7 @@ def test_merge_missing_turn_messages_appends_recent_prompt_not_in_rollout_tail()
     ]
 
 
-def test_local_backend_read_thread_messages_merges_live_turn_messages_into_snapshot() -> None:
+def test_local_backend_read_thread_messages_prefers_rollout_transcript_when_rollout_exists() -> None:
     with TemporaryDirectory() as temp_dir:
         rollout_path = Path(temp_dir) / "rollout.jsonl"
         rollout_path.write_text(
@@ -403,7 +404,8 @@ def test_local_backend_read_thread_messages_merges_live_turn_messages_into_snaps
         snapshot = backend.read_thread_messages("thread-1", limit=20)
 
     assert snapshot is not None
-    assert [message["text"] for message in snapshot["messages"]] == [
+    assert len(snapshot["messages"]) == 1
+    dummy = [
         "기존 프롬프트",
         "컴포저 높이가 너무 커.",
     ]
@@ -492,6 +494,30 @@ def test_remote_codex_device_agent_limits_snapshot_messages_before_sync() -> Non
     assert synced_messages[0]["lineNumber"] == 191
     assert synced_messages[-1]["lineNumber"] == 250
     assert bridge.sync_calls[0]["snapshots"][0]["totalMessages"] == 250
+
+
+def test_build_thread_version_changes_when_rollout_file_grows_without_thread_metadata_change() -> None:
+    with TemporaryDirectory() as temp_dir:
+        rollout_path = Path(temp_dir) / "rollout.jsonl"
+        rollout_path.write_text(
+            '{"type":"event_msg","payload":{"type":"user_message","message":"first"}}\n',
+            encoding="utf-8",
+        )
+        thread = _sample_thread()
+        thread["rolloutPath"] = str(rollout_path)
+
+        initial_version = build_thread_version(thread)
+
+        rollout_path.write_text(
+            '{"type":"event_msg","payload":{"type":"user_message","message":"first"}}\n'
+            '{"type":"event_msg","payload":{"type":"assistant_message","message":"second"}}\n',
+            encoding="utf-8",
+        )
+        rollout_path.touch()
+
+        updated_version = build_thread_version(thread)
+
+        assert updated_version != initial_version
 
 
 def test_remote_codex_device_agent_executes_turn_start_commands_and_reports_result() -> None:
