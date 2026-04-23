@@ -16,7 +16,7 @@ from .bridge import RemoteExecutorBridge
 
 LOGGER = logging.getLogger(__name__)
 DEFAULT_MAX_THREADS = 60
-DEFAULT_MESSAGE_LIMIT = 300
+DEFAULT_MESSAGE_LIMIT = 200
 DEFAULT_TURN_MESSAGE_LOOKBACK = 24
 DEFAULT_RECENT_SIGNATURE_WINDOW = 80
 
@@ -782,10 +782,13 @@ class RemoteCodexDeviceAgent:
             if snapshot is None:
                 continue
             detailed_thread = self.backend.get_thread_by_id(thread_id) or snapshot.get("thread") or thread
+            messages = list(snapshot.get("messages") or [])
+            if self.message_limit > 0:
+                messages = messages[-self.message_limit :]
             snapshots.append(
                 {
                     "thread": detailed_thread,
-                    "messages": list(snapshot.get("messages") or []),
+                    "messages": messages,
                     "totalMessages": int(snapshot.get("totalMessages") or 0),
                     "lineCount": int(snapshot.get("lineCount") or 0),
                     "fileSize": int(snapshot.get("fileSize") or 0),

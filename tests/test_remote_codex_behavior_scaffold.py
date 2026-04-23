@@ -483,3 +483,93 @@ def test_remote_codex_task_lifecycle_routes_cover_approval_interrupt_and_evidenc
         )
         assert interrupt_response.status_code == 200
         assert interrupt_response.json()["task"]["status"] == "interrupted"
+
+
+def test_remote_codex_keeps_only_recent_message_window_in_bridge_storage(app_env) -> None:
+    from app.main import app
+
+    messages = [
+        {
+            "lineNumber": index,
+            "timestamp": f"2026-04-23T00:00:{index % 60:02d}+00:00",
+            "role": "user" if index % 2 else "assistant",
+            "phase": None if index % 2 else "completed",
+            "text": f"message {index}",
+            "images": [],
+        }
+        for index in range(1, 261)
+    ]
+
+    sync_payload = {
+        "machine": {
+            "machineId": "machine-window",
+            "displayName": "Machine Window",
+            "source": "agent",
+            "activeTransport": "standalone-app-server",
+            "runtimeMode": "standalone-app-server",
+            "runtimeAvailable": True,
+            "capabilities": {"liveControl": True},
+            "lastSeenAt": "2026-04-23T00:00:00+00:00",
+            "lastSyncAt": "2026-04-23T00:00:00+00:00",
+        },
+        "threads": [
+            {
+                "id": "thread-window",
+                "title": "Recent window only",
+                "cwd": "C:/repo",
+                "rolloutPath": "C:/repo/.codex/rollout.jsonl",
+                "updatedAtMs": 1700000000000,
+                "createdAtMs": 1699999999000,
+                "source": "app-server",
+                "modelProvider": "openai",
+                "model": "gpt-5.4",
+                "reasoningEffort": "medium",
+                "cliVersion": "1.0.0",
+                "firstUserMessage": "message 1",
+                "status": {"type": "notLoaded"},
+            }
+        ],
+        "snapshots": [
+            {
+                "thread": {
+                    "id": "thread-window",
+                    "title": "Recent window only",
+                    "cwd": "C:/repo",
+                    "rolloutPath": "C:/repo/.codex/rollout.jsonl",
+                    "updatedAtMs": 1700000000000,
+                    "createdAtMs": 1699999999000,
+                    "source": "app-server",
+                    "modelProvider": "openai",
+                    "model": "gpt-5.4",
+                    "reasoningEffort": "medium",
+                    "cliVersion": "1.0.0",
+                    "firstUserMessage": "message 1",
+                    "status": {"type": "notLoaded"},
+                },
+                "messages": messages,
+                "totalMessages": 260,
+                "lineCount": 260,
+                "fileSize": 4096,
+                "syncedAt": "2026-04-23T00:00:00+00:00",
+            }
+        ],
+    }
+
+    with TestClient(app) as client:
+        sync_response = client.post(
+            "/api/remote-codex/agent/sync",
+            headers={"Authorization": "Bearer test-token"},
+            json=sync_payload,
+        )
+        assert sync_response.status_code == 200
+
+        messages_response = client.get(
+            "/api/remote-codex/machines/machine-window/threads/thread-window/messages?limit=300",
+            headers={"Authorization": "Bearer test-token"},
+        )
+        assert messages_response.status_code == 200
+        payload = messages_response.json()
+        assert payload["totalMessages"] == 260
+        assert len(payload["messages"]) == 200
+        assert payload["messages"][0]["lineNumber"] == 61
+        assert payload["messages"][-1]["lineNumber"] == 260

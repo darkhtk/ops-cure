@@ -19,6 +19,7 @@ class FakeBackend:
     threads: list[dict]
     snapshots: dict[str, dict]
     health: dict[str, object]
+    read_limits: list[tuple[str, int]] = field(default_factory=list)
     start_turn_calls: list[tuple[str, str]] = field(default_factory=list)
     interrupt_calls: list[tuple[str, str]] = field(default_factory=list)
     delete_calls: list[str] = field(default_factory=list)
@@ -36,6 +37,7 @@ class FakeBackend:
         return None
 
     def read_thread_messages(self, thread_id: str, *, limit: int = 300) -> dict | None:
+        self.read_limits.append((thread_id, limit))
         snapshot = self.snapshots.get(thread_id)
         return dict(snapshot) if snapshot is not None else None
 
@@ -448,6 +450,48 @@ def test_remote_codex_device_agent_bootstrap_syncs_machine_threads_and_snapshots
     assert sync["machine"]["capabilities"]["liveControl"] is True
     assert sync["threads"][0]["id"] == "thread-1"
     assert sync["snapshots"][0]["thread"]["id"] == "thread-1"
+
+
+def test_remote_codex_device_agent_limits_snapshot_messages_before_sync() -> None:
+    snapshot = _sample_snapshot()
+    snapshot["messages"] = [
+        {
+            "lineNumber": index,
+            "timestamp": f"2026-04-23T00:00:{index % 60:02d}+00:00",
+            "role": "user" if index % 2 else "assistant",
+            "phase": None if index % 2 else "completed",
+            "text": f"message {index}",
+            "images": [],
+        }
+        for index in range(1, 251)
+    ]
+    snapshot["totalMessages"] = 250
+    snapshot["lineCount"] = 250
+
+    backend = FakeBackend(
+        threads=[_sample_thread()],
+        snapshots={"thread-1": snapshot},
+        health=_sample_health(),
+    )
+    bridge = FakeBridge()
+    agent = RemoteCodexDeviceAgent(
+        bridge=bridge,
+        backend=backend,
+        machine_id="homedev",
+        display_name="Home Dev",
+        worker_id="homedev-agent",
+        message_limit=60,
+    )
+
+    worked = agent.poll_once()
+
+    assert worked is True
+    assert backend.read_limits == [("thread-1", 60)]
+    synced_messages = bridge.sync_calls[0]["snapshots"][0]["messages"]
+    assert len(synced_messages) == 60
+    assert synced_messages[0]["lineNumber"] == 191
+    assert synced_messages[-1]["lineNumber"] == 250
+    assert bridge.sync_calls[0]["snapshots"][0]["totalMessages"] == 250
 
 
 def test_remote_codex_device_agent_executes_turn_start_commands_and_reports_result() -> None:

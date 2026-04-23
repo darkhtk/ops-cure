@@ -20,6 +20,8 @@ from ...models import (
 
 DEFAULT_DEGRADED_AFTER_SECONDS = 45
 DEFAULT_OFFLINE_AFTER_SECONDS = 90
+DEFAULT_STORED_MESSAGE_WINDOW = 200
+DEFAULT_THREAD_MESSAGE_LIMIT = 120
 COMMAND_QUEUED = "queued"
 COMMAND_RUNNING = "running"
 COMMAND_COMPLETED = "completed"
@@ -366,7 +368,7 @@ class RemoteCodexStateService:
         machine_id: str,
         thread_id: str,
         *,
-        limit: int = 250,
+        limit: int = DEFAULT_THREAD_MESSAGE_LIMIT,
         after_line_number: int = 0,
     ) -> dict[str, Any] | None:
         with session_scope() as db:
@@ -414,6 +416,8 @@ class RemoteCodexStateService:
             ]
             public_messages.extend(pending_command_messages)
             effective_limit = max(0, int(limit))
+            if effective_limit > 0:
+                effective_limit = min(effective_limit, DEFAULT_STORED_MESSAGE_WINDOW)
             if effective_limit > 0:
                 public_messages = public_messages[-effective_limit:]
             return {
@@ -546,7 +550,7 @@ class RemoteCodexStateService:
                 row.synced_at = ensure_utc(datetime.fromisoformat(item.get("syncedAt"))) if item.get("syncedAt") else utcnow()
                 db.flush()
                 db.execute(delete(RemoteCodexMessageModel).where(RemoteCodexMessageModel.thread_row_id == row.id))
-                for message in list(item.get("messages") or []):
+                for message in list(item.get("messages") or [])[-DEFAULT_STORED_MESSAGE_WINDOW:]:
                     db.add(
                         RemoteCodexMessageModel(
                             thread_row_id=row.id,
