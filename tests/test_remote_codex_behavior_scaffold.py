@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from fastapi import FastAPI
@@ -173,7 +173,7 @@ def test_remote_codex_browser_and_agent_surface_round_trip(app_env) -> None:
             headers={"Authorization": "Bearer test-token"},
             json={"prompt": "Add a task panel."},
         )
-        assert turn_response.status_code == 200
+        assert turn_response.status_code == 200, turn_response.text
         turn_payload = turn_response.json()
         assert turn_payload["task"]["status"] == "queued"
         assert turn_payload["command"]["status"] == "queued"
@@ -355,6 +355,136 @@ def test_remote_codex_browser_and_agent_surface_round_trip(app_env) -> None:
         )
         assert delete_response.status_code == 200
         assert delete_response.json()["command"]["type"] == "thread.delete"
+
+
+def test_remote_codex_keeps_pending_turn_visible_while_linked_task_is_active(app_env) -> None:
+    from app.behaviors.remote_codex.state_service import DEFAULT_PENDING_COMMAND_VISIBILITY_SECONDS
+    from app.db import session_scope
+    from app.main import app
+    from app.models import RemoteCodexCommandModel, RemoteTaskModel
+
+    unique_suffix = str(int(datetime.now(timezone.utc).timestamp() * 1000))
+    machine_id = f"machine-pending-{unique_suffix}"
+    thread_id = f"thread-pending-{unique_suffix}"
+    now = datetime.now(timezone.utc).isoformat()
+
+    sync_payload = {
+        "machine": {
+            "machineId": machine_id,
+            "displayName": "Machine Pending",
+            "source": "agent",
+            "activeTransport": "filesystem-storage",
+                "runtimeMode": "standalone",
+                "runtimeAvailable": True,
+                "capabilities": {"liveControl": True},
+                "lastSeenAt": now,
+                "lastSyncAt": now,
+            },
+            "threads": [
+                {
+                    "id": thread_id,
+                "title": "Keep pending visible",
+                "cwd": "C:/repo",
+                "rolloutPath": "C:/repo/.codex/rollout.jsonl",
+                "updatedAtMs": 1700000000000,
+                "createdAtMs": 1699999999000,
+                "source": "app-server",
+                "modelProvider": "openai",
+                "model": "gpt-5.4",
+                "reasoningEffort": "medium",
+                "cliVersion": "1.0.0",
+                "firstUserMessage": "",
+                "status": {"type": "notLoaded"},
+            }
+        ],
+        "snapshots": [
+            {
+                "thread": {
+                    "id": thread_id,
+                    "title": "Keep pending visible",
+                    "cwd": "C:/repo",
+                    "rolloutPath": "C:/repo/.codex/rollout.jsonl",
+                    "updatedAtMs": 1700000000000,
+                    "createdAtMs": 1699999999000,
+                    "source": "app-server",
+                    "modelProvider": "openai",
+                    "model": "gpt-5.4",
+                    "reasoningEffort": "medium",
+                    "cliVersion": "1.0.0",
+                    "firstUserMessage": "",
+                    "status": {"type": "notLoaded"},
+                },
+                "messages": [],
+                "totalMessages": 0,
+                "lineCount": 0,
+                "fileSize": 0,
+                "syncedAt": now,
+            }
+        ],
+    }
+
+    with TestClient(app) as client:
+        sync_response = client.post(
+            "/api/remote-codex/agent/sync",
+            headers={"Authorization": "Bearer test-token"},
+            json=sync_payload,
+        )
+        assert sync_response.status_code == 200
+
+        prompt = "Keep this prompt visible while the task is still executing."
+        turn_response = client.post(
+            f"/api/remote-codex/machines/{machine_id}/threads/{thread_id}/turns",
+            headers={"Authorization": "Bearer test-token"},
+            json={"prompt": prompt},
+        )
+        assert turn_response.status_code == 200, turn_response.text
+        turn_payload = turn_response.json()
+        command_id = turn_payload["command"]["commandId"]
+        task_id = turn_payload["task"]["taskId"]
+
+        claim_response = client.post(
+            "/api/remote-codex/agent/commands/claim",
+            headers={"Authorization": "Bearer test-token"},
+            json={"machineId": machine_id, "workerId": "worker-pending"},
+        )
+        assert claim_response.status_code == 200
+        claimed_command = claim_response.json()["command"]
+        assert claimed_command["commandId"] == command_id
+
+        result_response = client.post(
+            f"/api/remote-codex/agent/commands/{command_id}/result",
+            headers={"Authorization": "Bearer test-token"},
+            json={
+                "workerId": "worker-pending",
+                "status": "completed",
+                "result": {
+                    "turnId": "turn-pending-1",
+                    "turnStatus": "inProgress",
+                },
+            },
+        )
+        assert result_response.status_code == 200
+
+        with session_scope() as db:
+            command_row = db.get(RemoteCodexCommandModel, command_id)
+            assert command_row is not None
+            task_row = db.get(RemoteTaskModel, task_id)
+            assert task_row is not None
+            task_row.status = "executing"
+            stale_created_at = datetime.now(timezone.utc) - timedelta(
+                seconds=DEFAULT_PENDING_COMMAND_VISIBILITY_SECONDS + 30
+            )
+            command_row.created_at = stale_created_at
+            command_row.updated_at = stale_created_at
+
+        messages_response = client.get(
+            f"/api/remote-codex/machines/{machine_id}/threads/{thread_id}/messages",
+            headers={"Authorization": "Bearer test-token"},
+        )
+        assert messages_response.status_code == 200
+        pending_rows = [item for item in messages_response.json()["messages"] if item["text"] == prompt]
+        assert len(pending_rows) == 1
+        assert pending_rows[0]["lineNumber"] < 0
 
 
 def test_remote_codex_task_lifecycle_routes_cover_approval_interrupt_and_evidence(app_env) -> None:

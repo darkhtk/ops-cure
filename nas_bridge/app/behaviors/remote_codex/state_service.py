@@ -16,6 +16,7 @@ from ...models import (
     RemoteCodexMachineModel,
     RemoteCodexMessageModel,
     RemoteCodexThreadModel,
+    RemoteTaskModel,
 )
 
 DEFAULT_DEGRADED_AFTER_SECONDS = 45
@@ -23,6 +24,7 @@ DEFAULT_OFFLINE_AFTER_SECONDS = 90
 DEFAULT_STORED_MESSAGE_WINDOW = 200
 DEFAULT_THREAD_MESSAGE_LIMIT = 120
 DEFAULT_PENDING_COMMAND_VISIBILITY_SECONDS = 180
+ACTIVE_PENDING_TASK_STATUSES = {"queued", "claimed", "executing", "verifying", "blocked_approval"}
 COMMAND_QUEUED = "queued"
 COMMAND_RUNNING = "running"
 COMMAND_COMPLETED = "completed"
@@ -252,6 +254,7 @@ class RemoteCodexStateService:
         row: RemoteCodexCommandModel,
         *,
         recent_user_texts: set[str],
+        task_status_by_id: dict[str, str],
     ) -> dict[str, Any] | None:
         if row.type != TURN_START:
             return None
@@ -273,10 +276,13 @@ class RemoteCodexStateService:
         created_at = ensure_utc(row.created_at) or utcnow()
         age_seconds = max(0.0, (utcnow() - created_at).total_seconds())
         is_fresh_pending = age_seconds <= DEFAULT_PENDING_COMMAND_VISIBILITY_SECONDS
+        linked_task_status = compact_text(task_status_by_id.get(row.task_id)).lower() if row.task_id else ""
+        linked_task_active = linked_task_status in ACTIVE_PENDING_TASK_STATUSES
 
-        should_surface = (status in {COMMAND_QUEUED, COMMAND_RUNNING} and is_fresh_pending) or (
-            status == COMMAND_COMPLETED and turn_status in {"queued", "inprogress", "in_progress", "running"}
-            and is_fresh_pending
+        should_surface = (status in {COMMAND_QUEUED, COMMAND_RUNNING} and (is_fresh_pending or linked_task_active)) or (
+            status == COMMAND_COMPLETED
+            and turn_status in {"queued", "inprogress", "in_progress", "running"}
+            and (is_fresh_pending or linked_task_active)
         )
         if not should_surface:
             return None
@@ -409,18 +415,32 @@ class RemoteCodexStateService:
                 for message in public_messages
                 if compact_text(message.get("role")) == "user"
             }
+            command_rows = list(
+                db.scalars(
+                    select(RemoteCodexCommandModel)
+                    .where(
+                        RemoteCodexCommandModel.machine_id == machine_id,
+                        RemoteCodexCommandModel.thread_id == thread_id,
+                    )
+                    .order_by(RemoteCodexCommandModel.created_at.asc())
+                )
+            )
+            task_ids = sorted({row.task_id for row in command_rows if row.task_id})
+            task_status_by_id: dict[str, str] = {}
+            if task_ids:
+                task_status_by_id = {
+                    row.id: compact_text(row.status).lower()
+                    for row in db.scalars(select(RemoteTaskModel).where(RemoteTaskModel.id.in_(task_ids)))
+                }
             pending_command_messages = [
                 message
                 for message in (
-                    self._command_row_to_pending_message(row, recent_user_texts=recent_user_texts)
-                    for row in db.scalars(
-                        select(RemoteCodexCommandModel)
-                        .where(
-                            RemoteCodexCommandModel.machine_id == machine_id,
-                            RemoteCodexCommandModel.thread_id == thread_id,
-                        )
-                        .order_by(RemoteCodexCommandModel.created_at.asc())
+                    self._command_row_to_pending_message(
+                        row,
+                        recent_user_texts=recent_user_texts,
+                        task_status_by_id=task_status_by_id,
                     )
+                    for row in command_rows
                 )
                 if message is not None
             ]
