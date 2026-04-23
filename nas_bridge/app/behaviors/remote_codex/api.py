@@ -219,6 +219,24 @@ async def claim_next_machine_task(machine_id: str, request: Request) -> dict[str
     return claimed or {"task": None}
 
 
+@router.post("/tasks/{task_id}/heartbeat")
+async def heartbeat_task(task_id: str, request: Request) -> dict[str, Any]:
+    body = await request.json()
+    from ...schemas import RemoteTaskHeartbeatRequest
+
+    payload = RemoteTaskHeartbeatRequest(**body)
+    return request.app.state.services.remote_codex_service.heartbeat_task(task_id, payload)
+
+
+@router.post("/tasks/{task_id}/evidence")
+async def add_evidence(task_id: str, request: Request) -> dict[str, Any]:
+    body = await request.json()
+    from ...schemas import RemoteTaskEvidenceRequest
+
+    payload = RemoteTaskEvidenceRequest(**body)
+    return request.app.state.services.remote_codex_service.add_evidence(task_id, payload)
+
+
 @router.post("/tasks/{task_id}/approval")
 async def request_approval(task_id: str, request: Request) -> dict[str, Any]:
     body = await request.json()

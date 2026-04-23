@@ -388,22 +388,52 @@ def test_remote_codex_task_lifecycle_routes_cover_approval_interrupt_and_evidenc
         lease_token = claimed_task["currentClaim"]["leaseToken"]
 
         heartbeat_response = client.post(
-            f"/api/remote-codex/agent/tasks/{task_id}/heartbeat",
+            f"/api/remote-codex/tasks/{task_id}/heartbeat",
             headers={"Authorization": "Bearer test-token"},
             json={
-                "actorId": "machine-q",
+                "actor_id": "machine-q",
+                "lease_token": lease_token,
                 "phase": "executing",
                 "summary": "Starting work without evidence yet.",
-                "commandsRunCount": 0,
-                "filesReadCount": 0,
-                "filesModifiedCount": 0,
-                "testsRunCount": 0,
+                "commands_run_count": 0,
+                "files_read_count": 0,
+                "files_modified_count": 0,
+                "tests_run_count": 0,
             },
         )
         assert heartbeat_response.status_code == 200
         assert heartbeat_response.json()["task"]["status"] == "claimed"
 
         evidence_response = client.post(
+            f"/api/remote-codex/tasks/{task_id}/evidence",
+            headers={"Authorization": "Bearer test-token"},
+            json={
+                "actor_id": "machine-q",
+                "kind": "command_execution",
+                "summary": "Ran a real command for this task.",
+                "payload": {"commandId": "command-q"},
+            },
+        )
+        assert evidence_response.status_code == 200
+        assert evidence_response.json()["task"]["status"] == "executing"
+
+        agent_heartbeat_response = client.post(
+            f"/api/remote-codex/agent/tasks/{task_id}/heartbeat",
+            headers={"Authorization": "Bearer test-token"},
+            json={
+                "actorId": "machine-q",
+                "phase": "executing",
+                "summary": "Starting work without evidence yet.",
+                "commandsRunCount": 1,
+                "filesReadCount": 0,
+                "filesModifiedCount": 0,
+                "testsRunCount": 0,
+            },
+        )
+        assert agent_heartbeat_response.status_code == 200
+        assert agent_heartbeat_response.json()["task"]["status"] == "executing"
+
+        agent_evidence_response = client.post(
             f"/api/remote-codex/agent/tasks/{task_id}/evidence",
             headers={"Authorization": "Bearer test-token"},
             json={
@@ -413,8 +443,8 @@ def test_remote_codex_task_lifecycle_routes_cover_approval_interrupt_and_evidenc
                 "payload": {"commandId": "command-q"},
             },
         )
-        assert evidence_response.status_code == 200
-        assert evidence_response.json()["task"]["status"] == "executing"
+        assert agent_evidence_response.status_code == 200
+        assert agent_evidence_response.json()["task"]["status"] == "executing"
 
         approval_request = client.post(
             f"/api/remote-codex/tasks/{task_id}/approval",

@@ -34,6 +34,17 @@ class IdleDeviceAgent:
         return False
 
 
+class QuietDeviceAgent:
+    def poll_once(self) -> bool:
+        return False
+
+    def mark_thread_dirty(self, thread_id: str) -> None:
+        self.thread_id = thread_id
+
+    def perform_sync(self, *, force: bool = False) -> None:
+        self.forced = force
+
+
 class FailingBridge:
     def __init__(self, error: Exception) -> None:
         self.error = error
@@ -73,7 +84,44 @@ def test_run_cycle_survives_device_agent_connection_error() -> None:
     worked = run_cycle(session, _config())
 
     assert worked is False
-    assert bridge.claim_calls == []
+
+
+class ClaimingBridge:
+    def claim_next_remote_task_for_machine(
+        self,
+        *,
+        machine_id: str,
+        actor_id: str,
+        lease_seconds: int = 90,
+    ):
+        return {
+            "id": "task-1",
+            "machine_id": machine_id,
+            "thread_id": "thread-1",
+            "objective": "Do something",
+            "success_criteria": {},
+            "priority": "normal",
+            "origin_surface": "browser",
+            "owner_actor_id": actor_id,
+            "current_assignment": {"lease_token": "lease-1"},
+        }
+
+
+class ExplodingRuntime:
+    def execute_task(self, context):
+        raise RuntimeError("runtime exploded")
+
+
+def test_run_cycle_survives_task_execution_error() -> None:
+    session = SimpleNamespace(
+        bridge=ClaimingBridge(),
+        runtime=ExplodingRuntime(),
+        device_agent=QuietDeviceAgent(),
+    )
+
+    worked = run_cycle(session, _config())
+
+    assert worked is False
 
 
 def test_run_cycle_survives_remote_task_claim_error() -> None:

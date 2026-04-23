@@ -304,15 +304,15 @@ def _execute_claimed_task(
         raise RuntimeError(f"Remote task {claim['id']} did not return a lease token after claim.")
 
     task_id = str(claim["id"])
-    bridge.heartbeat_remote_task(
-        task_id=task_id,
-        actor_id=actor_id,
-        lease_token=lease_token,
-        phase="claimed",
-        summary="Remote executor claimed the task and is preparing local Codex execution.",
-        lease_seconds=lease_seconds,
-    )
     try:
+        bridge.heartbeat_remote_task(
+            task_id=task_id,
+            actor_id=actor_id,
+            lease_token=lease_token,
+            phase="claimed",
+            summary="Remote executor claimed the task and is preparing local Codex execution.",
+            lease_seconds=lease_seconds,
+        )
         result = runtime.execute_task(
             ExecutionTaskContext(
                 task_id=task_id,
@@ -364,12 +364,20 @@ def _execute_claimed_task(
         return True
     except Exception as exc:
         error_text = str(exc).strip() or exc.__class__.__name__
-        bridge.fail_remote_task(
-            task_id=task_id,
-            actor_id=actor_id,
-            lease_token=lease_token,
-            error_text=error_text,
-        )
+        try:
+            bridge.fail_remote_task(
+                task_id=task_id,
+                actor_id=actor_id,
+                lease_token=lease_token,
+                error_text=error_text,
+            )
+        except Exception:
+            LOGGER.warning(
+                "Remote executor could not report task failure for %s after error: %s",
+                task_id,
+                error_text,
+                exc_info=True,
+            )
         LOGGER.exception("Remote executor failed task %s: %s", task_id, error_text)
         return False
 
@@ -406,16 +414,25 @@ def run_cycle(session: RunnerSession, config: RunnerConfig) -> bool:
             LOGGER.info("No queued remote tasks or browser commands for machine %s", config.machine_id)
         return activity
 
-    worked = _execute_claimed_task(
-        bridge=session.bridge,
-        runtime=session.runtime,
-        claim=claim,
-        actor_id=config.actor_id,
-        lease_seconds=config.lease_seconds,
-    )
-    session.device_agent.mark_thread_dirty(str(claim.get("thread_id") or ""))
-    session.device_agent.perform_sync(force=True)
-    return worked or activity
+    try:
+        worked = _execute_claimed_task(
+            bridge=session.bridge,
+            runtime=session.runtime,
+            claim=claim,
+            actor_id=config.actor_id,
+            lease_seconds=config.lease_seconds,
+        )
+        session.device_agent.mark_thread_dirty(str(claim.get("thread_id") or ""))
+        session.device_agent.perform_sync(force=True)
+        return worked or activity
+    except Exception as exc:
+        LOGGER.warning(
+            "Remote executor task cycle crashed for machine %s: %s",
+            config.machine_id,
+            exc,
+            exc_info=True,
+        )
+        return activity
 
 
 def run_once(config: RunnerConfig) -> bool:
@@ -424,13 +441,35 @@ def run_once(config: RunnerConfig) -> bool:
 
 
 def run_forever(config: RunnerConfig) -> None:
-    session = build_session(config)
+    session: RunnerSession | None = None
+    failure_count = 0
     while True:
-        worked = run_cycle(session, config)
-        if config.run_once:
-            return
-        if not worked:
-            time.sleep(config.poll_interval_seconds)
+        try:
+            if session is None:
+                session = build_session(config)
+            worked = run_cycle(session, config)
+            failure_count = 0
+            if config.run_once:
+                return
+            if not worked:
+                time.sleep(config.poll_interval_seconds)
+        except KeyboardInterrupt:
+            raise
+        except Exception as exc:
+            session = None
+            failure_count += 1
+            backoff_seconds = min(max(config.poll_interval_seconds, 1.0) * failure_count, 30.0)
+            LOGGER.warning(
+                "Remote executor loop crashed for machine %s (attempt %s); retrying in %.1fs: %s",
+                config.machine_id,
+                failure_count,
+                backoff_seconds,
+                exc,
+                exc_info=True,
+            )
+            if config.run_once:
+                raise
+            time.sleep(backoff_seconds)
 
 
 def main(argv: list[str] | None = None) -> int:

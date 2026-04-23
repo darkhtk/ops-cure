@@ -421,18 +421,29 @@ class BridgeClient:
         files_modified_count: int = 0,
         tests_run_count: int = 0,
     ) -> dict[str, Any]:
-        return self._post(
+        payload = {
+            "actor_id": actor_id,
+            "lease_token": lease_token,
+            "phase": phase,
+            "summary": summary,
+            "lease_seconds": lease_seconds,
+            "commands_run_count": commands_run_count,
+            "files_read_count": files_read_count,
+            "files_modified_count": files_modified_count,
+            "tests_run_count": tests_run_count,
+        }
+        return self._post_with_fallback(
             f"/api/remote-codex/tasks/{task_id}/heartbeat",
-            {
-                "actor_id": actor_id,
-                "lease_token": lease_token,
+            payload,
+            fallback_path=f"/api/remote-codex/agent/tasks/{task_id}/heartbeat",
+            fallback_payload={
+                "actorId": actor_id,
                 "phase": phase,
                 "summary": summary,
-                "lease_seconds": lease_seconds,
-                "commands_run_count": commands_run_count,
-                "files_read_count": files_read_count,
-                "files_modified_count": files_modified_count,
-                "tests_run_count": tests_run_count,
+                "commandsRunCount": commands_run_count,
+                "filesReadCount": files_read_count,
+                "filesModifiedCount": files_modified_count,
+                "testsRunCount": tests_run_count,
             },
         )
 
@@ -445,10 +456,18 @@ class BridgeClient:
         summary: str,
         payload: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        return self._post(
+        request_payload = {
+            "actor_id": actor_id,
+            "kind": kind,
+            "summary": summary,
+            "payload": payload or {},
+        }
+        return self._post_with_fallback(
             f"/api/remote-codex/tasks/{task_id}/evidence",
-            {
-                "actor_id": actor_id,
+            request_payload,
+            fallback_path=f"/api/remote-codex/agent/tasks/{task_id}/evidence",
+            fallback_payload={
+                "actorId": actor_id,
                 "kind": kind,
                 "summary": summary,
                 "payload": payload or {},
@@ -480,11 +499,17 @@ class BridgeClient:
         lease_token: str,
         summary: str,
     ) -> dict[str, Any]:
-        return self._post(
+        payload = {
+            "actor_id": actor_id,
+            "lease_token": lease_token,
+            "summary": summary,
+        }
+        return self._post_with_fallback(
             f"/api/remote-codex/tasks/{task_id}/complete",
-            {
-                "actor_id": actor_id,
-                "lease_token": lease_token,
+            payload,
+            fallback_path=f"/api/remote-codex/agent/tasks/{task_id}/complete",
+            fallback_payload={
+                "actorId": actor_id,
                 "summary": summary,
             },
         )
@@ -497,12 +522,18 @@ class BridgeClient:
         lease_token: str,
         error_text: str,
     ) -> dict[str, Any]:
-        return self._post(
+        payload = {
+            "actor_id": actor_id,
+            "lease_token": lease_token,
+            "error_text": error_text,
+        }
+        return self._post_with_fallback(
             f"/api/remote-codex/tasks/{task_id}/fail",
-            {
-                "actor_id": actor_id,
-                "lease_token": lease_token,
-                "error_text": error_text,
+            payload,
+            fallback_path=f"/api/remote-codex/agent/tasks/{task_id}/fail",
+            fallback_payload={
+                "actorId": actor_id,
+                "error": {"message": error_text},
             },
         )
 
@@ -675,6 +706,26 @@ class BridgeClient:
         )
         return self._handle_response(path, response)
 
+    def _post_with_fallback(
+        self,
+        path: str,
+        payload: dict[str, Any],
+        *,
+        fallback_path: str,
+        fallback_payload: dict[str, Any],
+    ) -> Any:
+        try:
+            return self._post(path, payload)
+        except BridgeClientError as error:
+            if not self._is_not_found_surface_error(error):
+                raise
+            LOGGER.warning(
+                "Bridge surface %s unavailable, falling back to %s",
+                path,
+                fallback_path,
+            )
+            return self._post(fallback_path, fallback_payload)
+
     def _get(self, path: str) -> Any:
         response = self.session.get(
             f"{self.base_url}{path}",
@@ -691,6 +742,11 @@ class BridgeClient:
         if not response.ok:
             raise BridgeClientError(f"{path} -> {response.status_code}: {payload}")
         return payload
+
+    @staticmethod
+    def _is_not_found_surface_error(error: BridgeClientError) -> bool:
+        message = str(error)
+        return "-> 404:" in message or "-> 410:" in message
 
     def _iter_sse(self, response: requests.Response) -> Iterator[tuple[str, dict[str, Any]]]:
         event_name = "message"
