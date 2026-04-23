@@ -375,13 +375,32 @@ def _execute_claimed_task(
 
 
 def run_cycle(session: RunnerSession, config: RunnerConfig) -> bool:
-    activity = session.device_agent.poll_once()
+    activity = False
+    try:
+        activity = session.device_agent.poll_once()
+    except Exception as exc:
+        LOGGER.warning(
+            "Remote executor device sync failed for machine %s: %s",
+            config.machine_id,
+            exc,
+            exc_info=True,
+        )
+        return False
 
-    claim = session.bridge.claim_next_remote_task_for_machine(
-        machine_id=config.machine_id,
-        actor_id=config.actor_id,
-        lease_seconds=config.lease_seconds,
-    )
+    try:
+        claim = session.bridge.claim_next_remote_task_for_machine(
+            machine_id=config.machine_id,
+            actor_id=config.actor_id,
+            lease_seconds=config.lease_seconds,
+        )
+    except Exception as exc:
+        LOGGER.warning(
+            "Remote executor task claim failed for machine %s: %s",
+            config.machine_id,
+            exc,
+            exc_info=True,
+        )
+        return activity
     if not claim:
         if not activity:
             LOGGER.info("No queued remote tasks or browser commands for machine %s", config.machine_id)
