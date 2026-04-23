@@ -525,11 +525,6 @@ class RemoteCodexBehaviorService:
         thread = self.state_service.get_thread(machine_id, thread_id)
         if thread is None:
             raise ValueError("thread_not_found")
-        active_command = self.state_service.get_active_thread_command(machine_id, thread_id, command_type=TURN_START)
-        if active_command is not None:
-            raise RuntimeError("turn_command_in_progress")
-        if normalize_thread_status(thread.get("status")) == "inProgress":
-            raise RuntimeError("turn_in_progress")
 
         task = self.remote_task_service.create_task(
             RemoteTaskCreateRequest(

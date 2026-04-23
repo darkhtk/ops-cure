@@ -209,15 +209,61 @@ def test_remote_codex_browser_and_agent_surface_round_trip(app_env) -> None:
         assert result_response.status_code == 200
         assert result_response.json()["command"]["status"] == "completed"
 
+        queued_followup_response = client.post(
+            "/api/remote-codex/machines/machine-z/threads/thread-z/turns",
+            headers={"Authorization": "Bearer test-token"},
+            json={"prompt": "Queue this after the in-progress turn."},
+        )
+        assert queued_followup_response.status_code == 200
+        queued_followup_payload = queued_followup_response.json()
+        assert queued_followup_payload["task"]["status"] == "queued"
+        assert queued_followup_payload["command"]["status"] == "queued"
+
         task_response = client.get(
             "/api/remote-codex/machines/machine-z/threads/thread-z/tasks",
             headers={"Authorization": "Bearer test-token"},
         )
         assert task_response.status_code == 200
         tasks = task_response.json()["tasks"]
-        assert len(tasks) == 1
-        assert tasks[0]["taskId"] == turn_payload["task"]["taskId"]
-        assert tasks[0]["currentClaim"]["actorId"] == "machine-z"
+        assert len(tasks) == 2
+        assert tasks[0]["taskId"] == queued_followup_payload["task"]["taskId"]
+        assert tasks[1]["taskId"] == turn_payload["task"]["taskId"]
+        assert tasks[0]["currentClaim"] is None
+        assert tasks[1]["currentClaim"]["actorId"] == "machine-z"
+
+        commands_response = client.get(
+            "/api/remote-codex/machines/machine-z/threads/thread-z/commands",
+            headers={"Authorization": "Bearer test-token"},
+        )
+        assert commands_response.status_code == 200
+        turn_start_commands = [command for command in commands_response.json()["commands"] if command["type"] == "turn.start"]
+        assert len(turn_start_commands) >= 2
+        assert turn_start_commands[0]["commandId"] == queued_followup_payload["command"]["commandId"]
+
+        second_claim_response = client.post(
+            "/api/remote-codex/agent/commands/claim",
+            headers={"Authorization": "Bearer test-token"},
+            json={"machineId": "machine-z", "workerId": "worker-z"},
+        )
+        assert second_claim_response.status_code == 200
+        second_claimed_command = second_claim_response.json()["command"]
+        assert second_claimed_command["commandId"] == queued_followup_payload["command"]["commandId"]
+        assert second_claimed_command["status"] == "running"
+
+        second_result_response = client.post(
+            f"/api/remote-codex/agent/commands/{second_claimed_command['commandId']}/result",
+            headers={"Authorization": "Bearer test-token"},
+            json={
+                "workerId": "worker-z",
+                "status": "completed",
+                "result": {
+                    "turnId": "turn-124",
+                    "turnStatus": "queued",
+                },
+            },
+        )
+        assert second_result_response.status_code == 200
+        assert second_result_response.json()["command"]["status"] == "completed"
 
         delete_response = client.delete(
             "/api/remote-codex/machines/machine-z/threads/thread-z",
