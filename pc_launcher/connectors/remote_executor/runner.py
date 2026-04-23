@@ -148,14 +148,6 @@ def build_bridge(config: RunnerConfig) -> BridgeRemoteExecutorClient:
     return BridgeRemoteExecutorClient(bridge_client=bridge_client)
 
 
-def _candidate_tasks(bridge: BridgeRemoteExecutorClient, *, machine_id: str) -> list[dict[str, object]]:
-    return bridge.list_remote_tasks_for_machine(
-        machine_id=machine_id,
-        statuses=["queued"],
-        limit=20,
-    )
-
-
 def _add_activity_evidence(
     bridge: BridgeRemoteExecutorClient,
     *,
@@ -210,19 +202,14 @@ def _execute_claimed_task(
     *,
     bridge: BridgeRemoteExecutorClient,
     runtime: RemoteExecutorRuntime,
-    task: dict[str, object],
+    claim: dict[str, object],
     actor_id: str,
     lease_seconds: int,
 ) -> bool:
-    claim = bridge.claim_remote_task(
-        task_id=str(task["id"]),
-        actor_id=actor_id,
-        lease_seconds=lease_seconds,
-    )
     assignment = claim.get("current_assignment") or {}
     lease_token = str(assignment.get("lease_token") or "")
     if not lease_token:
-        raise RuntimeError(f"Remote task {task['id']} did not return a lease token after claim.")
+        raise RuntimeError(f"Remote task {claim['id']} did not return a lease token after claim.")
 
     task_id = str(claim["id"])
     bridge.heartbeat_remote_task(
@@ -299,14 +286,18 @@ def run_once(config: RunnerConfig) -> bool:
     project = load_project(config.project_file)
     bridge = build_bridge(config)
     runtime = build_runtime(config=config, default_workdir=project.default_workdir)
-    candidates = _candidate_tasks(bridge, machine_id=config.machine_id)
-    if not candidates:
+    claim = bridge.claim_next_remote_task_for_machine(
+        machine_id=config.machine_id,
+        actor_id=config.actor_id,
+        lease_seconds=config.lease_seconds,
+    )
+    if not claim:
         LOGGER.info("No queued remote tasks for machine %s", config.machine_id)
         return False
     return _execute_claimed_task(
         bridge=bridge,
         runtime=runtime,
-        task=candidates[0],
+        claim=claim,
         actor_id=config.actor_id,
         lease_seconds=config.lease_seconds,
     )

@@ -212,3 +212,67 @@ def test_remote_task_service_supports_approval_notes_and_interrupt(app_env):
     notes_after_interrupt = service.list_notes(created.id)
     assert notes_after_interrupt[-1].kind == "interrupt"
     assert presence.get_current_lease(resource_kind="remote_task", resource_id=created.id) is None
+
+
+def test_remote_task_service_claim_next_prefers_priority_and_is_machine_scoped(app_env):
+    from app.schemas import RemoteTaskClaimNextRequest, RemoteTaskCreateRequest
+    from app.services.remote_task_service import RemoteTaskService
+
+    service = RemoteTaskService()
+    low = service.create_task(
+        RemoteTaskCreateRequest(
+            machine_id="machine-d",
+            thread_id="thread-d1",
+            objective="Low priority cleanup.",
+            success_criteria={"browser": ["later"]},
+            created_by="browser-user",
+            priority="low",
+        ),
+    )
+    high = service.create_task(
+        RemoteTaskCreateRequest(
+            machine_id="machine-d",
+            thread_id="thread-d2",
+            objective="Critical transcript breakage.",
+            success_criteria={"browser": ["recover immediately"]},
+            created_by="browser-user",
+            priority="high",
+        ),
+    )
+    other_machine = service.create_task(
+        RemoteTaskCreateRequest(
+            machine_id="machine-e",
+            thread_id="thread-e1",
+            objective="Different machine task.",
+            success_criteria={"browser": ["stay queued"]},
+            created_by="browser-user",
+            priority="critical",
+        ),
+    )
+
+    first = service.claim_next_task(
+        machine_id="machine-d",
+        payload=RemoteTaskClaimNextRequest(actor_id="codex-homedev", lease_seconds=90),
+    )
+    assert first is not None
+    assert first.id == high.id
+    assert first.status == "claimed"
+    assert first.owner_actor_id == "codex-homedev"
+
+    second = service.claim_next_task(
+        machine_id="machine-d",
+        payload=RemoteTaskClaimNextRequest(actor_id="codex-desktop", lease_seconds=90),
+    )
+    assert second is not None
+    assert second.id == low.id
+    assert second.owner_actor_id == "codex-desktop"
+
+    none_left = service.claim_next_task(
+        machine_id="machine-d",
+        payload=RemoteTaskClaimNextRequest(actor_id="codex-third", lease_seconds=90),
+    )
+    assert none_left is None
+
+    untouched = service.get_task(other_machine.id)
+    assert untouched.status == "queued"
+    assert untouched.owner_actor_id is None
