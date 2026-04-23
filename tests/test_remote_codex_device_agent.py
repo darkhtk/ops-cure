@@ -298,6 +298,31 @@ def test_merge_adjacent_message_keeps_image_payload_from_duplicate_message() -> 
     assert previous["lineNumber"] == 2
 
 
+def test_merge_adjacent_message_collapses_whitespace_only_text_differences() -> None:
+    previous = {
+        "lineNumber": 10,
+        "timestamp": "2026-04-23T00:00:00+00:00",
+        "role": "assistant",
+        "phase": "final_answer",
+        "text": "Hello.\n\nThis is a test.",
+        "images": [],
+    }
+    current = {
+        "lineNumber": 11,
+        "timestamp": "2026-04-23T00:00:01+00:00",
+        "role": "assistant",
+        "phase": "final_answer",
+        "text": "Hello. This is a test.",
+        "images": [],
+    }
+
+    merged = merge_adjacent_message(previous, current)
+
+    assert merged is True
+    assert previous["lineNumber"] == 11
+    assert previous["timestamp"] == "2026-04-23T00:00:01+00:00"
+
+
 def test_normalize_turn_item_message_extracts_user_text_from_turn_content() -> None:
     item = {
         "type": "userMessage",

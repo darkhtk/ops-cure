@@ -22,6 +22,7 @@ DEFAULT_DEGRADED_AFTER_SECONDS = 45
 DEFAULT_OFFLINE_AFTER_SECONDS = 90
 DEFAULT_STORED_MESSAGE_WINDOW = 200
 DEFAULT_THREAD_MESSAGE_LIMIT = 120
+DEFAULT_PENDING_COMMAND_VISIBILITY_SECONDS = 180
 COMMAND_QUEUED = "queued"
 COMMAND_RUNNING = "running"
 COMMAND_COMPLETED = "completed"
@@ -269,13 +270,17 @@ class RemoteCodexStateService:
         if isinstance(result, dict):
             turn_status = compact_text(result.get("turnStatus")).lower()
 
-        should_surface = status in {COMMAND_QUEUED, COMMAND_RUNNING} or (
+        created_at = ensure_utc(row.created_at) or utcnow()
+        age_seconds = max(0.0, (utcnow() - created_at).total_seconds())
+        is_fresh_pending = age_seconds <= DEFAULT_PENDING_COMMAND_VISIBILITY_SECONDS
+
+        should_surface = (status in {COMMAND_QUEUED, COMMAND_RUNNING} and is_fresh_pending) or (
             status == COMMAND_COMPLETED and turn_status in {"queued", "inprogress", "in_progress", "running"}
+            and is_fresh_pending
         )
         if not should_surface:
             return None
 
-        created_at = ensure_utc(row.created_at) or utcnow()
         synthetic_line_number = -max(1, int(created_at.timestamp() * 1000))
         recent_user_texts.add(normalized_prompt)
         return {
@@ -401,7 +406,7 @@ class RemoteCodexStateService:
             public_messages = [self._message_row_to_public(row) for row in message_rows]
             recent_user_texts = {
                 normalize_message_text(message.get("text"))
-                for message in public_messages[-12:]
+                for message in public_messages
                 if compact_text(message.get("role")) == "user"
             }
             pending_command_messages = [

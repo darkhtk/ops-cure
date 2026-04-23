@@ -405,7 +405,7 @@ def merge_adjacent_message(previous: dict[str, Any] | None, current: dict[str, A
         return False
     if previous.get("phase") != current.get("phase"):
         return False
-    if previous.get("text") != current.get("text"):
+    if compact_text(previous.get("text")) != compact_text(current.get("text")):
         return False
     try:
         previous_line = int(previous.get("lineNumber") or 0)

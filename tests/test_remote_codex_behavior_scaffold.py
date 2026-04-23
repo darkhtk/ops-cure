@@ -346,6 +346,7 @@ def test_remote_codex_browser_and_agent_surface_round_trip(app_env) -> None:
             "Queue this after the in-progress turn.",
             "Queued follow-up accepted.",
         ]
+        assert all(item["lineNumber"] > 0 for item in synced_messages_response.json()["messages"])
 
         delete_response = client.delete(
             "/api/remote-codex/machines/machine-z/threads/thread-z",
