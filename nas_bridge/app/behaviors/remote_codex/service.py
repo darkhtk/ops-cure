@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 from typing import Any
 
 from ...schemas import (
@@ -32,6 +33,8 @@ from .state_service import (
     compact_text,
 )
 
+STALE_BROWSER_TASK_GRACE_SECONDS = 1800
+
 
 def normalize_thread_status(status: Any) -> str | None:
     raw_status = (
@@ -46,6 +49,14 @@ def normalize_thread_status(status: Any) -> str | None:
     if raw_status == "notLoaded":
         return "idle"
     return raw_status
+
+
+def ensure_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 class RemoteCodexBehaviorService:
@@ -298,6 +309,14 @@ class RemoteCodexBehaviorService:
             statuses=statuses,
             limit=limit,
         )
+        tasks = self._cleanup_stale_thread_tasks(
+            machine_id=machine_id,
+            thread_id=thread_id,
+            thread=thread,
+            tasks=tasks,
+            statuses=statuses,
+            limit=limit,
+        )
         return {
             "machine": machine,
             "thread": thread,
@@ -312,7 +331,172 @@ class RemoteCodexBehaviorService:
 
     def get_task(self, task_id: str) -> dict[str, Any]:
         task = self.remote_task_service.get_task(task_id)
+        thread = self.state_service.get_thread(task.machine_id, task.thread_id)
+        if thread is not None:
+            command = self._find_command_for_task(task.machine_id, task.thread_id, task.id)
+            if command is not None:
+                refreshed = self._maybe_cleanup_stale_task(
+                    task=task,
+                    command=command,
+                    thread=thread,
+                    latest_turn_id=self.state_service.get_latest_turn_id(task.machine_id, task.thread_id),
+                )
+                if refreshed is not None:
+                    task = refreshed
         return {"task": self._task_to_browser(task)}
+
+    def _find_command_for_task(self, machine_id: str, thread_id: str, task_id: str) -> dict[str, Any] | None:
+        commands = self.state_service.list_thread_commands(machine_id, thread_id, limit=200)
+        for command in commands:
+            if compact_text(command.get("taskId")) == task_id:
+                return command
+        return None
+
+    def _cleanup_stale_thread_tasks(
+        self,
+        *,
+        machine_id: str,
+        thread_id: str,
+        thread: dict[str, Any],
+        tasks: list[RemoteTaskSummaryResponse],
+        statuses: list[str] | None,
+        limit: int,
+    ) -> list[RemoteTaskSummaryResponse]:
+        if not tasks:
+            return tasks
+        commands = self.state_service.list_thread_commands(machine_id, thread_id, limit=200)
+        commands_by_task_id = {
+            compact_text(command.get("taskId")): command
+            for command in commands
+            if compact_text(command.get("taskId"))
+        }
+        latest_turn_id = self.state_service.get_latest_turn_id(machine_id, thread_id)
+        changed = False
+        refreshed: list[RemoteTaskSummaryResponse] = []
+        for task in tasks:
+            next_task = self._maybe_cleanup_stale_task(
+                task=task,
+                command=commands_by_task_id.get(task.id),
+                thread=thread,
+                latest_turn_id=latest_turn_id,
+            )
+            if next_task is not None:
+                refreshed.append(next_task)
+                if next_task.status != task.status or next_task.updated_at != task.updated_at:
+                    changed = True
+            else:
+                refreshed.append(task)
+        if not changed:
+            return tasks
+        return self.remote_task_service.list_tasks(
+            machine_id=machine_id,
+            thread_id=thread_id,
+            statuses=statuses,
+            limit=limit,
+        )
+
+    def _maybe_cleanup_stale_task(
+        self,
+        *,
+        task: RemoteTaskSummaryResponse,
+        command: dict[str, Any] | None,
+        thread: dict[str, Any],
+        latest_turn_id: str | None,
+    ) -> RemoteTaskSummaryResponse | None:
+        if task.origin_surface != "browser":
+            return None
+        if task.status not in {"claimed", "executing", "verifying"}:
+            return None
+
+        assignment = task.current_assignment
+        now = datetime.now(timezone.utc)
+        lease_expired = bool(
+            assignment is not None
+            and ensure_utc(assignment.lease_expires_at) is not None
+            and ensure_utc(assignment.lease_expires_at) <= now
+        )
+        updated_at = ensure_utc(task.updated_at) or now
+        age_seconds = max(0.0, (now - updated_at).total_seconds())
+        thread_status = normalize_thread_status(thread.get("status"))
+
+        if command is None:
+            if lease_expired and age_seconds >= STALE_BROWSER_TASK_GRACE_SECONDS:
+                cleaned = self.remote_task_service.settle_stale_task(
+                    task.id,
+                    final_status="failed",
+                    summary="Stale browser task cleanup: the task lost its command tracking before completion.",
+                    payload={"reason": "missing_command"},
+                )
+                self.state_service._publish(cleaned.machine_id, cleaned.thread_id, {"kind": "task", "task": self._task_to_browser(cleaned)})
+                return cleaned
+            return None
+
+        command_status = compact_text(command.get("status")).lower()
+        command_type = compact_text(command.get("type")).lower()
+        command_turn_id = compact_text(command.get("turnId")) or None
+        command_result = command.get("result") if isinstance(command.get("result"), dict) else {}
+        command_turn_status = compact_text(command_result.get("turnStatus")).lower()
+
+        if command_status == COMMAND_FAILED:
+            cleaned = self.remote_task_service.settle_stale_task(
+                task.id,
+                final_status="failed",
+                summary="Remote command failed before the browser task could finish.",
+                payload={"reason": "command_failed", "commandId": command.get("commandId")},
+            )
+            self.state_service._publish(cleaned.machine_id, cleaned.thread_id, {"kind": "task", "task": self._task_to_browser(cleaned)})
+            return cleaned
+
+        if command_type == TURN_START and command_status == COMMAND_COMPLETED:
+            if (command_turn_id and latest_turn_id and command_turn_id != latest_turn_id) or thread_status != "inProgress":
+                cleaned = self.remote_task_service.settle_stale_task(
+                    task.id,
+                    final_status="completed",
+                    summary="Turn request completed and the thread has already advanced past this queued task.",
+                    payload={
+                        "reason": "thread_advanced",
+                        "commandId": command.get("commandId"),
+                        "turnId": command_turn_id,
+                        "latestTurnId": latest_turn_id,
+                        "threadStatus": thread_status,
+                    },
+                )
+                self.state_service._publish(cleaned.machine_id, cleaned.thread_id, {"kind": "task", "task": self._task_to_browser(cleaned)})
+                return cleaned
+            if lease_expired and age_seconds >= STALE_BROWSER_TASK_GRACE_SECONDS and command_turn_status in {
+                "queued",
+                "inprogress",
+                "in_progress",
+                "running",
+            }:
+                cleaned = self.remote_task_service.settle_stale_task(
+                    task.id,
+                    final_status="failed",
+                    summary="Stale browser task cleanup: the turn stayed in progress after its tracking lease expired.",
+                    payload={
+                        "reason": "expired_in_progress",
+                        "commandId": command.get("commandId"),
+                        "turnId": command_turn_id,
+                        "turnStatus": command_turn_status,
+                    },
+                )
+                self.state_service._publish(cleaned.machine_id, cleaned.thread_id, {"kind": "task", "task": self._task_to_browser(cleaned)})
+                return cleaned
+
+        if lease_expired and age_seconds >= STALE_BROWSER_TASK_GRACE_SECONDS and command_status in {COMMAND_QUEUED, COMMAND_RUNNING}:
+            cleaned = self.remote_task_service.settle_stale_task(
+                task.id,
+                final_status="failed",
+                summary="Stale browser task cleanup: the queued command stopped progressing after its lease expired.",
+                payload={
+                    "reason": "expired_command",
+                    "commandId": command.get("commandId"),
+                    "commandStatus": command_status,
+                },
+            )
+            self.state_service._publish(cleaned.machine_id, cleaned.thread_id, {"kind": "task", "task": self._task_to_browser(cleaned)})
+            return cleaned
+        return None
 
     def claim_task(self, task_id: str, payload: RemoteTaskClaimRequest) -> dict[str, Any]:
         task = self.remote_task_service.claim_task(task_id, payload)

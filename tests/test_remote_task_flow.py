@@ -276,3 +276,44 @@ def test_remote_task_service_claim_next_prefers_priority_and_is_machine_scoped(a
     untouched = service.get_task(other_machine.id)
     assert untouched.status == "queued"
     assert untouched.owner_actor_id is None
+
+
+def test_remote_task_service_can_settle_stale_task_without_active_lease(app_env):
+    from datetime import timedelta
+
+    from app.schemas import RemoteTaskClaimRequest, RemoteTaskCreateRequest
+    from app.services.remote_task_service import RemoteTaskService, utcnow
+
+    service = RemoteTaskService()
+    created = service.create_task(
+        RemoteTaskCreateRequest(
+            machine_id="machine-f",
+            thread_id="thread-f",
+            objective="Old queued browser task cleanup.",
+            success_criteria={"browser": ["queue row disappears"]},
+            created_by="browser-user",
+        ),
+    )
+    claimed = service.claim_task(
+        created.id,
+        RemoteTaskClaimRequest(actor_id="codex-homedev", lease_seconds=90),
+    )
+
+    from app.db import session_scope
+    from app.models import RemoteTaskAssignmentModel
+
+    with session_scope() as db:
+        assignment = db.get(RemoteTaskAssignmentModel, claimed.current_assignment.id)
+        assignment.lease_expires_at = utcnow() - timedelta(minutes=5)
+        db.flush()
+
+    settled = service.settle_stale_task(
+        created.id,
+        final_status="failed",
+        summary="Stale browser task cleanup.",
+        payload={"reason": "unit_test"},
+    )
+    assert settled.status == "failed"
+    assert settled.current_assignment is None
+    assert settled.recent_evidence[0].kind == "error"
+    assert settled.recent_evidence[0].payload["reason"] == "unit_test"

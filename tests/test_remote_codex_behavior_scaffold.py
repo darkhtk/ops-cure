@@ -238,10 +238,11 @@ def test_remote_codex_browser_and_agent_surface_round_trip(app_env) -> None:
         assert task_response.status_code == 200
         tasks = task_response.json()["tasks"]
         assert len(tasks) == 2
-        assert tasks[0]["taskId"] == queued_followup_payload["task"]["taskId"]
-        assert tasks[1]["taskId"] == turn_payload["task"]["taskId"]
-        assert tasks[0]["currentClaim"] is None
-        assert tasks[1]["currentClaim"]["actorId"] == "machine-z"
+        tasks_by_id = {task["taskId"]: task for task in tasks}
+        assert tasks_by_id[queued_followup_payload["task"]["taskId"]]["status"] == "queued"
+        assert tasks_by_id[queued_followup_payload["task"]["taskId"]]["currentClaim"] is None
+        assert tasks_by_id[turn_payload["task"]["taskId"]]["status"] == "completed"
+        assert tasks_by_id[turn_payload["task"]["taskId"]]["currentClaim"] is None
 
         commands_response = client.get(
             "/api/remote-codex/machines/machine-z/threads/thread-z/commands",
@@ -574,3 +575,117 @@ def test_remote_codex_keeps_only_recent_message_window_in_bridge_storage(app_env
         assert len(payload["messages"]) == 200
         assert payload["messages"][0]["lineNumber"] == 61
         assert payload["messages"][-1]["lineNumber"] == 260
+
+
+def test_remote_codex_thread_tasks_cleanup_superseded_executing_work(app_env) -> None:
+    from app.behaviors.remote_codex.service import RemoteCodexBehaviorService
+    from app.schemas import RemoteTaskClaimNextRequest
+
+    service = RemoteCodexBehaviorService()
+    now = datetime.now(timezone.utc).isoformat()
+
+    machine_payload = {
+        "machineId": "machine-stale",
+        "displayName": "Machine Stale",
+        "source": "agent",
+        "activeTransport": "standalone-app-server",
+        "runtimeMode": "standalone-app-server",
+        "runtimeAvailable": True,
+        "capabilities": {"liveControl": True},
+        "lastSeenAt": now,
+        "lastSyncAt": now,
+    }
+    thread_payload = {
+        "id": "thread-stale",
+        "title": "Stale queue cleanup",
+        "cwd": "C:/repo",
+        "rolloutPath": "C:/repo/.codex/rollout.jsonl",
+        "updatedAtMs": 1700000000000,
+        "createdAtMs": 1699999999000,
+        "source": "app-server",
+        "modelProvider": "openai",
+        "model": "gpt-5.4",
+        "reasoningEffort": "medium",
+        "cliVersion": "1.0.0",
+        "firstUserMessage": "first",
+        "status": {"type": "active"},
+    }
+
+    service.apply_agent_sync(machine=machine_payload, threads=[thread_payload], snapshots=[])
+
+    first = service.enqueue_turn(
+        machine_id="machine-stale",
+        thread_id="thread-stale",
+        prompt="old task",
+        requested_by={"authMethod": "token", "email": "user@example.com"},
+    )
+    first_task_id = first["task"]["taskId"]
+    service.claim_next_machine_task(
+        "machine-stale",
+        RemoteTaskClaimNextRequest(actor_id="machine-stale", lease_seconds=90),
+    )
+    service.agent_add_evidence(
+        first_task_id,
+        actor_id="machine-stale",
+        kind="command_execution",
+        summary="Submitted first command.",
+        payload={"kind": "command_execution"},
+    )
+    service.agent_heartbeat_task(
+        first_task_id,
+        actor_id="machine-stale",
+        phase="executing",
+        summary="First task is executing.",
+        commands_run_count=1,
+    )
+    first_command = service.claim_next_command(machine_id="machine-stale", worker_id="worker-a")["command"]
+    service.record_command_result(
+        first_command["commandId"],
+        worker_id="worker-a",
+        status="completed",
+        result={"accepted": True, "turnId": "turn-1", "turnStatus": "inProgress"},
+    )
+
+    second = service.enqueue_turn(
+        machine_id="machine-stale",
+        thread_id="thread-stale",
+        prompt="new task",
+        requested_by={"authMethod": "token", "email": "user@example.com"},
+    )
+    second_task_id = second["task"]["taskId"]
+    service.claim_next_machine_task(
+        "machine-stale",
+        RemoteTaskClaimNextRequest(actor_id="machine-stale", lease_seconds=90),
+    )
+    service.agent_add_evidence(
+        second_task_id,
+        actor_id="machine-stale",
+        kind="command_execution",
+        summary="Submitted second command.",
+        payload={"kind": "command_execution"},
+    )
+    service.agent_heartbeat_task(
+        second_task_id,
+        actor_id="machine-stale",
+        phase="executing",
+        summary="Second task is executing.",
+        commands_run_count=1,
+    )
+    second_command = service.claim_next_command(machine_id="machine-stale", worker_id="worker-b")["command"]
+    service.record_command_result(
+        second_command["commandId"],
+        worker_id="worker-b",
+        status="completed",
+        result={"accepted": True, "turnId": "turn-2", "turnStatus": "inProgress"},
+    )
+
+    refreshed_thread = dict(thread_payload)
+    refreshed_thread["updatedAtMs"] = 1700000005000
+    refreshed_thread["status"] = {"type": "active"}
+    service.apply_agent_sync(machine=machine_payload, threads=[refreshed_thread], snapshots=[])
+
+    tasks_payload = service.list_thread_tasks("machine-stale", "thread-stale")
+    tasks_by_id = {task["taskId"]: task for task in tasks_payload["tasks"]}
+
+    assert tasks_by_id[first_task_id]["status"] == "completed"
+    assert tasks_by_id[second_task_id]["status"] in {"claimed", "executing"}

@@ -434,6 +434,78 @@ class RemoteTaskService:
             db.refresh(row)
             return self._to_summary(row)
 
+    def settle_stale_task(
+        self,
+        task_id: str,
+        *,
+        final_status: str,
+        summary: str,
+        payload: dict | None = None,
+    ) -> RemoteTaskSummaryResponse:
+        if final_status not in {"completed", "failed", "interrupted"}:
+            raise ValueError(f"Unsupported stale task status: {final_status}")
+        with session_scope() as db:
+            row = self._require_task(db, task_id)
+            if row.status in {"completed", "failed", "interrupted"}:
+                return self._to_summary(row)
+
+            now = utcnow()
+            assignment = self._current_assignment(row)
+            actor_id = (
+                assignment.actor_id
+                if assignment is not None
+                else row.owner_actor_id
+                or "bridge-service"
+            )
+            lease = self.presence_service.get_current_lease(
+                resource_kind=REMOTE_TASK_RESOURCE_KIND,
+                resource_id=row.id,
+                db=db,
+            )
+            if (
+                lease is not None
+                and assignment is not None
+                and lease.holder_actor_id == assignment.actor_id
+                and lease.lease_token == assignment.lease_token
+            ):
+                self.presence_service.release_resource_lease(
+                    lease_id=lease.lease_id,
+                    payload=ResourceLeaseReleaseRequest(
+                        holder_actor_id=assignment.actor_id,
+                        lease_token=assignment.lease_token,
+                        status="released",
+                    ),
+                    db=db,
+                )
+
+            if assignment is not None and assignment.released_at is None:
+                assignment.status = final_status
+                assignment.released_at = now
+
+            evidence_kind = "result" if final_status == "completed" else "error"
+            row.evidence_items.append(
+                RemoteTaskEvidenceModel(
+                    task_id=row.id,
+                    actor_id=actor_id,
+                    kind=evidence_kind,
+                    summary=summary,
+                    payload_json=json.dumps(
+                        {
+                            "kind": "stale_task_cleanup",
+                            "finalStatus": final_status,
+                            **(payload or {}),
+                        },
+                        ensure_ascii=False,
+                    ),
+                ),
+            )
+            row.status = final_status
+            row.owner_actor_id = actor_id
+            row.updated_at = now
+            db.flush()
+            db.refresh(row)
+            return self._to_summary(row)
+
     def _require_task(self, db, task_id: str) -> RemoteTaskModel:
         row = db.scalar(
             select(RemoteTaskModel)
