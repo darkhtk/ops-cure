@@ -19,6 +19,9 @@ DEFAULT_MAX_THREADS = 60
 DEFAULT_MESSAGE_LIMIT = 200
 DEFAULT_TURN_MESSAGE_LOOKBACK = 24
 DEFAULT_RECENT_SIGNATURE_WINDOW = 80
+REMOTE_CODEX_PENDING_ENTRY_FLAG = "remote_codex_pending"
+REMOTE_CODEX_PENDING_COMMAND_ID_KEY = "commandId"
+REMOTE_CODEX_PENDING_PROMPT_TTL_SECONDS = 6 * 60 * 60
 
 
 def compact_text(value: Any, fallback: str = "") -> str:
@@ -398,6 +401,70 @@ def normalize_rollout_message(entry: dict[str, Any], *, line_number: int) -> dic
     }
 
 
+def _rollout_entry_text(entry: dict[str, Any]) -> str:
+    message = normalize_rollout_message(entry, line_number=0)
+    if message is None:
+        return ""
+    return compact_text(message.get("text"))
+
+
+def _is_pending_remote_codex_entry(entry: dict[str, Any]) -> bool:
+    payload = entry.get("payload") if isinstance(entry.get("payload"), dict) else {}
+    return bool(payload.get(REMOTE_CODEX_PENDING_ENTRY_FLAG))
+
+
+def _reconcile_pending_rollout_entries(lines: list[str]) -> tuple[list[str], bool]:
+    now = datetime.now(timezone.utc)
+    pending_by_text: dict[str, list[int]] = {}
+    drop_indices: set[int] = set()
+    parsed_entries: list[dict[str, Any] | None] = []
+
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped:
+            parsed_entries.append(None)
+            continue
+        try:
+            entry = json.loads(stripped)
+        except json.JSONDecodeError:
+            parsed_entries.append(None)
+            continue
+        parsed_entries.append(entry)
+
+        text = _rollout_entry_text(entry)
+        if not text:
+            continue
+
+        if _is_pending_remote_codex_entry(entry):
+            timestamp_text = compact_text(entry.get("timestamp"))
+            if timestamp_text:
+                try:
+                    created_at = datetime.fromisoformat(timestamp_text.replace("Z", "+00:00"))
+                except ValueError:
+                    created_at = None
+            else:
+                created_at = None
+            if created_at is not None:
+                age_seconds = max(0.0, (now - created_at).total_seconds())
+                if age_seconds >= REMOTE_CODEX_PENDING_PROMPT_TTL_SECONDS:
+                    drop_indices.add(index)
+                    continue
+            pending_by_text.setdefault(text, []).append(index)
+            continue
+
+        message = normalize_rollout_message(entry, line_number=0)
+        if message is None or compact_text(message.get("role")) != "user":
+            continue
+        pending_indices = pending_by_text.get(text)
+        if pending_indices:
+            drop_indices.add(pending_indices.pop(0))
+
+    if not drop_indices:
+        return lines, False
+    reconciled = [line for index, line in enumerate(lines) if index not in drop_indices]
+    return reconciled, True
+
+
 def merge_adjacent_message(previous: dict[str, Any] | None, current: dict[str, Any]) -> bool:
     if previous is None:
         return False
@@ -576,6 +643,60 @@ class LocalCodexBackend:
             "agentRole": None,
         }
 
+    def _resolve_rollout_path_for_thread(self, thread_id: str) -> Path | None:
+        thread = self.get_thread_by_id(thread_id)
+        if thread is None:
+            return None
+        rollout_path = Path(normalize_windows_path(thread.get("rolloutPath"))).expanduser()
+        if not str(rollout_path):
+            return None
+        return rollout_path
+
+    def materialize_pending_browser_prompt(
+        self,
+        *,
+        thread_id: str,
+        command_id: str,
+        prompt: str,
+    ) -> bool:
+        rollout_path = self._resolve_rollout_path_for_thread(thread_id)
+        if rollout_path is None:
+            return False
+        rollout_path.parent.mkdir(parents=True, exist_ok=True)
+
+        existing_lines: list[str] = []
+        if rollout_path.exists():
+            existing_lines = rollout_path.read_text(encoding="utf-8", errors="replace").splitlines()
+            for line in existing_lines:
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                try:
+                    entry = json.loads(stripped)
+                except json.JSONDecodeError:
+                    continue
+                if not _is_pending_remote_codex_entry(entry):
+                    continue
+                payload = entry.get("payload") if isinstance(entry.get("payload"), dict) else {}
+                if compact_text(payload.get(REMOTE_CODEX_PENDING_COMMAND_ID_KEY)) == compact_text(command_id):
+                    return False
+
+        entry = {
+            "type": "event_msg",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "payload": {
+                "type": "user_message",
+                "message": prompt,
+                REMOTE_CODEX_PENDING_ENTRY_FLAG: True,
+                REMOTE_CODEX_PENDING_COMMAND_ID_KEY: command_id,
+                "threadId": thread_id,
+            },
+        }
+        with rollout_path.open("a", encoding="utf-8", newline="\n") as handle:
+            handle.write(json.dumps(entry, ensure_ascii=False))
+            handle.write("\n")
+        return True
+
     def _runtime_list_threads(self, *, limit: int) -> list[dict[str, Any]]:
         if self.app_server_client is None:
             return []
@@ -680,6 +801,13 @@ class LocalCodexBackend:
             }
         raw = rollout_path.read_text(encoding="utf-8", errors="replace")
         lines = raw.splitlines()
+        reconciled_lines, changed = _reconcile_pending_rollout_entries(lines)
+        if changed:
+            rollout_path.write_text(
+                "\n".join(reconciled_lines) + ("\n" if reconciled_lines else ""),
+                encoding="utf-8",
+            )
+            lines = reconciled_lines
         messages: list[dict[str, Any]] = []
         for index, line in enumerate(lines, start=1):
             stripped = line.strip()
@@ -835,6 +963,12 @@ class RemoteCodexDeviceAgent:
                 if not prompt:
                     raise RuntimeError("Turn prompt is empty.")
                 response = self.backend.start_turn(thread_id, prompt)
+                if command_id:
+                    self.backend.materialize_pending_browser_prompt(
+                        thread_id=thread_id,
+                        command_id=command_id,
+                        prompt=prompt,
+                    )
                 result = {
                     "accepted": True,
                     "turnId": extract_turn_id(response),

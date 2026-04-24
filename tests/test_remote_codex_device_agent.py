@@ -22,6 +22,7 @@ class FakeBackend:
     health: dict[str, object]
     read_limits: list[tuple[str, int]] = field(default_factory=list)
     start_turn_calls: list[tuple[str, str]] = field(default_factory=list)
+    materialized_prompts: list[tuple[str, str, str]] = field(default_factory=list)
     interrupt_calls: list[tuple[str, str]] = field(default_factory=list)
     delete_calls: list[str] = field(default_factory=list)
 
@@ -50,6 +51,10 @@ class FakeBackend:
                 "status": "inProgress",
             }
         }
+
+    def materialize_pending_browser_prompt(self, *, thread_id: str, command_id: str, prompt: str) -> bool:
+        self.materialized_prompts.append((thread_id, command_id, prompt))
+        return True
 
     def interrupt_turn(self, thread_id: str, turn_id: str) -> dict:
         self.interrupt_calls.append((thread_id, turn_id))
@@ -436,6 +441,100 @@ def test_local_backend_read_thread_messages_prefers_rollout_transcript_when_roll
     ]
 
 
+def test_local_backend_materializes_pending_browser_prompt_into_rollout() -> None:
+    with TemporaryDirectory() as temp_dir:
+        rollout_path = Path(temp_dir) / "rollout.jsonl"
+        rollout_path.write_text(
+            '{"type":"event_msg","payload":{"type":"agent_message","message":"existing answer"}}\n',
+            encoding="utf-8",
+        )
+        thread = {
+            "id": "thread-1",
+            "title": "Thread 1",
+            "cwd": r"C:\\Users\\darkh\\Projects\\ops-cure",
+            "rolloutPath": str(rollout_path),
+            "updatedAtMs": 1700000000000,
+            "createdAtMs": 1699999999000,
+            "source": "app-server",
+            "modelProvider": "openai",
+            "model": "gpt-5.4",
+            "reasoningEffort": "medium",
+            "cliVersion": "1.0.0",
+            "firstUserMessage": "existing answer",
+            "status": {"type": "inProgress"},
+            "agentNickname": None,
+            "agentRole": None,
+        }
+        backend = LocalCodexBackend(
+            machine_id="homedev",
+            display_name="Home Dev",
+            app_server_client=FakeAppServerClient(payload={"thread": {"id": "thread-1", "turns": []}}),
+            codex_home=temp_dir,
+        )
+        backend.get_thread_by_id = lambda thread_id: dict(thread)
+
+        created = backend.materialize_pending_browser_prompt(
+            thread_id="thread-1",
+            command_id="command-1",
+            prompt="[TEST]hello",
+        )
+        duplicate = backend.materialize_pending_browser_prompt(
+            thread_id="thread-1",
+            command_id="command-1",
+            prompt="[TEST]hello",
+        )
+        snapshot = backend.read_thread_messages("thread-1", limit=20)
+
+    assert created is True
+    assert duplicate is False
+    assert snapshot is not None
+    assert [message["text"] for message in snapshot["messages"]] == [
+        "existing answer",
+        "[TEST]hello",
+    ]
+
+
+def test_local_backend_reconciles_pending_browser_prompt_after_actual_user_message_arrives() -> None:
+    with TemporaryDirectory() as temp_dir:
+        rollout_path = Path(temp_dir) / "rollout.jsonl"
+        rollout_path.write_text(
+            '{"type":"event_msg","timestamp":"2026-04-24T00:00:00+00:00","payload":{"type":"user_message","message":"[TEST]hello","remote_codex_pending":true,"commandId":"command-1","threadId":"thread-1"}}\n'
+            '{"type":"event_msg","timestamp":"2026-04-24T00:00:10+00:00","payload":{"type":"user_message","message":"[TEST]hello"}}\n',
+            encoding="utf-8",
+        )
+        thread = {
+            "id": "thread-1",
+            "title": "Thread 1",
+            "cwd": r"C:\\Users\\darkh\\Projects\\ops-cure",
+            "rolloutPath": str(rollout_path),
+            "updatedAtMs": 1700000000000,
+            "createdAtMs": 1699999999000,
+            "source": "app-server",
+            "modelProvider": "openai",
+            "model": "gpt-5.4",
+            "reasoningEffort": "medium",
+            "cliVersion": "1.0.0",
+            "firstUserMessage": "[TEST]hello",
+            "status": {"type": "inProgress"},
+            "agentNickname": None,
+            "agentRole": None,
+        }
+        backend = LocalCodexBackend(
+            machine_id="homedev",
+            display_name="Home Dev",
+            app_server_client=FakeAppServerClient(payload={"thread": {"id": "thread-1", "turns": []}}),
+            codex_home=temp_dir,
+        )
+        backend.get_thread_by_id = lambda thread_id: dict(thread)
+
+        snapshot = backend.read_thread_messages("thread-1", limit=20)
+        rewritten = rollout_path.read_text(encoding="utf-8")
+
+    assert snapshot is not None
+    assert [message["text"] for message in snapshot["messages"]] == ["[TEST]hello"]
+    assert '"remote_codex_pending":true' not in rewritten
+
+
 def _sample_health(*, live_control: bool = True) -> dict[str, object]:
     return {
         "activeTransport": "standalone-app-server" if live_control else "filesystem-storage",
@@ -575,6 +674,7 @@ def test_remote_codex_device_agent_executes_turn_start_commands_and_reports_resu
 
     assert worked is True
     assert backend.start_turn_calls == [("thread-1", "Add a real device sync loop.")]
+    assert backend.materialized_prompts == [("thread-1", "command-1", "Add a real device sync loop.")]
     assert [item["phase"] for item in bridge.heartbeat_calls] == ["running", "executing"]
     assert bridge.evidence_calls[0]["payload"]["turnId"] == "turn-1"
     assert bridge.command_result_calls[0]["status"] == "completed"
