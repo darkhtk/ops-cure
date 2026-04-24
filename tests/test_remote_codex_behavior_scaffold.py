@@ -225,6 +225,13 @@ def test_remote_codex_browser_and_agent_surface_round_trip(app_env) -> None:
         assert result_response.status_code == 200
         assert result_response.json()["command"]["status"] == "completed"
 
+        completed_task_response = client.get(
+            f"/api/remote-codex/tasks/{turn_payload['task']['taskId']}",
+            headers={"Authorization": "Bearer test-token"},
+        )
+        assert completed_task_response.status_code == 200
+        assert completed_task_response.json()["task"]["status"] == "completed"
+
         queued_followup_response = client.post(
             "/api/remote-codex/machines/machine-z/threads/thread-z/turns",
             headers={"Authorization": "Bearer test-token"},
@@ -984,4 +991,4 @@ def test_remote_codex_thread_tasks_cleanup_superseded_executing_work(app_env) ->
     tasks_by_id = {task["taskId"]: task for task in tasks_payload["tasks"]}
 
     assert tasks_by_id[first_task_id]["status"] == "completed"
-    assert tasks_by_id[second_task_id]["status"] in {"claimed", "executing"}
+    assert tasks_by_id[second_task_id]["status"] == "completed"

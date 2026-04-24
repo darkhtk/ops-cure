@@ -612,15 +612,20 @@ class RemoteCodexBehaviorService:
         normalized = compact_text(status).lower()
         if normalized == COMMAND_COMPLETED:
             command = self.state_service.complete_command(command_id, worker_id=worker_id, result=result)
-            if command.get("taskId") and command["type"] == TURN_INTERRUPT:
+            if command.get("taskId") and command["type"] in {TURN_START, TURN_INTERRUPT}:
                 task = self.remote_task_service.get_task(command["taskId"])
                 if task.current_assignment is not None:
+                    summary = (
+                        "Turn request accepted by the local Codex runtime."
+                        if command["type"] == TURN_START
+                        else "Interrupt request completed."
+                    )
                     self.complete_task(
                         command["taskId"],
                         RemoteTaskCompleteRequest(
                             actor_id=command["machineId"],
                             lease_token=task.current_assignment.lease_token,
-                            summary="Interrupt request completed.",
+                            summary=summary,
                         ),
                     )
         else:
