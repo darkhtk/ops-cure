@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
 import socket
 import sqlite3
+import subprocess
 from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -477,6 +479,8 @@ class LocalCodexBackend:
         app_server_client: AppServerThreadClient | None = None,
         codex_home: str | None = None,
         runtime_descriptor: dict[str, Any] | None = None,
+        desktop_submit_thread_id: str | None = None,
+        desktop_prompt_submitter: DesktopPromptSubmitter | None = None,
     ) -> None:
         self.machine_id = machine_id
         self.display_name = display_name
@@ -485,6 +489,8 @@ class LocalCodexBackend:
         self.state_db_path = self.codex_home / "state_5.sqlite"
         self.pending_rollout_registry_path = self.codex_home / "remote_codex_pending_rollout.json"
         self.runtime_descriptor = runtime_descriptor or {}
+        self.desktop_submit_thread_id = compact_text(desktop_submit_thread_id) or None
+        self.desktop_prompt_submitter = desktop_prompt_submitter
         self.last_runtime_error: str | None = None
         self.runtime_available = False
         self.active_transport = "filesystem-storage"
@@ -796,6 +802,21 @@ class LocalCodexBackend:
         self._touch_thread_updated_at(thread_id, now_ms=int(now.timestamp() * 1000))
         return True
 
+    def can_submit_prompt_via_desktop_ui(self, thread_id: str) -> bool:
+        return bool(
+            self.desktop_prompt_submitter is not None
+            and self.desktop_submit_thread_id
+            and compact_text(thread_id) == compact_text(self.desktop_submit_thread_id)
+        )
+
+    def submit_prompt_via_desktop_ui(self, *, thread_id: str, prompt: str) -> bool:
+        if not self.can_submit_prompt_via_desktop_ui(thread_id):
+            return False
+        submitter = self.desktop_prompt_submitter
+        if submitter is None:
+            return False
+        return bool(submitter.submit_prompt(prompt))
+
     def _runtime_list_threads(self, *, limit: int) -> list[dict[str, Any]]:
         if self.app_server_client is None:
             return []
@@ -1022,6 +1043,8 @@ class RemoteCodexDeviceAgent:
                         continue
                     if compact_text(command.get("status")).lower() not in {"queued", "running"}:
                         continue
+                    if self.backend.can_submit_prompt_via_desktop_ui(thread_id):
+                        continue
                     prompt = compact_text(command.get("prompt"))
                     command_id = compact_text(command.get("commandId"))
                     if not prompt or not command_id:
@@ -1097,36 +1120,57 @@ class RemoteCodexDeviceAgent:
                 prompt = compact_text(command.get("prompt"))
                 if not prompt:
                     raise RuntimeError("Turn prompt is empty.")
-                if command_id:
-                    self.backend.materialize_pending_browser_prompt(
-                        thread_id=thread_id,
-                        command_id=command_id,
-                        prompt=prompt,
-                    )
-                response = self.backend.start_turn(thread_id, prompt)
-                result = {
-                    "accepted": True,
-                    "turnId": extract_turn_id(response),
-                    "turnStatus": extract_turn_status(response),
-                }
+                submitted_via_desktop_ui = self.backend.submit_prompt_via_desktop_ui(
+                    thread_id=thread_id,
+                    prompt=prompt,
+                )
+                if submitted_via_desktop_ui:
+                    result = {
+                        "accepted": True,
+                        "turnId": None,
+                        "turnStatus": "queued",
+                        "submissionMode": "desktop-ui",
+                    }
+                else:
+                    if command_id:
+                        self.backend.materialize_pending_browser_prompt(
+                            thread_id=thread_id,
+                            command_id=command_id,
+                            prompt=prompt,
+                        )
+                    response = self.backend.start_turn(thread_id, prompt)
+                    result = {
+                        "accepted": True,
+                        "turnId": extract_turn_id(response),
+                        "turnStatus": extract_turn_status(response),
+                    }
                 if task_id:
                     self.bridge.add_remote_codex_agent_task_evidence(
                         task_id=task_id,
                         actor_id=self.machine_id,
                         kind="command_execution",
-                        summary="Submitted a live turn command to the local Codex runtime.",
+                        summary=(
+                            "Submitted the request through the Codex desktop UI."
+                            if submitted_via_desktop_ui
+                            else "Submitted a live turn command to the local Codex runtime."
+                        ),
                         payload={
                             "commandId": command_id,
                             "turnId": result["turnId"],
                             "turnStatus": result["turnStatus"],
                             "type": command_type,
+                            "submissionMode": result.get("submissionMode"),
                         },
                     )
                     self.bridge.heartbeat_remote_codex_agent_task(
                         task_id=task_id,
                         actor_id=self.machine_id,
                         phase="executing",
-                        summary="The local Codex runtime accepted the request and is updating the thread.",
+                        summary=(
+                            "The Codex desktop UI accepted the request and queued it in the active thread."
+                            if submitted_via_desktop_ui
+                            else "The local Codex runtime accepted the request and is updating the thread."
+                        ),
                         commands_run_count=1,
                     )
             elif command_type == "turn.interrupt":
@@ -1218,3 +1262,124 @@ class RemoteCodexDeviceAgent:
         if not processed_command:
             self.perform_sync(force=False)
         return activity or processed_command
+
+
+class DesktopPromptSubmitter(Protocol):
+    def submit_prompt(self, prompt: str) -> bool: ...
+
+
+class WindowsCodexDesktopPromptSubmitter:
+    def submit_prompt(self, prompt: str) -> bool:
+        if os.name != "nt":
+            return False
+        normalized = str(prompt or "").strip()
+        if not normalized:
+            return False
+        encoded = base64.b64encode(normalized.encode("utf-8")).decode("ascii")
+        script = f"""
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
+Add-Type @"
+using System;
+using System.Text;
+using System.Runtime.InteropServices;
+public class CodexWindowInterop {{
+  public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);
+  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+}}
+"@
+$prompt = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{encoded}'))
+$matches = New-Object System.Collections.Generic.List[object]
+[CodexWindowInterop]::EnumWindows({{
+  param($hWnd, $lParam)
+  if (-not [CodexWindowInterop]::IsWindowVisible($hWnd)) {{ return $true }}
+  $sb = New-Object System.Text.StringBuilder 512
+  [void][CodexWindowInterop]::GetWindowText($hWnd, $sb, $sb.Capacity)
+  $title = $sb.ToString()
+  if ([string]::IsNullOrWhiteSpace($title)) {{ return $true }}
+  $processId = [uint32]0
+  [void][CodexWindowInterop]::GetWindowThreadProcessId($hWnd, [ref]$processId)
+  try {{ $process = Get-Process -Id $processId -ErrorAction Stop }} catch {{ return $true }}
+  if ($process.ProcessName -eq 'Codex' -or $title -like '*Codex*') {{
+    $matches.Add([pscustomobject]@{{ Handle = $hWnd; Pid = [int]$processId; Title = $title }}) | Out-Null
+  }}
+  return $true
+}}, [IntPtr]::Zero) | Out-Null
+if ($matches.Count -eq 0) {{ throw 'codex_window_not_found' }}
+$target = $matches[0]
+[CodexWindowInterop]::ShowWindow($target.Handle, 5) | Out-Null
+Start-Sleep -Milliseconds 50
+[CodexWindowInterop]::SetForegroundWindow($target.Handle) | Out-Null
+$ws = New-Object -ComObject WScript.Shell
+$null = $ws.AppActivate($target.Pid)
+Start-Sleep -Milliseconds 150
+$focused = [System.Windows.Automation.AutomationElement]::FocusedElement
+$editor = $null
+if ($focused -and $focused.Current.ProcessId -eq $target.Pid -and $focused.Current.ClassName -like 'ProseMirror*') {{
+  $editor = $focused
+}}
+if (-not $editor) {{
+  $root = [System.Windows.Automation.AutomationElement]::RootElement
+  $cond = New-Object System.Windows.Automation.PropertyCondition(
+    [System.Windows.Automation.AutomationElement]::ProcessIdProperty,
+    [int]$target.Pid
+  )
+  $windows = $root.FindAll([System.Windows.Automation.TreeScope]::Children, $cond)
+  for ($wi = 0; $wi -lt $windows.Count -and -not $editor; $wi++) {{
+    $desc = $windows.Item($wi).FindAll(
+      [System.Windows.Automation.TreeScope]::Descendants,
+      [System.Windows.Automation.Condition]::TrueCondition
+    )
+    for ($i = 0; $i -lt $desc.Count; $i++) {{
+      $candidate = $desc.Item($i)
+      if ($candidate.Current.ClassName -like 'ProseMirror*') {{
+        $editor = $candidate
+        break
+      }}
+    }}
+  }}
+}}
+if (-not $editor) {{ throw 'codex_composer_not_found' }}
+$editor.SetFocus()
+Start-Sleep -Milliseconds 100
+$hadClipboard = $false
+$oldClipboard = $null
+try {{
+  $oldClipboard = Get-Clipboard -Raw -ErrorAction Stop
+  $hadClipboard = $true
+}} catch {{}}
+try {{
+  Set-Clipboard -Value $prompt
+  Start-Sleep -Milliseconds 50
+  $ws.SendKeys('^v')
+  Start-Sleep -Milliseconds 120
+  $ws.SendKeys('~')
+  Start-Sleep -Milliseconds 180
+  Write-Output 'submitted'
+}} finally {{
+  if ($hadClipboard) {{
+    Set-Clipboard -Value $oldClipboard
+  }}
+}}
+"""
+        completed = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                script,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        return "submitted" in completed.stdout

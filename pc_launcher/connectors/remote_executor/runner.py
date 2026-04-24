@@ -20,7 +20,7 @@ try:
     )
     from ...process_io import configure_utf8_stdio
     from .bridge import BridgeRemoteExecutorClient
-    from .device_agent import LocalCodexBackend, RemoteCodexDeviceAgent, compact_text
+    from .device_agent import LocalCodexBackend, RemoteCodexDeviceAgent, WindowsCodexDesktopPromptSubmitter, compact_text
     from .runtime import (
         CodexCliRemoteExecutorRuntime,
         CodexCurrentThreadRemoteExecutorRuntime,
@@ -38,7 +38,7 @@ except ImportError:  # pragma: no cover - script mode support
     )
     from pc_launcher.process_io import configure_utf8_stdio
     from pc_launcher.connectors.remote_executor.bridge import BridgeRemoteExecutorClient
-    from pc_launcher.connectors.remote_executor.device_agent import LocalCodexBackend, RemoteCodexDeviceAgent, compact_text
+    from pc_launcher.connectors.remote_executor.device_agent import LocalCodexBackend, RemoteCodexDeviceAgent, WindowsCodexDesktopPromptSubmitter, compact_text
     from pc_launcher.connectors.remote_executor.runtime import (
         CodexCliRemoteExecutorRuntime,
         CodexCurrentThreadRemoteExecutorRuntime,
@@ -195,8 +195,13 @@ def build_device_agent(
     default_workdir: str | None,
 ) -> RemoteCodexDeviceAgent:
     live_control_client: CodexAppServerProcessClient | None
+    desktop_prompt_submitter = None
+    desktop_submit_thread_id = None
     if isinstance(runtime, CodexCurrentThreadRemoteExecutorRuntime):
         live_control_client = runtime.client  # type: ignore[assignment]
+        desktop_submit_thread_id = compact_text(config.codex_thread_id)
+        if os.name == "nt" and compact_text(os.getenv("REMOTE_EXECUTOR_DISABLE_DESKTOP_UI")).lower() not in {"1", "true", "yes"}:
+            desktop_prompt_submitter = WindowsCodexDesktopPromptSubmitter()
     else:
         live_control_client = build_live_control_client(cwd=config.workdir or default_workdir)
 
@@ -204,6 +209,8 @@ def build_device_agent(
         machine_id=config.machine_id,
         display_name=os.getenv("REMOTE_EXECUTOR_MACHINE_DISPLAY_NAME") or socket.gethostname(),
         app_server_client=live_control_client,
+        desktop_submit_thread_id=desktop_submit_thread_id,
+        desktop_prompt_submitter=desktop_prompt_submitter,
         runtime_descriptor={
             "runtimeMode": "standalone-app-server",
             "runtimeBin": getattr(getattr(live_control_client, "config", None), "executable", None),

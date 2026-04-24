@@ -26,6 +26,9 @@ class FakeBackend:
     read_limits: list[tuple[str, int]] = field(default_factory=list)
     start_turn_calls: list[tuple[str, str]] = field(default_factory=list)
     materialized_prompts: list[tuple[str, str, str]] = field(default_factory=list)
+    desktop_ui_submit_calls: list[tuple[str, str]] = field(default_factory=list)
+    desktop_ui_enabled_threads: set[str] = field(default_factory=set)
+    desktop_ui_submit_result: bool = True
     interrupt_calls: list[tuple[str, str]] = field(default_factory=list)
     delete_calls: list[str] = field(default_factory=list)
     actions: list[str] = field(default_factory=list)
@@ -61,6 +64,16 @@ class FakeBackend:
         self.actions.append("materialize")
         self.materialized_prompts.append((thread_id, command_id, prompt))
         return True
+
+    def can_submit_prompt_via_desktop_ui(self, thread_id: str) -> bool:
+        return thread_id in self.desktop_ui_enabled_threads
+
+    def submit_prompt_via_desktop_ui(self, *, thread_id: str, prompt: str) -> bool:
+        if not self.can_submit_prompt_via_desktop_ui(thread_id):
+            return False
+        self.actions.append("desktop_submit")
+        self.desktop_ui_submit_calls.append((thread_id, prompt))
+        return self.desktop_ui_submit_result
 
     def interrupt_turn(self, thread_id: str, turn_id: str) -> dict:
         self.interrupt_calls.append((thread_id, turn_id))
@@ -818,6 +831,83 @@ def test_remote_codex_device_agent_sync_materializes_pending_browser_prompt_befo
     assert changed is True
     assert backend.materialized_prompts == [("thread-1", "queued-command-1", "[TEST]queued prompt")]
     assert bridge.sync_calls
+
+
+def test_remote_codex_device_agent_sync_skips_rollout_materialization_when_desktop_ui_submission_is_available() -> None:
+    backend = FakeBackend(
+        threads=[_sample_thread()],
+        snapshots={"thread-1": _sample_snapshot()},
+        health=_sample_health(),
+        desktop_ui_enabled_threads={"thread-1"},
+    )
+    bridge = FakeBridge(
+        thread_commands_by_thread={
+            "thread-1": [
+                {
+                    "commandId": "queued-command-1",
+                    "type": "turn.start",
+                    "status": "queued",
+                    "prompt": "[TEST]queued prompt",
+                }
+            ]
+        }
+    )
+    agent = RemoteCodexDeviceAgent(
+        bridge=bridge,
+        backend=backend,
+        machine_id="homedev",
+        display_name="Home Dev",
+        worker_id="worker-1",
+    )
+
+    changed = agent.perform_sync(force=False)
+
+    assert changed is True
+    assert backend.materialized_prompts == []
+    assert bridge.sync_calls
+
+
+def test_remote_codex_device_agent_executes_turn_start_commands_via_desktop_ui_when_available() -> None:
+    backend = FakeBackend(
+        threads=[_sample_thread()],
+        snapshots={"thread-1": _sample_snapshot()},
+        health=_sample_health(),
+        desktop_ui_enabled_threads={"thread-1"},
+    )
+    bridge = FakeBridge(
+        queued_commands=[
+            {
+                "commandId": "command-1",
+                "type": "turn.start",
+                "machineId": "homedev",
+                "threadId": "thread-1",
+                "taskId": "task-1",
+                "prompt": "Inject this through the desktop Codex composer.",
+            }
+        ]
+    )
+    agent = RemoteCodexDeviceAgent(
+        bridge=bridge,
+        backend=backend,
+        machine_id="homedev",
+        display_name="Home Dev",
+        worker_id="homedev-agent",
+    )
+
+    worked = agent.poll_once()
+
+    assert worked is True
+    assert backend.desktop_ui_submit_calls == [("thread-1", "Inject this through the desktop Codex composer.")]
+    assert backend.start_turn_calls == []
+    assert backend.materialized_prompts == []
+    assert backend.actions[:1] == ["desktop_submit"]
+    assert [item["phase"] for item in bridge.heartbeat_calls] == ["running", "executing"]
+    assert bridge.evidence_calls[0]["payload"]["submissionMode"] == "desktop-ui"
+    assert bridge.command_result_calls[0]["status"] == "completed"
+    assert bridge.command_result_calls[0]["result"]["turnStatus"] == "queued"
+    assert bridge.command_result_calls[0]["result"]["submissionMode"] == "desktop-ui"
+    assert bridge.fail_calls == []
+    assert len(bridge.sync_calls) >= 2
 
 
 def test_remote_codex_device_agent_executes_thread_delete_commands() -> None:
