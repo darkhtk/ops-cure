@@ -19,6 +19,7 @@ DEFAULT_MAX_THREADS = 60
 DEFAULT_MESSAGE_LIMIT = 200
 DEFAULT_TURN_MESSAGE_LOOKBACK = 24
 DEFAULT_RECENT_SIGNATURE_WINDOW = 80
+DEFAULT_PENDING_COMMAND_SYNC_LIMIT = 8
 REMOTE_CODEX_PENDING_ENTRY_FLAG = "remote_codex_pending"
 REMOTE_CODEX_PENDING_COMMAND_ID_KEY = "commandId"
 REMOTE_CODEX_PENDING_PROMPT_TTL_SECONDS = 6 * 60 * 60
@@ -457,7 +458,8 @@ def _reconcile_pending_rollout_entries(lines: list[str]) -> tuple[list[str], boo
             continue
         pending_indices = pending_by_text.get(text)
         if pending_indices:
-            drop_indices.add(pending_indices.pop(0))
+            drop_indices.update(pending_indices)
+            pending_by_text[text] = []
 
     if not drop_indices:
         return lines, False
@@ -681,20 +683,46 @@ class LocalCodexBackend:
                 if compact_text(payload.get(REMOTE_CODEX_PENDING_COMMAND_ID_KEY)) == compact_text(command_id):
                     return False
 
-        entry = {
-            "type": "event_msg",
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "payload": {
-                "type": "user_message",
-                "message": prompt,
-                REMOTE_CODEX_PENDING_ENTRY_FLAG: True,
-                REMOTE_CODEX_PENDING_COMMAND_ID_KEY: command_id,
-                "threadId": thread_id,
+        prompt_text = prompt.rstrip("\r\n")
+        prompt_display = f"{prompt_text}\r\n"
+        timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        entries = [
+            {
+                "type": "response_item",
+                "timestamp": timestamp,
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": prompt_display,
+                        }
+                    ],
+                    REMOTE_CODEX_PENDING_ENTRY_FLAG: True,
+                    REMOTE_CODEX_PENDING_COMMAND_ID_KEY: command_id,
+                    "threadId": thread_id,
+                },
             },
-        }
+            {
+                "type": "event_msg",
+                "timestamp": timestamp,
+                "payload": {
+                    "type": "user_message",
+                    "message": prompt_display,
+                    "images": [],
+                    "local_images": [],
+                    "text_elements": [],
+                    REMOTE_CODEX_PENDING_ENTRY_FLAG: True,
+                    REMOTE_CODEX_PENDING_COMMAND_ID_KEY: command_id,
+                    "threadId": thread_id,
+                },
+            },
+        ]
         with rollout_path.open("a", encoding="utf-8", newline="\n") as handle:
-            handle.write(json.dumps(entry, ensure_ascii=False))
-            handle.write("\n")
+            for entry in entries:
+                handle.write(json.dumps(entry, ensure_ascii=False))
+                handle.write("\n")
         return True
 
     def _runtime_list_threads(self, *, limit: int) -> list[dict[str, Any]]:
@@ -875,6 +903,7 @@ class RemoteCodexDeviceAgent:
     worker_id: str
     max_threads: int = DEFAULT_MAX_THREADS
     message_limit: int = DEFAULT_MESSAGE_LIMIT
+    pending_command_sync_limit: int = DEFAULT_PENDING_COMMAND_SYNC_LIMIT
     thread_versions: dict[str, str] = field(default_factory=dict)
     has_bootstrapped: bool = False
 
@@ -904,14 +933,42 @@ class RemoteCodexDeviceAgent:
             thread_id = compact_text(thread.get("id"))
             if not thread_id:
                 continue
-            version = build_thread_version(thread)
+            pending_materialized = False
+            try:
+                command_rows = self.bridge.get_remote_codex_thread_commands(
+                    machine_id=self.machine_id,
+                    thread_id=thread_id,
+                    limit=self.pending_command_sync_limit,
+                )
+            except Exception:
+                command_rows = []
+            for command in command_rows:
+                if compact_text(command.get("type")) != "turn.start":
+                    continue
+                if compact_text(command.get("status")).lower() not in {"queued", "running"}:
+                    continue
+                prompt = compact_text(command.get("prompt"))
+                command_id = compact_text(command.get("commandId"))
+                if not prompt or not command_id:
+                    continue
+                pending_materialized = (
+                    self.backend.materialize_pending_browser_prompt(
+                        thread_id=thread_id,
+                        command_id=command_id,
+                        prompt=prompt,
+                    )
+                    or pending_materialized
+                )
+
+            current_thread = self.backend.get_thread_by_id(thread_id) or thread
+            version = build_thread_version(current_thread)
             next_versions[thread_id] = version
-            if not force and self.thread_versions.get(thread_id) == version:
+            if not force and not pending_materialized and self.thread_versions.get(thread_id) == version:
                 continue
             snapshot = self.backend.read_thread_messages(thread_id, limit=self.message_limit)
             if snapshot is None:
                 continue
-            detailed_thread = self.backend.get_thread_by_id(thread_id) or snapshot.get("thread") or thread
+            detailed_thread = self.backend.get_thread_by_id(thread_id) or snapshot.get("thread") or current_thread
             messages = list(snapshot.get("messages") or [])
             if self.message_limit > 0:
                 messages = messages[-self.message_limit :]

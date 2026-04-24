@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -70,6 +71,7 @@ class FakeBackend:
 @dataclass
 class FakeBridge:
     queued_commands: list[dict] = field(default_factory=list)
+    thread_commands_by_thread: dict[str, list[dict]] = field(default_factory=dict)
     sync_calls: list[dict] = field(default_factory=list)
     command_result_calls: list[dict] = field(default_factory=list)
     heartbeat_calls: list[dict] = field(default_factory=list)
@@ -89,6 +91,15 @@ class FakeBridge:
 
     def claim_next_remote_codex_command(self, *, machine_id: str, worker_id: str) -> dict | None:
         return self.queued_commands.pop(0) if self.queued_commands else None
+
+    def get_remote_codex_thread_commands(
+        self,
+        *,
+        machine_id: str,
+        thread_id: str,
+        limit: int = 8,
+    ) -> list[dict]:
+        return list(self.thread_commands_by_thread.get(thread_id, []))[:limit]
 
     def report_remote_codex_command_result(
         self,
@@ -484,6 +495,11 @@ def test_local_backend_materializes_pending_browser_prompt_into_rollout() -> Non
             prompt="[TEST]hello",
         )
         snapshot = backend.read_thread_messages("thread-1", limit=20)
+        rollout_entries = [
+            json.loads(line)
+            for line in rollout_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
 
     assert created is True
     assert duplicate is False
@@ -492,13 +508,22 @@ def test_local_backend_materializes_pending_browser_prompt_into_rollout() -> Non
         "existing answer",
         "[TEST]hello",
     ]
+    pending_entries = [
+        entry
+        for entry in rollout_entries
+        if entry.get("payload", {}).get("remote_codex_pending") is True
+    ]
+    assert [entry["type"] for entry in pending_entries] == ["response_item", "event_msg"]
+    assert pending_entries[0]["payload"]["role"] == "user"
+    assert pending_entries[1]["payload"]["type"] == "user_message"
 
 
 def test_local_backend_reconciles_pending_browser_prompt_after_actual_user_message_arrives() -> None:
     with TemporaryDirectory() as temp_dir:
         rollout_path = Path(temp_dir) / "rollout.jsonl"
         rollout_path.write_text(
-            '{"type":"event_msg","timestamp":"2026-04-24T00:00:00+00:00","payload":{"type":"user_message","message":"[TEST]hello","remote_codex_pending":true,"commandId":"command-1","threadId":"thread-1"}}\n'
+            '{"type":"response_item","timestamp":"2026-04-24T00:00:00+00:00","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"[TEST]hello\\r\\n"}],"remote_codex_pending":true,"commandId":"command-1","threadId":"thread-1"}}\n'
+            '{"type":"event_msg","timestamp":"2026-04-24T00:00:00+00:00","payload":{"type":"user_message","message":"[TEST]hello\\r\\n","remote_codex_pending":true,"commandId":"command-1","threadId":"thread-1"}}\n'
             '{"type":"event_msg","timestamp":"2026-04-24T00:00:10+00:00","payload":{"type":"user_message","message":"[TEST]hello"}}\n',
             encoding="utf-8",
         )
@@ -533,6 +558,7 @@ def test_local_backend_reconciles_pending_browser_prompt_after_actual_user_messa
     assert snapshot is not None
     assert [message["text"] for message in snapshot["messages"]] == ["[TEST]hello"]
     assert '"remote_codex_pending":true' not in rewritten
+    assert rewritten.count("[TEST]hello") == 1
 
 
 def _sample_health(*, live_control: bool = True) -> dict[str, object]:
@@ -681,6 +707,39 @@ def test_remote_codex_device_agent_executes_turn_start_commands_and_reports_resu
     assert bridge.command_result_calls[0]["result"]["turnStatus"] == "inProgress"
     assert bridge.fail_calls == []
     assert len(bridge.sync_calls) >= 2
+
+
+def test_remote_codex_device_agent_sync_materializes_pending_browser_prompt_before_claim() -> None:
+    backend = FakeBackend(
+        threads=[_sample_thread()],
+        snapshots={"thread-1": _sample_snapshot()},
+        health=_sample_health(),
+    )
+    bridge = FakeBridge(
+        thread_commands_by_thread={
+            "thread-1": [
+                {
+                    "commandId": "queued-command-1",
+                    "type": "turn.start",
+                    "status": "queued",
+                    "prompt": "[TEST]queued prompt",
+                }
+            ]
+        }
+    )
+    agent = RemoteCodexDeviceAgent(
+        bridge=bridge,
+        backend=backend,
+        machine_id="homedev",
+        display_name="Home Dev",
+        worker_id="worker-1",
+    )
+
+    changed = agent.perform_sync(force=False)
+
+    assert changed is True
+    assert backend.materialized_prompts == [("thread-1", "queued-command-1", "[TEST]queued prompt")]
+    assert bridge.sync_calls
 
 
 def test_remote_codex_device_agent_executes_thread_delete_commands() -> None:

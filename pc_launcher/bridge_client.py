@@ -553,6 +553,19 @@ class BridgeClient:
             },
         )
 
+    def get_remote_codex_thread_commands(
+        self,
+        *,
+        machine_id: str,
+        thread_id: str,
+        limit: int = 8,
+    ) -> list[dict[str, Any]]:
+        payload = self._get(
+            f"/api/remote-codex/machines/{machine_id}/threads/{thread_id}/commands",
+            {"limit": max(1, min(int(limit), 32))},
+        )
+        return list(payload.get("commands") or [])
+
     def claim_next_remote_codex_command(
         self,
         *,
