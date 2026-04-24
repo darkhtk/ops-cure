@@ -110,7 +110,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--poll-seconds",
         type=float,
-        default=5.0,
+        default=1.0,
         help="Idle poll interval when no remote task is available.",
     )
     parser.add_argument(

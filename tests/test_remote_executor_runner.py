@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
-from pc_launcher.connectors.remote_executor.runner import RunnerConfig, run_cycle
+from pc_launcher.connectors.remote_executor.runner import RunnerConfig, parse_args, run_cycle
 
 
 class FailingDeviceAgent:
@@ -71,6 +71,12 @@ def _config() -> RunnerConfig:
         lease_seconds=90,
         run_once=False,
     )
+
+
+def test_parse_args_uses_tighter_default_poll_interval() -> None:
+    config = parse_args([])
+
+    assert config.poll_interval_seconds == 1.0
 
 
 def test_run_cycle_survives_device_agent_connection_error() -> None:
