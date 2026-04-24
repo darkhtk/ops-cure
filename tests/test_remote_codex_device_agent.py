@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import sqlite3
+from contextlib import closing
 from dataclasses import dataclass, field
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -458,10 +460,54 @@ def test_local_backend_read_thread_messages_prefers_rollout_transcript_when_roll
 def test_local_backend_materializes_pending_browser_prompt_into_rollout() -> None:
     with TemporaryDirectory() as temp_dir:
         rollout_path = Path(temp_dir) / "rollout.jsonl"
+        state_db_path = Path(temp_dir) / "state_5.sqlite"
         rollout_path.write_text(
             '{"type":"event_msg","payload":{"type":"agent_message","message":"existing answer"}}\n',
             encoding="utf-8",
         )
+        with closing(sqlite3.connect(state_db_path)) as connection:
+            connection.execute(
+                """
+                create table threads (
+                    id text primary key,
+                    title text,
+                    cwd text,
+                    rollout_path text,
+                    updated_at_ms integer,
+                    created_at_ms integer,
+                    source text,
+                    model_provider text,
+                    model text,
+                    reasoning_effort text,
+                    cli_version text,
+                    first_user_message text,
+                    archived integer default 0
+                )
+                """
+            )
+            connection.execute(
+                """
+                insert into threads (
+                    id, title, cwd, rollout_path, updated_at_ms, created_at_ms,
+                    source, model_provider, model, reasoning_effort, cli_version, first_user_message, archived
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                """,
+                (
+                    "thread-1",
+                    "Thread 1",
+                    r"C:\\Users\\darkh\\Projects\\ops-cure",
+                    str(rollout_path),
+                    1700000000000,
+                    1699999999000,
+                    "app-server",
+                    "openai",
+                    "gpt-5.4",
+                    "medium",
+                    "1.0.0",
+                    "existing answer",
+                ),
+            )
+            connection.commit()
         thread = {
             "id": "thread-1",
             "title": "Thread 1",
@@ -503,6 +549,11 @@ def test_local_backend_materializes_pending_browser_prompt_into_rollout() -> Non
             for line in rollout_path.read_text(encoding="utf-8").splitlines()
             if line.strip()
         ]
+        with closing(sqlite3.connect(state_db_path)) as connection:
+            updated_at_ms = connection.execute(
+                "select updated_at_ms from threads where id = ?",
+                ("thread-1",),
+            ).fetchone()[0]
 
     assert created is True
     assert duplicate is False
@@ -519,6 +570,7 @@ def test_local_backend_materializes_pending_browser_prompt_into_rollout() -> Non
     assert [entry["type"] for entry in pending_entries] == ["response_item", "event_msg"]
     assert pending_entries[0]["payload"]["role"] == "user"
     assert pending_entries[1]["payload"]["type"] == "user_message"
+    assert int(updated_at_ms) > 1700000000000
 
 
 def test_local_backend_reconciles_pending_browser_prompt_after_actual_user_message_arrives() -> None:

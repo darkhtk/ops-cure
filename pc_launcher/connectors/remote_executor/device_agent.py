@@ -5,6 +5,7 @@ import logging
 import os
 import socket
 import sqlite3
+from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -550,14 +551,14 @@ class LocalCodexBackend:
     def _archived_thread_ids(self) -> set[str]:
         if not self.state_db_path.exists():
             return set()
-        with sqlite3.connect(self.state_db_path) as connection:
+        with closing(sqlite3.connect(self.state_db_path)) as connection:
             rows = connection.execute("select id from threads where archived = 1").fetchall()
         return {compact_text(row[0]) for row in rows if compact_text(row[0])}
 
     def _is_archived(self, thread_id: str) -> bool:
         if not thread_id or not self.state_db_path.exists():
             return False
-        with sqlite3.connect(self.state_db_path) as connection:
+        with closing(sqlite3.connect(self.state_db_path)) as connection:
             row = connection.execute("select archived from threads where id = ? limit 1", (thread_id,)).fetchone()
         return bool(row and int(row[0] or 0) == 1)
 
@@ -583,7 +584,7 @@ class LocalCodexBackend:
             "order by updated_at_ms desc "
             f"limit {safe_limit}"
         )
-        with sqlite3.connect(self.state_db_path) as connection:
+        with closing(sqlite3.connect(self.state_db_path)) as connection:
             connection.row_factory = sqlite3.Row
             rows = connection.execute(sql, params).fetchall()
         return [
@@ -620,7 +621,7 @@ class LocalCodexBackend:
             "first_user_message as firstUserMessage "
             "from threads where id = ? limit 1"
         )
-        with sqlite3.connect(self.state_db_path) as connection:
+        with closing(sqlite3.connect(self.state_db_path)) as connection:
             connection.row_factory = sqlite3.Row
             row = connection.execute(sql, (thread_id,)).fetchone()
         if row is None:
@@ -654,6 +655,16 @@ class LocalCodexBackend:
             return None
         return rollout_path
 
+    def _touch_thread_updated_at(self, thread_id: str, *, now_ms: int) -> None:
+        if not thread_id or not self.state_db_path.exists():
+            return
+        with closing(sqlite3.connect(self.state_db_path)) as connection:
+            connection.execute(
+                "update threads set updated_at_ms = max(coalesce(updated_at_ms, 0), ?) where id = ?",
+                (int(now_ms), thread_id),
+            )
+            connection.commit()
+
     def materialize_pending_browser_prompt(
         self,
         *,
@@ -685,7 +696,8 @@ class LocalCodexBackend:
 
         prompt_text = prompt.rstrip("\r\n")
         prompt_display = f"{prompt_text}\r\n"
-        timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        now = datetime.now(timezone.utc)
+        timestamp = now.isoformat().replace("+00:00", "Z")
         entries = [
             {
                 "type": "response_item",
@@ -723,6 +735,7 @@ class LocalCodexBackend:
             for entry in entries:
                 handle.write(json.dumps(entry, ensure_ascii=False))
                 handle.write("\n")
+        self._touch_thread_updated_at(thread_id, now_ms=int(now.timestamp() * 1000))
         return True
 
     def _runtime_list_threads(self, *, limit: int) -> list[dict[str, Any]]:
@@ -883,7 +896,7 @@ class LocalCodexBackend:
         if not self.state_db_path.exists():
             raise RuntimeError("Local Codex thread storage is unavailable.")
         now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
-        with sqlite3.connect(self.state_db_path) as connection:
+        with closing(sqlite3.connect(self.state_db_path)) as connection:
             cursor = connection.execute(
                 "update threads set archived = 1, updated_at_ms = ? where id = ? and archived = 0",
                 (now_ms, thread_id),
