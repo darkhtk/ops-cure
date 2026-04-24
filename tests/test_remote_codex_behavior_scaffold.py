@@ -487,6 +487,156 @@ def test_remote_codex_keeps_pending_turn_visible_while_linked_task_is_active(app
         assert pending_rows[0]["lineNumber"] < 0
 
 
+def test_remote_codex_deletes_superseded_pending_turn_commands(app_env) -> None:
+    from app.main import app
+
+    unique_suffix = str(int(datetime.now(timezone.utc).timestamp() * 1000))
+    machine_id = f"machine-cleanup-{unique_suffix}"
+    thread_id = f"thread-cleanup-{unique_suffix}"
+    now = datetime.now(timezone.utc).isoformat()
+
+    sync_payload = {
+        "machine": {
+            "machineId": machine_id,
+            "displayName": "Machine Cleanup",
+            "source": "agent",
+            "activeTransport": "filesystem-storage",
+            "runtimeMode": "standalone",
+            "runtimeAvailable": True,
+            "capabilities": {"liveControl": True},
+            "lastSeenAt": now,
+            "lastSyncAt": now,
+        },
+        "threads": [
+            {
+                "id": thread_id,
+                "title": "Delete stale pending commands",
+                "cwd": "C:/repo",
+                "rolloutPath": "C:/repo/.codex/rollout.jsonl",
+                "updatedAtMs": 1700000000000,
+                "createdAtMs": 1699999999000,
+                "source": "app-server",
+                "modelProvider": "openai",
+                "model": "gpt-5.4",
+                "reasoningEffort": "medium",
+                "cliVersion": "1.0.0",
+                "firstUserMessage": "",
+                "status": {"type": "notLoaded"},
+            }
+        ],
+        "snapshots": [
+            {
+                "thread": {
+                    "id": thread_id,
+                    "title": "Delete stale pending commands",
+                    "cwd": "C:/repo",
+                    "rolloutPath": "C:/repo/.codex/rollout.jsonl",
+                    "updatedAtMs": 1700000000000,
+                    "createdAtMs": 1699999999000,
+                    "source": "app-server",
+                    "modelProvider": "openai",
+                    "model": "gpt-5.4",
+                    "reasoningEffort": "medium",
+                    "cliVersion": "1.0.0",
+                    "firstUserMessage": "",
+                    "status": {"type": "notLoaded"},
+                },
+                "messages": [],
+                "totalMessages": 0,
+                "lineCount": 0,
+                "fileSize": 0,
+                "syncedAt": now,
+            }
+        ],
+    }
+
+    with TestClient(app) as client:
+        sync_response = client.post(
+            "/api/remote-codex/agent/sync",
+            headers={"Authorization": "Bearer test-token"},
+            json=sync_payload,
+        )
+        assert sync_response.status_code == 200
+
+        old_prompt = "Old pending prompt should be deleted."
+        old_turn_response = client.post(
+            f"/api/remote-codex/machines/{machine_id}/threads/{thread_id}/turns",
+            headers={"Authorization": "Bearer test-token"},
+            json={"prompt": old_prompt},
+        )
+        assert old_turn_response.status_code == 200, old_turn_response.text
+        old_command_id = old_turn_response.json()["command"]["commandId"]
+
+        old_claim_response = client.post(
+            "/api/remote-codex/agent/commands/claim",
+            headers={"Authorization": "Bearer test-token"},
+            json={"machineId": machine_id, "workerId": "worker-cleanup-old"},
+        )
+        assert old_claim_response.status_code == 200
+        assert old_claim_response.json()["command"]["commandId"] == old_command_id
+
+        old_result_response = client.post(
+            f"/api/remote-codex/agent/commands/{old_command_id}/result",
+            headers={"Authorization": "Bearer test-token"},
+            json={
+                "workerId": "worker-cleanup-old",
+                "status": "completed",
+                "result": {
+                    "turnId": "turn-cleanup-old",
+                    "turnStatus": "inProgress",
+                },
+            },
+        )
+        assert old_result_response.status_code == 200
+
+        new_prompt = "Newest pending prompt should remain visible."
+        new_turn_response = client.post(
+            f"/api/remote-codex/machines/{machine_id}/threads/{thread_id}/turns",
+            headers={"Authorization": "Bearer test-token"},
+            json={"prompt": new_prompt},
+        )
+        assert new_turn_response.status_code == 200, new_turn_response.text
+        new_command_id = new_turn_response.json()["command"]["commandId"]
+
+        new_claim_response = client.post(
+            "/api/remote-codex/agent/commands/claim",
+            headers={"Authorization": "Bearer test-token"},
+            json={"machineId": machine_id, "workerId": "worker-cleanup-new"},
+        )
+        assert new_claim_response.status_code == 200
+        assert new_claim_response.json()["command"]["commandId"] == new_command_id
+
+        new_result_response = client.post(
+            f"/api/remote-codex/agent/commands/{new_command_id}/result",
+            headers={"Authorization": "Bearer test-token"},
+            json={
+                "workerId": "worker-cleanup-new",
+                "status": "completed",
+                "result": {
+                    "turnId": "turn-cleanup-new",
+                    "turnStatus": "inProgress",
+                },
+            },
+        )
+        assert new_result_response.status_code == 200
+
+        messages_response = client.get(
+            f"/api/remote-codex/machines/{machine_id}/threads/{thread_id}/messages",
+            headers={"Authorization": "Bearer test-token"},
+        )
+        assert messages_response.status_code == 200
+        assert [item["text"] for item in messages_response.json()["messages"]] == [new_prompt]
+
+        commands_response = client.get(
+            f"/api/remote-codex/machines/{machine_id}/threads/{thread_id}/commands?limit=20",
+            headers={"Authorization": "Bearer test-token"},
+        )
+        assert commands_response.status_code == 200
+        command_prompts = [command["prompt"] for command in commands_response.json()["commands"]]
+        assert old_prompt not in command_prompts
+        assert new_prompt in command_prompts
+
+
 def test_remote_codex_task_lifecycle_routes_cover_approval_interrupt_and_evidence(app_env) -> None:
     from app.main import app
 

@@ -25,6 +25,7 @@ DEFAULT_STORED_MESSAGE_WINDOW = 200
 DEFAULT_THREAD_MESSAGE_LIMIT = 120
 DEFAULT_PENDING_COMMAND_VISIBILITY_SECONDS = 180
 ACTIVE_PENDING_TASK_STATUSES = {"queued", "claimed", "executing", "verifying", "blocked_approval"}
+PENDING_COMMAND_TURN_STATUSES = {"queued", "inprogress", "in_progress", "running"}
 COMMAND_QUEUED = "queued"
 COMMAND_RUNNING = "running"
 COMMAND_COMPLETED = "completed"
@@ -141,6 +142,24 @@ def normalize_message_text(value: Any) -> str:
     return compact_text(value).casefold()
 
 
+def command_turn_status_from_result(result: Any) -> str:
+    if isinstance(result, dict):
+        return compact_text(result.get("turnStatus")).lower()
+    return ""
+
+
+def command_turn_id_from_row(row: RemoteCodexCommandModel) -> str | None:
+    turn_id = compact_text(row.turn_id) or None
+    if turn_id:
+        return turn_id
+    result = loads_json(row.result_json, None)
+    if isinstance(result, dict):
+        next_turn_id = compact_text(result.get("turnId")) or None
+        if next_turn_id:
+            return next_turn_id
+    return None
+
+
 @dataclass(slots=True)
 class SubscriptionHandle:
     queue: asyncio.Queue[dict[str, Any]]
@@ -227,9 +246,7 @@ class RemoteCodexStateService:
     def _command_row_to_public(self, row: RemoteCodexCommandModel) -> dict[str, Any]:
         result = loads_json(row.result_json, None)
         error = loads_json(row.error_json, None)
-        turn_id = row.turn_id
-        if not turn_id and isinstance(result, dict):
-            turn_id = compact_text(result.get("turnId")) or None
+        turn_id = command_turn_id_from_row(row)
         return {
             "commandId": row.command_id,
             "type": row.type,
@@ -269,9 +286,7 @@ class RemoteCodexStateService:
 
         status = compact_text(row.status).lower()
         result = loads_json(row.result_json, None)
-        turn_status = ""
-        if isinstance(result, dict):
-            turn_status = compact_text(result.get("turnStatus")).lower()
+        turn_status = command_turn_status_from_result(result)
 
         created_at = ensure_utc(row.created_at) or utcnow()
         age_seconds = max(0.0, (utcnow() - created_at).total_seconds())
@@ -281,7 +296,7 @@ class RemoteCodexStateService:
 
         should_surface = (status in {COMMAND_QUEUED, COMMAND_RUNNING} and (is_fresh_pending or linked_task_active)) or (
             status == COMMAND_COMPLETED
-            and turn_status in {"queued", "inprogress", "in_progress", "running"}
+            and turn_status in PENDING_COMMAND_TURN_STATUSES
             and (is_fresh_pending or linked_task_active)
         )
         if not should_surface:
@@ -307,6 +322,73 @@ class RemoteCodexStateService:
                 -(ensure_utc(datetime.fromisoformat(machine["lastSeenAt"])).timestamp() if machine.get("lastSeenAt") else 0),
             ),
         )
+
+    def _stale_thread_command_ids(
+        self,
+        db,
+        machine_id: str,
+        thread_id: str,
+    ) -> tuple[set[str], set[str]]:
+        rows = list(
+            db.scalars(
+                select(RemoteCodexCommandModel)
+                .where(
+                    RemoteCodexCommandModel.machine_id == machine_id,
+                    RemoteCodexCommandModel.thread_id == thread_id,
+                )
+                .order_by(RemoteCodexCommandModel.updated_at.desc(), RemoteCodexCommandModel.created_at.desc())
+            )
+        )
+        if not rows:
+            return set(), set()
+
+        latest_turn_id = None
+        for row in rows:
+            if compact_text(row.type).lower() != TURN_START:
+                continue
+            if compact_text(row.status).lower() != COMMAND_COMPLETED:
+                continue
+            latest_turn_id = command_turn_id_from_row(row)
+            if latest_turn_id:
+                break
+
+        task_ids = sorted({row.task_id for row in rows if row.task_id})
+        task_status_by_id: dict[str, str] = {}
+        if task_ids:
+            task_status_by_id = {
+                row.id: compact_text(row.status).lower()
+                for row in db.scalars(select(RemoteTaskModel).where(RemoteTaskModel.id.in_(task_ids)))
+            }
+
+        now = utcnow()
+        stale_command_ids: set[str] = set()
+        deletable_command_ids: set[str] = set()
+        for row in rows:
+            if compact_text(row.type).lower() != TURN_START:
+                continue
+            if compact_text(row.status).lower() != COMMAND_COMPLETED:
+                continue
+
+            turn_status = command_turn_status_from_result(loads_json(row.result_json, None))
+            if turn_status not in PENDING_COMMAND_TURN_STATUSES:
+                continue
+
+            command_turn_id = command_turn_id_from_row(row)
+            linked_task_status = compact_text(task_status_by_id.get(row.task_id)).lower() if row.task_id else ""
+            linked_task_active = linked_task_status in ACTIVE_PENDING_TASK_STATUSES
+            created_at = ensure_utc(row.created_at) or now
+            age_seconds = max(0.0, (now - created_at).total_seconds())
+
+            superseded_by_newer_turn = bool(
+                latest_turn_id and command_turn_id and command_turn_id != latest_turn_id
+            )
+            expired_without_active_task = not linked_task_active and age_seconds > DEFAULT_PENDING_COMMAND_VISIBILITY_SECONDS
+            if superseded_by_newer_turn or expired_without_active_task:
+                stale_command_ids.add(row.command_id)
+                if not linked_task_active:
+                    deletable_command_ids.add(row.command_id)
+
+        return stale_command_ids, deletable_command_ids
 
     def get_machine_summary(self, *, active_only: bool = True) -> dict[str, int]:
         machines = self.list_machines(active_only=active_only)
@@ -399,6 +481,13 @@ class RemoteCodexStateService:
             )
             if thread_row is None:
                 return None
+            stale_command_ids, deletable_command_ids = self._stale_thread_command_ids(db, machine_id, thread_id)
+            if deletable_command_ids:
+                db.execute(
+                    delete(RemoteCodexCommandModel).where(
+                        RemoteCodexCommandModel.command_id.in_(deletable_command_ids)
+                    )
+                )
             message_rows = list(
                 db.scalars(
                     select(RemoteCodexMessageModel)
@@ -425,6 +514,8 @@ class RemoteCodexStateService:
                     .order_by(RemoteCodexCommandModel.created_at.asc())
                 )
             )
+            if stale_command_ids:
+                command_rows = [row for row in command_rows if row.command_id not in stale_command_ids]
             task_ids = sorted({row.task_id for row in command_rows if row.task_id})
             task_status_by_id: dict[str, str] = {}
             if task_ids:
@@ -595,6 +686,14 @@ class RemoteCodexStateService:
                 changed_thread_ids.add(thread_id)
 
             db.flush()
+            for thread_id in sorted(existing_threads.keys()):
+                _stale_ids, deletable_ids = self._stale_thread_command_ids(db, machine_id, thread_id)
+                if deletable_ids:
+                    db.execute(
+                        delete(RemoteCodexCommandModel).where(
+                            RemoteCodexCommandModel.command_id.in_(deletable_ids)
+                        )
+                    )
             machine_public = self._machine_row_to_public(
                 machine_row,
                 thread_count=db.scalar(
@@ -610,8 +709,22 @@ class RemoteCodexStateService:
             self._publish(machine_id, thread_id, {"kind": "snapshot"})
         return machine_public
 
-    def list_thread_commands(self, machine_id: str, thread_id: str, *, limit: int = 8) -> list[dict[str, Any]]:
+    def list_thread_commands(
+        self,
+        machine_id: str,
+        thread_id: str,
+        *,
+        limit: int = 8,
+        include_stale: bool = False,
+    ) -> list[dict[str, Any]]:
         with session_scope() as db:
+            stale_command_ids, deletable_command_ids = self._stale_thread_command_ids(db, machine_id, thread_id)
+            if deletable_command_ids:
+                db.execute(
+                    delete(RemoteCodexCommandModel).where(
+                        RemoteCodexCommandModel.command_id.in_(deletable_command_ids)
+                    )
+                )
             rows = list(
                 db.scalars(
                     select(RemoteCodexCommandModel)
@@ -623,6 +736,8 @@ class RemoteCodexStateService:
                     .limit(max(1, min(limit, 30)))
                 )
             )
+            if not include_stale and stale_command_ids:
+                rows = [row for row in rows if row.command_id not in stale_command_ids]
             return [self._command_row_to_public(row) for row in rows]
 
     def get_active_thread_command(self, machine_id: str, thread_id: str, *, command_type: str | None = None) -> dict[str, Any] | None:

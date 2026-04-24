@@ -346,7 +346,7 @@ class RemoteCodexBehaviorService:
         return {"task": self._task_to_browser(task)}
 
     def _find_command_for_task(self, machine_id: str, thread_id: str, task_id: str) -> dict[str, Any] | None:
-        commands = self.state_service.list_thread_commands(machine_id, thread_id, limit=200)
+        commands = self.state_service.list_thread_commands(machine_id, thread_id, limit=200, include_stale=True)
         for command in commands:
             if compact_text(command.get("taskId")) == task_id:
                 return command
@@ -364,7 +364,7 @@ class RemoteCodexBehaviorService:
     ) -> list[RemoteTaskSummaryResponse]:
         if not tasks:
             return tasks
-        commands = self.state_service.list_thread_commands(machine_id, thread_id, limit=200)
+        commands = self.state_service.list_thread_commands(machine_id, thread_id, limit=200, include_stale=True)
         commands_by_task_id = {
             compact_text(command.get("taskId")): command
             for command in commands
