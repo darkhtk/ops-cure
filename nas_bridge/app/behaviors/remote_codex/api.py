@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
+import mimetypes
+from email.parser import BytesParser
+from email.policy import default as email_default_policy
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -24,6 +28,81 @@ ReadBridgeCaller = Annotated[BridgeCaller, Depends(require_bridge_permissions("b
 WriteBridgeCaller = Annotated[BridgeCaller, Depends(require_bridge_permissions("bridge:write"))]
 StreamBridgeCaller = Annotated[BridgeCaller, Depends(require_bridge_permissions("bridge:stream"))]
 ControlBridgeCaller = Annotated[BridgeCaller, Depends(require_bridge_permissions("bridge:control"))]
+
+MAX_BROWSER_ATTACHMENTS = 6
+MAX_BROWSER_ATTACHMENT_BYTES = 8 * 1024 * 1024
+MAX_BROWSER_TOTAL_ATTACHMENT_BYTES = 16 * 1024 * 1024
+
+
+def _guess_mime_type(filename: str, provided: str | None) -> str:
+    normalized = str(provided or "").strip()
+    if normalized:
+        return normalized
+    guessed, _encoding = mimetypes.guess_type(filename)
+    return guessed or "application/octet-stream"
+
+
+def _attachment_kind_for(mime_type: str, filename: str) -> str:
+    normalized_mime_type = str(mime_type or "").strip().lower()
+    if normalized_mime_type.startswith("image/"):
+        return "image"
+    suffix = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    if suffix in {"png", "jpg", "jpeg", "gif", "webp", "bmp", "svg"}:
+        return "image"
+    return "file"
+
+
+async def _extract_turn_payload(request: Request) -> tuple[str, list[dict[str, Any]]]:
+    content_type = str(request.headers.get("content-type") or "").lower()
+    if content_type.startswith("multipart/form-data"):
+        raw_body = await request.body()
+        raw_message = (
+            f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode("utf-8") + raw_body
+        )
+        message = BytesParser(policy=email_default_policy).parsebytes(raw_message)
+        prompt = ""
+        attachments: list[dict[str, Any]] = []
+        total_bytes = 0
+        for part in message.iter_parts() if message.is_multipart() else []:
+            field_name = str(part.get_param("name", header="content-disposition") or "").strip()
+            if field_name == "prompt":
+                charset = part.get_content_charset("utf-8") or "utf-8"
+                prompt = (part.get_payload(decode=True) or b"").decode(charset, errors="replace").strip()
+                continue
+            if field_name != "attachments":
+                continue
+            if len(attachments) >= MAX_BROWSER_ATTACHMENTS:
+                raise HTTPException(status_code=400, detail="too_many_attachments")
+            file_name = str(part.get_filename() or "").strip() or f"attachment-{len(attachments) + 1}"
+            mime_type = _guess_mime_type(file_name, part.get_content_type())
+            payload = part.get_payload(decode=True) or b""
+            size = len(payload)
+            if size <= 0:
+                continue
+            if size > MAX_BROWSER_ATTACHMENT_BYTES:
+                raise HTTPException(status_code=400, detail="attachment_too_large")
+            total_bytes += size
+            if total_bytes > MAX_BROWSER_TOTAL_ATTACHMENT_BYTES:
+                raise HTTPException(status_code=400, detail="attachments_too_large")
+            kind = _attachment_kind_for(mime_type, file_name)
+            encoded = base64.b64encode(payload).decode("ascii")
+            attachment = {
+                "name": file_name,
+                "mimeType": mime_type,
+                "kind": kind,
+                "size": size,
+            }
+            if kind == "image":
+                attachment["dataUrl"] = f"data:{mime_type};base64,{encoded}"
+            else:
+                attachment["bytesBase64"] = encoded
+            attachments.append(attachment)
+        return prompt, attachments
+
+    body = await request.json()
+    prompt = str(body.get("prompt") or "").strip()
+    attachments = body.get("attachments") if isinstance(body.get("attachments"), list) else []
+    return prompt, list(attachments)
 
 
 def _requested_by(caller: BridgeCaller) -> dict[str, Any]:
@@ -160,15 +239,15 @@ async def start_turn(
     request: Request,
     caller: ControlBridgeCaller,
 ) -> dict[str, Any]:
-    body = await request.json()
-    prompt = str(body.get("prompt") or "").strip()
-    if not prompt:
+    prompt, attachments = await _extract_turn_payload(request)
+    if not prompt and not attachments:
         raise HTTPException(status_code=400, detail="missing_prompt")
     try:
         return request.app.state.services.remote_codex_service.enqueue_turn(
             machine_id=machine_id,
             thread_id=thread_id,
             prompt=prompt,
+            attachments=attachments,
             requested_by=_requested_by(caller),
         )
     except (ValueError, RuntimeError) as error:

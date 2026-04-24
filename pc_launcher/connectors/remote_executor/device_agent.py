@@ -24,12 +24,20 @@ DEFAULT_TURN_MESSAGE_LOOKBACK = 24
 DEFAULT_RECENT_SIGNATURE_WINDOW = 80
 DEFAULT_PENDING_COMMAND_SYNC_LIMIT = 8
 REMOTE_CODEX_PENDING_PROMPT_TTL_SECONDS = 6 * 60 * 60
+REMOTE_CODEX_ATTACHMENT_DIRNAME = "remote_codex_attachments"
+DEFAULT_ATTACHMENT_FALLBACK_PROMPT = "Use the attached files and images as context for this turn."
 
 
 def compact_text(value: Any, fallback: str = "") -> str:
     text = str(value or "").replace("\r", " ").replace("\n", " ")
     normalized = " ".join(text.split()).strip()
     return normalized or fallback
+
+
+def preserve_message_text(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value).replace("\r\n", "\n").replace("\r", "\n")
 
 
 def normalize_windows_path(value: str | None) -> str:
@@ -54,6 +62,19 @@ def compact_preview(value: Any, *, max_length: int = 280) -> str:
     if len(text) <= max_length:
         return text
     return f"{text[: max_length - 3]}..."
+
+
+def normalize_attachment_kind(value: Any, *, name: str = "", mime_type: str = "") -> str:
+    raw = compact_text(value).lower()
+    if raw == "image":
+        return "image"
+    normalized_mime_type = compact_text(mime_type).lower()
+    normalized_name = compact_text(name).lower()
+    if normalized_mime_type.startswith("image/"):
+        return "image"
+    if Path(normalized_name).suffix.lower() in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"}:
+        return "image"
+    return "file"
 
 
 def default_machine_id() -> str:
@@ -257,7 +278,7 @@ def _extract_turn_item_message_content(item: dict[str, Any]) -> tuple[str, list[
         text, images = extract_message_parts(content)
 
     if not text:
-        text = compact_text(item.get("text"))
+        text = preserve_message_text(item.get("text"))
 
     return text, images
 
@@ -386,11 +407,11 @@ def normalize_rollout_message(entry: dict[str, Any], *, line_number: int) -> dic
         payload_type = compact_text(payload.get("type"))
         if payload_type == "user_message":
             role = "user"
-            text = compact_text(payload.get("message") or payload.get("text"))
+            text = preserve_message_text(payload.get("message") or payload.get("text"))
         elif payload_type == "agent_message":
             role = "assistant"
             phase = compact_text(payload.get("phase")) or None
-            text = compact_text(payload.get("message") or payload.get("text"))
+            text = preserve_message_text(payload.get("message") or payload.get("text"))
     if not should_include_message(role, text, images=images):
         return None
     return {
@@ -488,6 +509,7 @@ class LocalCodexBackend:
         self.codex_home = Path(codex_home or os.getenv("CODEX_HOME") or (Path.home() / ".codex")).resolve()
         self.state_db_path = self.codex_home / "state_5.sqlite"
         self.pending_rollout_registry_path = self.codex_home / "remote_codex_pending_rollout.json"
+        self.attachment_root = self.codex_home / REMOTE_CODEX_ATTACHMENT_DIRNAME
         self.runtime_descriptor = runtime_descriptor or {}
         self.desktop_submit_thread_id = compact_text(desktop_submit_thread_id) or None
         self.desktop_prompt_submitter = desktop_prompt_submitter
@@ -740,12 +762,118 @@ class LocalCodexBackend:
             )
             connection.commit()
 
+    def _sanitize_attachment_filename(self, value: Any, *, index: int) -> str:
+        candidate = Path(compact_text(value, f"attachment-{index}")).name
+        if not candidate:
+            return f"attachment-{index}"
+        return candidate
+
+    def _decode_attachment_bytes(self, value: Any) -> bytes:
+        encoded = compact_text(value)
+        if not encoded:
+            return b""
+        return base64.b64decode(encoded)
+
+    def _materialize_file_attachments(
+        self,
+        *,
+        command_id: str,
+        attachments: list[dict[str, Any]],
+    ) -> list[str]:
+        if not attachments:
+            return []
+
+        target_dir = self.attachment_root / compact_text(command_id, "browser-turn")
+        target_dir.mkdir(parents=True, exist_ok=True)
+        local_paths: list[str] = []
+        used_names: set[str] = set()
+
+        for index, attachment in enumerate(attachments, start=1):
+            if normalize_attachment_kind(
+                attachment.get("kind"),
+                name=attachment.get("name"),
+                mime_type=attachment.get("mimeType"),
+            ) == "image":
+                continue
+            payload = self._decode_attachment_bytes(attachment.get("bytesBase64"))
+            if not payload:
+                continue
+            filename = self._sanitize_attachment_filename(attachment.get("name"), index=index)
+            stem = Path(filename).stem or f"attachment-{index}"
+            suffix = Path(filename).suffix
+            candidate = filename
+            dedupe_index = 2
+            while candidate.lower() in used_names:
+                candidate = f"{stem}-{dedupe_index}{suffix}"
+                dedupe_index += 1
+            used_names.add(candidate.lower())
+            file_path = target_dir / candidate
+            file_path.write_bytes(payload)
+            local_paths.append(str(file_path))
+
+        return local_paths
+
+    def _build_turn_input_items(
+        self,
+        *,
+        prompt: str,
+        attachments: list[dict[str, Any]] | None,
+        command_id: str,
+    ) -> tuple[str, list[dict[str, Any]]]:
+        normalized_prompt = compact_text(prompt)
+        normalized_attachments = list(attachments or [])
+        image_inputs: list[dict[str, Any]] = []
+
+        for attachment in normalized_attachments:
+            if normalize_attachment_kind(
+                attachment.get("kind"),
+                name=attachment.get("name"),
+                mime_type=attachment.get("mimeType"),
+            ) != "image":
+                continue
+            data_url = compact_text(attachment.get("dataUrl"))
+            if not data_url:
+                continue
+            image_item = {
+                "type": "image",
+                "url": data_url,
+            }
+            image_inputs.append(image_item)
+
+        file_paths = self._materialize_file_attachments(
+            command_id=command_id,
+            attachments=normalized_attachments,
+        )
+        if file_paths:
+            attachment_lines = "\n".join(f"- {path}" for path in file_paths)
+            file_context = f"Attached local files:\n{attachment_lines}"
+            normalized_prompt = (
+                f"{normalized_prompt}\n\n{file_context}"
+                if normalized_prompt
+                else f"{DEFAULT_ATTACHMENT_FALLBACK_PROMPT}\n\n{file_context}"
+            )
+        elif image_inputs and not normalized_prompt:
+            normalized_prompt = DEFAULT_ATTACHMENT_FALLBACK_PROMPT
+
+        input_items: list[dict[str, Any]] = []
+        if normalized_prompt:
+            input_items.append(
+                {
+                    "type": "text",
+                    "text": normalized_prompt,
+                    "text_elements": [],
+                }
+            )
+        input_items.extend(image_inputs)
+        return normalized_prompt, input_items
+
     def materialize_pending_browser_prompt(
         self,
         *,
         thread_id: str,
         command_id: str,
         prompt: str,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> bool:
         rollout_path = self._resolve_rollout_path_for_thread(thread_id)
         if rollout_path is None:
@@ -759,6 +887,34 @@ class LocalCodexBackend:
         prompt_text = prompt.rstrip("\r\n")
         now = datetime.now(timezone.utc)
         timestamp = now.isoformat().replace("+00:00", "Z")
+        image_content = []
+        image_event_entries = []
+        for index, attachment in enumerate(attachments or [], start=1):
+            if normalize_attachment_kind(
+                attachment.get("kind"),
+                name=attachment.get("name"),
+                mime_type=attachment.get("mimeType"),
+            ) != "image":
+                continue
+            data_url = compact_text(attachment.get("dataUrl"))
+            if not data_url:
+                continue
+            title = compact_text(attachment.get("name"), f"Attached image {index}")
+            image_content.append(
+                {
+                    "type": "input_image",
+                    "image_url": data_url,
+                    "title": title,
+                }
+            )
+            image_event_entries.append(
+                {
+                    "src": data_url,
+                    "alt": title,
+                    "title": title,
+                }
+            )
+
         entries = [
             {
                 "type": "response_item",
@@ -771,7 +927,8 @@ class LocalCodexBackend:
                             "type": "input_text",
                             "text": prompt_text,
                         }
-                    ],
+                    ]
+                    + image_content,
                 },
             },
             {
@@ -780,7 +937,7 @@ class LocalCodexBackend:
                 "payload": {
                     "type": "user_message",
                     "message": prompt_text,
-                    "images": [],
+                    "images": image_event_entries,
                     "local_images": [],
                     "text_elements": [],
                 },
@@ -809,13 +966,19 @@ class LocalCodexBackend:
             and compact_text(thread_id) == compact_text(self.desktop_submit_thread_id)
         )
 
-    def submit_prompt_via_desktop_ui(self, *, thread_id: str, prompt: str) -> str | None:
+    def submit_prompt_via_desktop_ui(
+        self,
+        *,
+        thread_id: str,
+        prompt: str,
+        input_items: list[dict[str, Any]] | None = None,
+    ) -> str | None:
         if not self.can_submit_prompt_via_desktop_ui(thread_id):
             return None
         submitter = self.desktop_prompt_submitter
         if submitter is None:
             return None
-        return compact_text(submitter.submit_prompt(prompt)) or None
+        return compact_text(submitter.submit_prompt(prompt, input_items=input_items)) or None
 
     def _runtime_list_threads(self, *, limit: int) -> list[dict[str, Any]]:
         if self.app_server_client is None:
@@ -957,11 +1120,17 @@ class LocalCodexBackend:
             "fileSize": rollout_path.stat().st_size,
         }
 
-    def start_turn(self, thread_id: str, prompt: str) -> dict[str, Any]:
+    def start_turn(
+        self,
+        thread_id: str,
+        prompt: str,
+        *,
+        input_items: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         if self.app_server_client is None:
             raise RuntimeError("Local Codex live control is unavailable.")
         self.app_server_client.resume_thread(thread_id)
-        result = self.app_server_client.start_turn(thread_id, prompt)
+        result = self.app_server_client.start_turn(thread_id, prompt, input_items=input_items)
         self.runtime_available = True
         self.active_transport = "standalone-app-server"
         return result
@@ -1118,11 +1287,18 @@ class RemoteCodexDeviceAgent:
 
             if command_type == "turn.start":
                 prompt = compact_text(command.get("prompt"))
-                if not prompt:
+                attachments = command.get("attachments") if isinstance(command.get("attachments"), list) else []
+                if not prompt and not attachments:
                     raise RuntimeError("Turn prompt is empty.")
+                turn_prompt, input_items = self.backend._build_turn_input_items(
+                    prompt=prompt,
+                    attachments=attachments,
+                    command_id=command_id,
+                )
                 desktop_submission_mode = self.backend.submit_prompt_via_desktop_ui(
                     thread_id=thread_id,
-                    prompt=prompt,
+                    prompt=turn_prompt,
+                    input_items=input_items,
                 )
                 if desktop_submission_mode:
                     result = {
@@ -1137,8 +1313,13 @@ class RemoteCodexDeviceAgent:
                             thread_id=thread_id,
                             command_id=command_id,
                             prompt=prompt,
+                            attachments=attachments,
                         )
-                    response = self.backend.start_turn(thread_id, prompt)
+                    response = self.backend.start_turn(
+                        thread_id,
+                        turn_prompt,
+                        input_items=input_items,
+                    )
                     result = {
                         "accepted": True,
                         "turnId": extract_turn_id(response),
@@ -1269,7 +1450,11 @@ class RemoteCodexDeviceAgent:
 
 
 class DesktopPromptSubmitter(Protocol):
-    def submit_prompt(self, prompt: str) -> str | None: ...
+    def submit_prompt(
+        self,
+        prompt: str,
+        input_items: list[dict[str, Any]] | None = None,
+    ) -> str | None: ...
 
 
 class WindowsCodexDesktopIpcPromptSubmitter:
@@ -1286,24 +1471,43 @@ class WindowsCodexDesktopIpcPromptSubmitter:
         self.client_type = compact_text(client_type, "remote-executor")
         self.connect_timeout_ms = max(250, int(connect_timeout_ms))
 
-    def submit_prompt(self, prompt: str) -> str | None:
+    def submit_prompt(
+        self,
+        prompt: str,
+        input_items: list[dict[str, Any]] | None = None,
+    ) -> str | None:
         if os.name != "nt":
             return None
         normalized_prompt = str(prompt or "").strip()
-        if not normalized_prompt or not self.thread_id:
+        normalized_input_items = [
+            item
+            for item in (input_items or [])
+            if isinstance(item, dict) and compact_text(item.get("type"))
+        ]
+        if not normalized_input_items:
+            normalized_input_items = [
+                {
+                    "type": "text",
+                    "text": normalized_prompt,
+                    "text_elements": [],
+                }
+            ]
+        if (not normalized_prompt and not normalized_input_items) or not self.thread_id:
             return None
 
-        encoded_prompt = base64.b64encode(normalized_prompt.encode("utf-8")).decode("ascii")
         encoded_thread_id = base64.b64encode(self.thread_id.encode("utf-8")).decode("ascii")
         encoded_client_type = base64.b64encode(self.client_type.encode("utf-8")).decode("ascii")
         encoded_pipe_name = base64.b64encode(self.pipe_name.encode("utf-8")).decode("ascii")
+        encoded_input_items = base64.b64encode(
+            json.dumps(normalized_input_items, ensure_ascii=False).encode("utf-8")
+        ).decode("ascii")
         script = f"""
 const net = require('net');
 const {{ randomUUID }} = require('crypto');
-const prompt = Buffer.from('{encoded_prompt}', 'base64').toString('utf8');
 const threadId = Buffer.from('{encoded_thread_id}', 'base64').toString('utf8');
 const clientType = Buffer.from('{encoded_client_type}', 'base64').toString('utf8');
 const pipeName = Buffer.from('{encoded_pipe_name}', 'base64').toString('utf8');
+const inputItems = JSON.parse(Buffer.from('{encoded_input_items}', 'base64').toString('utf8'));
 const pipePath = '\\\\\\\\.\\\\pipe\\\\' + pipeName;
 const connectTimeoutMs = {self.connect_timeout_ms};
 const socket = net.createConnection(pipePath);
@@ -1394,7 +1598,7 @@ socket.on('connect', async () => {{
       params: {{
         conversationId: threadId,
         turnStartParams: {{
-          input: [{{ type: 'text', text: prompt, text_elements: [] }}],
+          input: inputItems,
           cwd: null,
           approvalPolicy: null,
           approvalsReviewer: null,
@@ -1457,12 +1661,29 @@ socket.on('close', () => {{
 
 
 class WindowsCodexDesktopUiPromptSubmitter:
-    def submit_prompt(self, prompt: str) -> str | None:
+    def submit_prompt(
+        self,
+        prompt: str,
+        input_items: list[dict[str, Any]] | None = None,
+    ) -> str | None:
         if os.name != "nt":
             return None
         normalized = str(prompt or "").strip()
         if not normalized:
             return None
+        normalized_input_items = [
+            item
+            for item in (input_items or [])
+            if isinstance(item, dict) and compact_text(item.get("type"))
+        ]
+        if normalized_input_items:
+            only_plain_text = (
+                len(normalized_input_items) == 1
+                and compact_text(normalized_input_items[0].get("type")).lower() == "text"
+                and compact_text(normalized_input_items[0].get("text")) == normalized
+            )
+            if not only_plain_text:
+                return None
         encoded = base64.b64encode(normalized.encode("utf-8")).decode("ascii")
         script = f"""
 $ErrorActionPreference = 'Stop'
@@ -1585,14 +1806,32 @@ class WindowsCodexDesktopPromptSubmitter:
         self.ipc_submitter = ipc_submitter or WindowsCodexDesktopIpcPromptSubmitter(thread_id=self.thread_id)
         self.fallback_submitter = fallback_submitter or WindowsCodexDesktopUiPromptSubmitter()
 
-    def submit_prompt(self, prompt: str) -> str | None:
+    def submit_prompt(
+        self,
+        prompt: str,
+        input_items: list[dict[str, Any]] | None = None,
+    ) -> str | None:
         if os.name != "nt":
             return None
+        normalized_prompt = compact_text(prompt)
+        normalized_input_items = [
+            item
+            for item in (input_items or [])
+            if isinstance(item, dict) and compact_text(item.get("type"))
+        ]
+        if not normalized_input_items and normalized_prompt:
+            normalized_input_items = [
+                {
+                    "type": "text",
+                    "text": normalized_prompt,
+                    "text_elements": [],
+                }
+            ]
         for submitter in (self.ipc_submitter, self.fallback_submitter):
             if submitter is None:
                 continue
             try:
-                mode = submitter.submit_prompt(prompt)
+                mode = submitter.submit_prompt(prompt, input_items=normalized_input_items or None)
             except Exception:
                 LOGGER.exception("Desktop prompt submitter failed")
                 continue

@@ -59,6 +59,61 @@ def ensure_utc(value: datetime | None) -> datetime | None:
     return value.astimezone(timezone.utc)
 
 
+def normalize_browser_turn_attachments(attachments: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for item in attachments or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            size = max(0, int(item.get("size") or 0))
+        except (TypeError, ValueError):
+            size = 0
+        name = compact_text(item.get("name"), "attachment")
+        mime_type = compact_text(item.get("mimeType") or item.get("mime_type"), "application/octet-stream")
+        kind = compact_text(item.get("kind")).lower()
+        if not kind:
+            kind = "image" if mime_type.startswith("image/") else "file"
+        if kind == "image":
+            data_url = compact_text(item.get("dataUrl") or item.get("data_url"))
+            if not data_url:
+                continue
+            normalized.append(
+                {
+                    "name": name,
+                    "mimeType": mime_type,
+                    "kind": "image",
+                    "size": size,
+                    "dataUrl": data_url,
+                }
+            )
+            continue
+        bytes_base64 = compact_text(item.get("bytesBase64") or item.get("bytes_base64"))
+        if not bytes_base64:
+            continue
+        normalized.append(
+            {
+                    "name": name,
+                    "mimeType": mime_type,
+                    "kind": "file",
+                    "size": size,
+                    "bytesBase64": bytes_base64,
+                }
+            )
+    return normalized
+
+
+def build_browser_turn_prompt(prompt: str, attachments: list[dict[str, Any]]) -> str:
+    normalized_prompt = compact_text(prompt)
+    if normalized_prompt:
+        return normalized_prompt
+    if not attachments:
+        return ""
+    attachment_names = [compact_text(item.get("name")) for item in attachments if compact_text(item.get("name"))]
+    if attachment_names:
+        return f"Use the attached context: {', '.join(attachment_names[:3])}"
+    return "Use the attached files and images as context for this turn."
+
+
 class RemoteCodexBehaviorService:
     """Behavior service that exposes browser-compatible remote_codex surfaces."""
 
@@ -704,6 +759,7 @@ class RemoteCodexBehaviorService:
         machine_id: str,
         thread_id: str,
         prompt: str,
+        attachments: list[dict[str, Any]] | None = None,
         requested_by: dict[str, Any],
     ) -> dict[str, Any]:
         machine = self.state_service.get_machine(machine_id)
@@ -716,12 +772,19 @@ class RemoteCodexBehaviorService:
         thread = self.state_service.get_thread(machine_id, thread_id)
         if thread is None:
             raise ValueError("thread_not_found")
+        normalized_attachments = normalize_browser_turn_attachments(attachments)
+        prompt_for_command = build_browser_turn_prompt(prompt, normalized_attachments)
+        if not prompt_for_command:
+            raise ValueError("missing_prompt")
+        requested_by_payload = dict(requested_by)
+        if normalized_attachments:
+            requested_by_payload["attachments"] = normalized_attachments
 
         task = self.remote_task_service.create_task(
             RemoteTaskCreateRequest(
                 machine_id=machine_id,
                 thread_id=thread_id,
-                objective=prompt,
+                objective=prompt_for_command,
                 success_criteria={"browser": ["task row", "command queue", "transcript update"]},
                 created_by=self._created_by(requested_by),
                 origin_surface="browser",
@@ -731,8 +794,8 @@ class RemoteCodexBehaviorService:
             command_type=TURN_START,
             machine_id=machine_id,
             thread_id=thread_id,
-            requested_by=requested_by,
-            prompt=prompt,
+            requested_by=requested_by_payload,
+            prompt=prompt_for_command,
             task_id=task.id,
         )
         browser_task = self._task_to_browser(task)

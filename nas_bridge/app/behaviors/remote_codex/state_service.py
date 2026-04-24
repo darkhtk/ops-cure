@@ -131,6 +131,80 @@ def normalize_requested_by(payload: dict[str, Any] | None = None) -> dict[str, A
     }
 
 
+def normalize_command_attachment(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    name = compact_text(value.get("name"), "attachment")
+    mime_type = compact_text(value.get("mimeType") or value.get("mime_type"), "application/octet-stream")
+    kind = compact_text(value.get("kind")).lower()
+    if not kind:
+        kind = "image" if mime_type.startswith("image/") else "file"
+    if kind not in {"image", "file"}:
+        return None
+    size = max(0, coerce_int(value.get("size"), 0))
+    normalized = {
+        "name": name,
+        "mimeType": mime_type,
+        "kind": kind,
+        "size": size,
+    }
+    if kind == "image":
+        data_url = compact_text(value.get("dataUrl") or value.get("data_url"))
+        if not data_url:
+            return None
+        normalized["dataUrl"] = data_url
+        return normalized
+    bytes_base64 = compact_text(value.get("bytesBase64") or value.get("bytes_base64"))
+    if not bytes_base64:
+        return None
+    normalized["bytesBase64"] = bytes_base64
+    return normalized
+
+
+def normalize_command_attachments(payload: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    payload = payload or {}
+    raw = payload.get("attachments") or payload.get("browserAttachments") or []
+    if not isinstance(raw, list):
+        return []
+    normalized: list[dict[str, Any]] = []
+    for item in raw:
+        attachment = normalize_command_attachment(item)
+        if attachment is not None:
+            normalized.append(attachment)
+    return normalized
+
+
+def serialize_requested_by(payload: dict[str, Any] | None = None) -> str:
+    normalized = normalize_requested_by(payload)
+    attachments = normalize_command_attachments(payload)
+    if attachments:
+        normalized["attachments"] = attachments
+    return dumps_json(normalized)
+
+
+def public_command_attachments(
+    payload: dict[str, Any] | None,
+    *,
+    include_attachment_data: bool = False,
+) -> list[dict[str, Any]]:
+    attachments = normalize_command_attachments(payload)
+    public: list[dict[str, Any]] = []
+    for attachment in attachments:
+        item = {
+            "name": attachment["name"],
+            "mimeType": attachment["mimeType"],
+            "kind": attachment["kind"],
+            "size": attachment["size"],
+        }
+        if include_attachment_data:
+            if attachment["kind"] == "image":
+                item["dataUrl"] = attachment.get("dataUrl")
+            else:
+                item["bytesBase64"] = attachment.get("bytesBase64")
+        public.append(item)
+    return public
+
+
 def prompt_preview(prompt: str | None, max_length: int = 160) -> str | None:
     text = compact_text(prompt)
     if not text:
@@ -257,10 +331,16 @@ class RemoteCodexStateService:
             "images": loads_json(row.images_json, []),
         }
 
-    def _command_row_to_public(self, row: RemoteCodexCommandModel) -> dict[str, Any]:
+    def _command_row_to_public(
+        self,
+        row: RemoteCodexCommandModel,
+        *,
+        include_attachment_data: bool = False,
+    ) -> dict[str, Any]:
         result = loads_json(row.result_json, None)
         error = loads_json(row.error_json, None)
         turn_id = command_turn_id_from_row(row)
+        requested_by = loads_json(row.requested_by_json, {})
         return {
             "commandId": row.command_id,
             "type": row.type,
@@ -275,7 +355,11 @@ class RemoteCodexStateService:
             "updatedAt": isoformat(row.updated_at),
             "startedAt": isoformat(row.started_at),
             "completedAt": isoformat(row.completed_at),
-            "requestedBy": loads_json(row.requested_by_json, {}),
+            "requestedBy": normalize_requested_by(requested_by),
+            "attachments": public_command_attachments(
+                requested_by,
+                include_attachment_data=include_attachment_data,
+            ),
             "result": result,
             "error": error,
         }
@@ -316,6 +400,18 @@ class RemoteCodexStateService:
         if not should_surface:
             return None
 
+        requested_by = loads_json(row.requested_by_json, {})
+        attachments = normalize_command_attachments(requested_by)
+        images = [
+            {
+                "src": attachment["dataUrl"],
+                "alt": attachment["name"],
+                "title": attachment["name"],
+            }
+            for attachment in attachments
+            if attachment.get("kind") == "image" and compact_text(attachment.get("dataUrl"))
+        ]
+
         synthetic_line_number = -max(1, int(created_at.timestamp() * 1000))
         recent_user_texts.add(normalized_prompt)
         return {
@@ -324,7 +420,7 @@ class RemoteCodexStateService:
             "role": "user",
             "phase": None,
             "text": prompt,
-            "images": [],
+            "images": images,
         }
 
     def _sort_public_machines(self, machines: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -790,7 +886,7 @@ class RemoteCodexStateService:
                 task_id=task_id,
                 turn_id=turn_id,
                 prompt=prompt,
-                requested_by_json=dumps_json(normalize_requested_by(requested_by)),
+                requested_by_json=serialize_requested_by(requested_by),
             )
             db.add(row)
             db.flush()
@@ -816,8 +912,9 @@ class RemoteCodexStateService:
             row.started_at = utcnow()
             row.updated_at = row.started_at
             db.flush()
-            public = self._command_row_to_public(row)
-        self._publish(machine_id, public["threadId"], {"kind": "command", "command": public})
+            public = self._command_row_to_public(row, include_attachment_data=True)
+            broadcast = self._command_row_to_public(row)
+        self._publish(machine_id, public["threadId"], {"kind": "command", "command": broadcast})
         return public
 
     def complete_command(self, command_id: str, *, worker_id: str, result: dict[str, Any] | None) -> dict[str, Any]:

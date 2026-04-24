@@ -74,7 +74,12 @@ class AppServerThreadClient(Protocol):
 
     def read_thread(self, thread_id: str, *, include_turns: bool = False) -> dict[str, Any]: ...
 
-    def start_turn(self, thread_id: str, prompt: str) -> dict[str, Any]: ...
+    def start_turn(
+        self,
+        thread_id: str,
+        prompt: str,
+        input_items: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]: ...
 
     def interrupt_turn(self, thread_id: str, turn_id: str) -> dict[str, Any]: ...
 
@@ -502,15 +507,22 @@ class CodexAppServerProcessClient:
     def resume_thread(self, thread_id: str) -> dict[str, Any]:
         return self._send_request("thread/resume", {"threadId": thread_id})
 
-    def start_turn(self, thread_id: str, prompt: str) -> dict[str, Any]:
+    def start_turn(
+        self,
+        thread_id: str,
+        prompt: str,
+        input_items: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         return self._send_request(
             "turn/start",
             {
                 "threadId": thread_id,
-                "input": [
+                "input": input_items
+                or [
                     {
                         "type": "text",
                         "text": prompt,
+                        "text_elements": [],
                     },
                 ],
             },

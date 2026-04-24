@@ -380,6 +380,133 @@ def test_remote_codex_browser_and_agent_surface_round_trip(app_env) -> None:
         assert delete_response.json()["command"]["type"] == "thread.delete"
 
 
+def test_remote_codex_turn_upload_accepts_images_and_files(app_env) -> None:
+    from app.main import app
+
+    now = datetime.now(timezone.utc).isoformat()
+    machine_id = "machine-upload"
+    thread_id = "thread-upload"
+    sync_payload = {
+        "machine": {
+            "machineId": machine_id,
+            "displayName": "Machine Upload",
+            "source": "agent",
+            "activeTransport": "standalone-app-server",
+            "runtimeMode": "standalone-app-server",
+            "runtimeAvailable": True,
+            "capabilities": {
+                "threadRead": True,
+                "threadLive": True,
+                "liveControl": True,
+                "approvalHandling": False,
+            },
+            "runtimeDescriptor": {"runtimeMode": "standalone-app-server"},
+            "lastRuntimeError": None,
+            "lastDiagnostic": None,
+            "lastSeenAt": now,
+            "lastSyncAt": now,
+        },
+        "threads": [
+            {
+                "id": thread_id,
+                "title": "Upload thread",
+                "cwd": r"C:\Users\darkh\Projects\codex-remote",
+                "rolloutPath": r"C:\Users\darkh\.codex\upload-thread.jsonl",
+                "updatedAtMs": 1700001000000,
+                "createdAtMs": 1700000000000,
+                "source": "app-server",
+                "modelProvider": "openai",
+                "model": "gpt-5.4",
+                "reasoningEffort": "medium",
+                "cliVersion": "1.0.0",
+                "firstUserMessage": "",
+                "status": {"type": "active"},
+                "agentNickname": None,
+                "agentRole": None,
+            }
+        ],
+        "snapshots": [
+            {
+                "thread": {
+                    "id": thread_id,
+                    "title": "Upload thread",
+                    "cwd": r"C:\Users\darkh\Projects\codex-remote",
+                    "rolloutPath": r"C:\Users\darkh\.codex\upload-thread.jsonl",
+                    "updatedAtMs": 1700001000000,
+                    "createdAtMs": 1700000000000,
+                    "source": "app-server",
+                    "modelProvider": "openai",
+                    "model": "gpt-5.4",
+                    "reasoningEffort": "medium",
+                    "cliVersion": "1.0.0",
+                    "firstUserMessage": "",
+                    "status": {"type": "active"},
+                    "agentNickname": None,
+                    "agentRole": None,
+                },
+                "messages": [],
+                "totalMessages": 0,
+                "lineCount": 0,
+                "fileSize": 0,
+                "syncedAt": now,
+            }
+        ],
+    }
+
+    with TestClient(app) as client:
+        sync_response = client.post(
+            "/api/remote-codex/agent/sync",
+            headers={"Authorization": "Bearer test-token"},
+            json=sync_payload,
+        )
+        assert sync_response.status_code == 200
+
+        turn_response = client.post(
+            f"/api/remote-codex/machines/{machine_id}/threads/{thread_id}/turns",
+            headers={"Authorization": "Bearer test-token"},
+            data={"prompt": "Review the attached files."},
+            files=[
+                ("attachments", ("screenshot.png", b"fake-png-bytes", "image/png")),
+                ("attachments", ("notes.md", b"# notes\n- item\n", "text/markdown")),
+            ],
+        )
+        assert turn_response.status_code == 200, turn_response.text
+        command = turn_response.json()["command"]
+        assert command["attachments"] == [
+            {
+                "name": "screenshot.png",
+                "mimeType": "image/png",
+                "kind": "image",
+                "size": 14,
+            },
+            {
+                "name": "notes.md",
+                "mimeType": "text/markdown",
+                "kind": "file",
+                "size": 15,
+            },
+        ]
+
+        messages_response = client.get(
+            f"/api/remote-codex/machines/{machine_id}/threads/{thread_id}/messages",
+            headers={"Authorization": "Bearer test-token"},
+        )
+        assert messages_response.status_code == 200
+        pending_messages = messages_response.json()["messages"]
+        assert [item["text"] for item in pending_messages] == ["Review the attached files."]
+        assert pending_messages[0]["images"][0]["src"].startswith("data:image/png;base64,")
+
+        claim_response = client.post(
+            "/api/remote-codex/agent/commands/claim",
+            headers={"Authorization": "Bearer test-token"},
+            json={"machineId": machine_id, "workerId": "worker-upload"},
+        )
+        assert claim_response.status_code == 200
+        claimed_command = claim_response.json()["command"]
+        assert claimed_command["attachments"][0]["dataUrl"].startswith("data:image/png;base64,")
+        assert claimed_command["attachments"][1]["bytesBase64"]
+
+
 def test_remote_codex_keeps_pending_turn_visible_while_linked_task_is_active(app_env) -> None:
     from app.behaviors.remote_codex.state_service import DEFAULT_PENDING_COMMAND_VISIBILITY_SECONDS
     from app.db import session_scope

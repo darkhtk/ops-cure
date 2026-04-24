@@ -8,6 +8,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from pc_launcher.connectors.remote_executor.device_agent import (
+    DEFAULT_ATTACHMENT_FALLBACK_PROMPT,
     LocalCodexBackend,
     RemoteCodexDeviceAgent,
     WindowsCodexDesktopPromptSubmitter,
@@ -27,12 +28,13 @@ class FakeBackend:
     read_limits: list[tuple[str, int]] = field(default_factory=list)
     start_turn_calls: list[tuple[str, str]] = field(default_factory=list)
     materialized_prompts: list[tuple[str, str, str]] = field(default_factory=list)
-    desktop_ui_submit_calls: list[tuple[str, str]] = field(default_factory=list)
+    desktop_ui_submit_calls: list[tuple[str, str, list[dict] | None]] = field(default_factory=list)
     desktop_ui_enabled_threads: set[str] = field(default_factory=set)
     desktop_ui_submit_mode: str | None = "desktop-ipc"
     interrupt_calls: list[tuple[str, str]] = field(default_factory=list)
     delete_calls: list[str] = field(default_factory=list)
     actions: list[str] = field(default_factory=list)
+    start_turn_input_items: list[tuple[str, list[dict] | None]] = field(default_factory=list)
 
     def get_health(self) -> dict[str, object]:
         return dict(self.health)
@@ -51,9 +53,49 @@ class FakeBackend:
         snapshot = self.snapshots.get(thread_id)
         return dict(snapshot) if snapshot is not None else None
 
-    def start_turn(self, thread_id: str, prompt: str) -> dict:
+    def _build_turn_input_items(
+        self,
+        *,
+        prompt: str,
+        attachments: list[dict] | None,
+        command_id: str,
+    ) -> tuple[str, list[dict]]:
+        normalized_prompt = str(prompt or "").strip()
+        attachments = list(attachments or [])
+        file_names = [
+            str(item.get("name") or "").strip()
+            for item in attachments
+            if str(item.get("kind") or "").strip().lower() == "file" and str(item.get("name") or "").strip()
+        ]
+        if file_names:
+            prompt_prefix = normalized_prompt or DEFAULT_ATTACHMENT_FALLBACK_PROMPT
+            normalized_prompt = prompt_prefix + "\n\nAttached local files:\n" + "\n".join(f"- {name}" for name in file_names)
+        input_items: list[dict] = []
+        if normalized_prompt:
+            input_items.append(
+                {
+                    "type": "text",
+                    "text": normalized_prompt,
+                    "text_elements": [],
+                }
+            )
+        for item in attachments:
+            if str(item.get("kind") or "").strip().lower() != "image":
+                continue
+            data_url = str(item.get("dataUrl") or "").strip()
+            if data_url:
+                input_items.append(
+                    {
+                        "type": "image",
+                        "url": data_url,
+                    }
+                )
+        return normalized_prompt, input_items
+
+    def start_turn(self, thread_id: str, prompt: str, input_items: list[dict] | None = None) -> dict:
         self.actions.append("start_turn")
         self.start_turn_calls.append((thread_id, prompt))
+        self.start_turn_input_items.append((thread_id, input_items))
         return {
             "turn": {
                 "id": "turn-1",
@@ -61,7 +103,14 @@ class FakeBackend:
             }
         }
 
-    def materialize_pending_browser_prompt(self, *, thread_id: str, command_id: str, prompt: str) -> bool:
+    def materialize_pending_browser_prompt(
+        self,
+        *,
+        thread_id: str,
+        command_id: str,
+        prompt: str,
+        attachments: list[dict] | None = None,
+    ) -> bool:
         self.actions.append("materialize")
         self.materialized_prompts.append((thread_id, command_id, prompt))
         return True
@@ -69,11 +118,17 @@ class FakeBackend:
     def can_submit_prompt_via_desktop_ui(self, thread_id: str) -> bool:
         return thread_id in self.desktop_ui_enabled_threads
 
-    def submit_prompt_via_desktop_ui(self, *, thread_id: str, prompt: str) -> str | None:
+    def submit_prompt_via_desktop_ui(
+        self,
+        *,
+        thread_id: str,
+        prompt: str,
+        input_items: list[dict] | None = None,
+    ) -> str | None:
         if not self.can_submit_prompt_via_desktop_ui(thread_id):
             return None
         self.actions.append("desktop_submit")
-        self.desktop_ui_submit_calls.append((thread_id, prompt))
+        self.desktop_ui_submit_calls.append((thread_id, prompt, input_items))
         return self.desktop_ui_submit_mode
 
     def interrupt_turn(self, thread_id: str, turn_id: str) -> dict:
@@ -218,7 +273,7 @@ class FakeAppServerClient:
     def resume_thread(self, thread_id: str) -> dict:
         return {"ok": True}
 
-    def start_turn(self, thread_id: str, prompt: str) -> dict:
+    def start_turn(self, thread_id: str, prompt: str, input_items: list[dict] | None = None) -> dict:
         return {"turn": {"id": "turn-1", "status": "inProgress"}}
 
     def interrupt_turn(self, thread_id: str, turn_id: str) -> dict:
@@ -333,6 +388,25 @@ def test_merge_adjacent_message_keeps_image_payload_from_duplicate_message() -> 
     assert previous["lineNumber"] == 2
 
 
+def test_normalize_rollout_message_preserves_multiline_markdown_for_event_msg() -> None:
+    markdown = "# Title\n\n- one\n- two\n\n```md\nhello\n```"
+    entry = {
+        "type": "event_msg",
+        "payload": {
+            "type": "agent_message",
+            "phase": "final_answer",
+            "message": markdown,
+        },
+    }
+
+    message = normalize_rollout_message(entry, line_number=8)
+
+    assert message is not None
+    assert message["role"] == "assistant"
+    assert message["phase"] == "final_answer"
+    assert message["text"] == markdown
+
+
 def test_merge_adjacent_message_collapses_whitespace_only_text_differences() -> None:
     previous = {
         "lineNumber": 10,
@@ -375,6 +449,22 @@ def test_normalize_turn_item_message_extracts_user_text_from_turn_content() -> N
     assert message["role"] == "user"
     assert message["text"] == "컴포저 높이가 너무 커."
     assert message["images"] == []
+
+
+def test_normalize_turn_item_message_preserves_multiline_markdown_fallback_text() -> None:
+    markdown = "## Summary\n\n1. First\n2. Second\n\n> quoted"
+    item = {
+        "type": "agentMessage",
+        "text": markdown,
+        "phase": "final_answer",
+    }
+
+    message = normalize_turn_item_message(item, sequence_number=11, phase="inProgress")
+
+    assert message is not None
+    assert message["role"] == "assistant"
+    assert message["phase"] == "final_answer"
+    assert message["text"] == markdown
 
 
 def test_merge_missing_turn_messages_appends_recent_prompt_not_in_rollout_tail() -> None:
@@ -801,6 +891,69 @@ def test_remote_codex_device_agent_executes_turn_start_commands_and_reports_resu
     assert len(bridge.sync_calls) >= 2
 
 
+def test_remote_codex_device_agent_executes_turn_start_with_image_and_file_attachments() -> None:
+    backend = FakeBackend(
+        threads=[_sample_thread()],
+        snapshots={"thread-1": _sample_snapshot()},
+        health=_sample_health(),
+    )
+    bridge = FakeBridge(
+        queued_commands=[
+            {
+                "commandId": "command-attachment-1",
+                "type": "turn.start",
+                "machineId": "homedev",
+                "threadId": "thread-1",
+                "taskId": "task-1",
+                "prompt": "Please inspect the attached context.",
+                "attachments": [
+                    {
+                        "name": "screenshot.png",
+                        "mimeType": "image/png",
+                        "kind": "image",
+                        "size": 18,
+                        "dataUrl": "data:image/png;base64,abc123",
+                    },
+                    {
+                        "name": "notes.md",
+                        "mimeType": "text/markdown",
+                        "kind": "file",
+                        "size": 12,
+                        "bytesBase64": "IyBub3Rlcwo=",
+                    },
+                ],
+            }
+        ]
+    )
+    agent = RemoteCodexDeviceAgent(
+        bridge=bridge,
+        backend=backend,
+        machine_id="homedev",
+        display_name="Home Dev",
+        worker_id="homedev-agent",
+    )
+
+    worked = agent.poll_once()
+
+    assert worked is True
+    assert backend.start_turn_calls[0][0] == "thread-1"
+    submitted_prompt = backend.start_turn_calls[0][1]
+    assert submitted_prompt.startswith("Please inspect the attached context.\n\nAttached local files:\n- ")
+    assert "Attached local files:" in submitted_prompt
+    assert "notes.md" in submitted_prompt
+    assert backend.start_turn_input_items[0][1] == [
+        {
+            "type": "text",
+            "text": submitted_prompt,
+            "text_elements": [],
+        },
+        {
+            "type": "image",
+            "url": "data:image/png;base64,abc123",
+        },
+    ]
+
+
 def test_remote_codex_device_agent_sync_materializes_pending_browser_prompt_before_claim() -> None:
     backend = FakeBackend(
         threads=[_sample_thread()],
@@ -898,7 +1051,19 @@ def test_remote_codex_device_agent_executes_turn_start_commands_via_desktop_ui_w
     worked = agent.poll_once()
 
     assert worked is True
-    assert backend.desktop_ui_submit_calls == [("thread-1", "Inject this through the desktop Codex composer.")]
+    assert backend.desktop_ui_submit_calls == [
+        (
+            "thread-1",
+            "Inject this through the desktop Codex composer.",
+            [
+                {
+                    "type": "text",
+                    "text": "Inject this through the desktop Codex composer.",
+                    "text_elements": [],
+                }
+            ],
+        )
+    ]
     assert backend.start_turn_calls == []
     assert backend.materialized_prompts == []
     assert backend.actions[:1] == ["desktop_submit"]
@@ -914,10 +1079,10 @@ def test_remote_codex_device_agent_executes_turn_start_commands_via_desktop_ui_w
 @dataclass
 class FakePromptSubmitter:
     mode: str | None
-    calls: list[str] = field(default_factory=list)
+    calls: list[tuple[str, list[dict] | None]] = field(default_factory=list)
 
-    def submit_prompt(self, prompt: str) -> str | None:
-        self.calls.append(prompt)
+    def submit_prompt(self, prompt: str, input_items: list[dict] | None = None) -> str | None:
+        self.calls.append((prompt, input_items))
         return self.mode
 
 
@@ -933,7 +1098,18 @@ def test_windows_codex_desktop_prompt_submitter_prefers_ipc_submitter() -> None:
     mode = submitter.submit_prompt("[TEST]desktop submit")
 
     assert mode == "desktop-ipc"
-    assert ipc_submitter.calls == ["[TEST]desktop submit"]
+    assert ipc_submitter.calls == [
+        (
+            "[TEST]desktop submit",
+            [
+                {
+                    "type": "text",
+                    "text": "[TEST]desktop submit",
+                    "text_elements": [],
+                }
+            ],
+        )
+    ]
     assert fallback_submitter.calls == []
 
 
@@ -949,8 +1125,30 @@ def test_windows_codex_desktop_prompt_submitter_falls_back_to_ui_submitter() -> 
     mode = submitter.submit_prompt("[TEST]desktop submit")
 
     assert mode == "desktop-ui"
-    assert ipc_submitter.calls == ["[TEST]desktop submit"]
-    assert fallback_submitter.calls == ["[TEST]desktop submit"]
+    assert ipc_submitter.calls == [
+        (
+            "[TEST]desktop submit",
+            [
+                {
+                    "type": "text",
+                    "text": "[TEST]desktop submit",
+                    "text_elements": [],
+                }
+            ],
+        )
+    ]
+    assert fallback_submitter.calls == [
+        (
+            "[TEST]desktop submit",
+            [
+                {
+                    "type": "text",
+                    "text": "[TEST]desktop submit",
+                    "text_elements": [],
+                }
+            ],
+        )
+    ]
 
 
 def test_remote_codex_device_agent_executes_thread_delete_commands() -> None:
