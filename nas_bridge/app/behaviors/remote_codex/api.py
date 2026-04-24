@@ -502,3 +502,38 @@ async def stream_thread(
             elif kind == "task":
                 yield f"event: task\ndata: {json.dumps(payload['task'])}\n\n"
     return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@router.get("/machines/{machine_id}/live")
+async def stream_machine(
+    machine_id: str,
+    request: Request,
+    _caller: StreamBridgeCaller,
+):
+    service = request.app.state.services.remote_codex_service
+    handle = await service.subscribe_machine(machine_id)
+
+    async def event_stream():
+        try:
+            machine_snapshot = service.get_machine(machine_id)
+            if machine_snapshot is None:
+                yield f"event: error\ndata: {json.dumps({'message': 'machine_not_found'})}\n\n"
+                handle.unsubscribe()
+                return
+
+            yield f"event: ready\ndata: {json.dumps({'machine': machine_snapshot})}\n\n"
+
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    payload = await asyncio.wait_for(handle.queue.get(), timeout=15)
+                except TimeoutError:
+                    yield f"event: ping\ndata: {json.dumps({'at': int(asyncio.get_running_loop().time() * 1000)})}\n\n"
+                    continue
+                kind = payload.get("kind") or "message"
+                yield f"event: {kind}\ndata: {json.dumps(payload)}\n\n"
+        finally:
+            handle.unsubscribe()
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")

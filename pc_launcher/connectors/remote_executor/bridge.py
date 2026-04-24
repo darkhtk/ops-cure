@@ -1,12 +1,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Iterator, Protocol
 
 from ...bridge_client import BridgeClient
 
 
 class RemoteExecutorBridge(Protocol):
+    def stream_remote_codex_machine(
+        self,
+        *,
+        machine_id: str,
+        subscriber_id: str | None = None,
+    ) -> Iterator[tuple[str, dict[str, Any]]]: ...
+
     def sync_remote_codex_agent(
         self,
         *,
@@ -77,6 +84,7 @@ class RemoteExecutorBridge(Protocol):
         machine_id: str,
         actor_id: str,
         lease_seconds: int = 90,
+        exclude_origin_surfaces: list[str] | None = None,
     ) -> dict[str, Any] | None: ...
 
     def claim_remote_task(
@@ -143,6 +151,17 @@ class RemoteExecutorBridge(Protocol):
 @dataclass(slots=True)
 class BridgeRemoteExecutorClient:
     bridge_client: BridgeClient
+
+    def stream_remote_codex_machine(
+        self,
+        *,
+        machine_id: str,
+        subscriber_id: str | None = None,
+    ) -> Iterator[tuple[str, dict[str, Any]]]:
+        return self.bridge_client.stream_remote_codex_machine(
+            machine_id=machine_id,
+            subscriber_id=subscriber_id,
+        )
 
     def sync_remote_codex_agent(
         self,
@@ -257,11 +276,13 @@ class BridgeRemoteExecutorClient:
         machine_id: str,
         actor_id: str,
         lease_seconds: int = 90,
+        exclude_origin_surfaces: list[str] | None = None,
     ) -> dict[str, Any] | None:
         return self.bridge_client.claim_next_remote_task_for_machine(
             machine_id=machine_id,
             actor_id=actor_id,
             lease_seconds=lease_seconds,
+            exclude_origin_surfaces=exclude_origin_surfaces,
         )
 
     def claim_remote_task(

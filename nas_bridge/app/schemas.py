@@ -673,11 +673,25 @@ class RemoteTaskClaimRequest(BaseModel):
 class RemoteTaskClaimNextRequest(BaseModel):
     actor_id: str
     lease_seconds: int = 120
+    exclude_origin_surfaces: list[str] = Field(default_factory=list)
 
     @field_validator("lease_seconds")
     @classmethod
     def validate_lease_seconds(cls, value: int) -> int:
         return max(10, min(value, 3600))
+
+    @field_validator("exclude_origin_surfaces")
+    @classmethod
+    def validate_exclude_origin_surfaces(cls, value: list[str]) -> list[str]:
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for item in value:
+            text = str(item or "").strip().lower()
+            if not text or text in seen:
+                continue
+            normalized.append(text)
+            seen.add(text)
+        return normalized
 
 
 class RemoteTaskHeartbeatRequest(BaseModel):

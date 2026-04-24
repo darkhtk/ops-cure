@@ -26,6 +26,7 @@ class FakeBackend:
     materialized_prompts: list[tuple[str, str, str]] = field(default_factory=list)
     interrupt_calls: list[tuple[str, str]] = field(default_factory=list)
     delete_calls: list[str] = field(default_factory=list)
+    actions: list[str] = field(default_factory=list)
 
     def get_health(self) -> dict[str, object]:
         return dict(self.health)
@@ -45,6 +46,7 @@ class FakeBackend:
         return dict(snapshot) if snapshot is not None else None
 
     def start_turn(self, thread_id: str, prompt: str) -> dict:
+        self.actions.append("start_turn")
         self.start_turn_calls.append((thread_id, prompt))
         return {
             "turn": {
@@ -54,6 +56,7 @@ class FakeBackend:
         }
 
     def materialize_pending_browser_prompt(self, *, thread_id: str, command_id: str, prompt: str) -> bool:
+        self.actions.append("materialize")
         self.materialized_prompts.append((thread_id, command_id, prompt))
         return True
 
@@ -701,6 +704,7 @@ def test_remote_codex_device_agent_executes_turn_start_commands_and_reports_resu
     assert worked is True
     assert backend.start_turn_calls == [("thread-1", "Add a real device sync loop.")]
     assert backend.materialized_prompts == [("thread-1", "command-1", "Add a real device sync loop.")]
+    assert backend.actions[:2] == ["materialize", "start_turn"]
     assert [item["phase"] for item in bridge.heartbeat_calls] == ["running", "executing"]
     assert bridge.evidence_calls[0]["payload"]["turnId"] == "turn-1"
     assert bridge.command_result_calls[0]["status"] == "completed"

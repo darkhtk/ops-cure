@@ -925,7 +925,7 @@ class RemoteCodexDeviceAgent:
             "lastSyncAt": now,
         }
 
-    def perform_sync(self, *, force: bool = False) -> bool:
+    def perform_sync(self, *, force: bool = False, include_pending_commands: bool = True) -> bool:
         threads = self.backend.list_threads(limit=self.max_threads)
         snapshots: list[dict[str, Any]] = []
         next_versions: dict[str, str] = {}
@@ -934,31 +934,32 @@ class RemoteCodexDeviceAgent:
             if not thread_id:
                 continue
             pending_materialized = False
-            try:
-                command_rows = self.bridge.get_remote_codex_thread_commands(
-                    machine_id=self.machine_id,
-                    thread_id=thread_id,
-                    limit=self.pending_command_sync_limit,
-                )
-            except Exception:
-                command_rows = []
-            for command in command_rows:
-                if compact_text(command.get("type")) != "turn.start":
-                    continue
-                if compact_text(command.get("status")).lower() not in {"queued", "running"}:
-                    continue
-                prompt = compact_text(command.get("prompt"))
-                command_id = compact_text(command.get("commandId"))
-                if not prompt or not command_id:
-                    continue
-                pending_materialized = (
-                    self.backend.materialize_pending_browser_prompt(
+            if include_pending_commands:
+                try:
+                    command_rows = self.bridge.get_remote_codex_thread_commands(
+                        machine_id=self.machine_id,
                         thread_id=thread_id,
-                        command_id=command_id,
-                        prompt=prompt,
+                        limit=self.pending_command_sync_limit,
                     )
-                    or pending_materialized
-                )
+                except Exception:
+                    command_rows = []
+                for command in command_rows:
+                    if compact_text(command.get("type")) != "turn.start":
+                        continue
+                    if compact_text(command.get("status")).lower() not in {"queued", "running"}:
+                        continue
+                    prompt = compact_text(command.get("prompt"))
+                    command_id = compact_text(command.get("commandId"))
+                    if not prompt or not command_id:
+                        continue
+                    pending_materialized = (
+                        self.backend.materialize_pending_browser_prompt(
+                            thread_id=thread_id,
+                            command_id=command_id,
+                            prompt=prompt,
+                        )
+                        or pending_materialized
+                    )
 
             current_thread = self.backend.get_thread_by_id(thread_id) or thread
             version = build_thread_version(current_thread)
@@ -991,6 +992,9 @@ class RemoteCodexDeviceAgent:
         self.has_bootstrapped = True
         return bool(snapshots or threads)
 
+    def maintenance_sync(self) -> bool:
+        return self.perform_sync(force=False, include_pending_commands=False)
+
     def mark_thread_dirty(self, thread_id: str) -> None:
         self.thread_versions.pop(thread_id, None)
 
@@ -1019,13 +1023,13 @@ class RemoteCodexDeviceAgent:
                 prompt = compact_text(command.get("prompt"))
                 if not prompt:
                     raise RuntimeError("Turn prompt is empty.")
-                response = self.backend.start_turn(thread_id, prompt)
                 if command_id:
                     self.backend.materialize_pending_browser_prompt(
                         thread_id=thread_id,
                         command_id=command_id,
                         prompt=prompt,
                     )
+                response = self.backend.start_turn(thread_id, prompt)
                 result = {
                     "accepted": True,
                     "turnId": extract_turn_id(response),

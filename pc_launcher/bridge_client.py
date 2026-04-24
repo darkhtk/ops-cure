@@ -287,6 +287,28 @@ class BridgeClient:
         finally:
             response.close()
 
+    def stream_remote_codex_machine(
+        self,
+        *,
+        machine_id: str,
+        subscriber_id: str | None = None,
+    ) -> Iterator[tuple[str, dict[str, Any]]]:
+        params: list[str] = []
+        if subscriber_id:
+            params.append(f"subscriber_id={quote_plus(subscriber_id)}")
+        query = f"?{'&'.join(params)}" if params else ""
+        response = self.session.get(
+            f"{self.base_url}/api/remote-codex/machines/{machine_id}/live{query}",
+            timeout=(self.timeout_seconds, max(self.timeout_seconds, 60)),
+            stream=True,
+        )
+        if not response.ok:
+            self._handle_response(f"/api/remote-codex/machines/{machine_id}/live", response)
+        try:
+            yield from self._iter_sse(response)
+        finally:
+            response.close()
+
     def register_chat_participant(
         self,
         *,
@@ -394,13 +416,17 @@ class BridgeClient:
         machine_id: str,
         actor_id: str,
         lease_seconds: int = 90,
+        exclude_origin_surfaces: list[str] | None = None,
     ) -> dict[str, Any] | None:
+        payload = {
+            "actor_id": actor_id,
+            "lease_seconds": lease_seconds,
+        }
+        if exclude_origin_surfaces:
+            payload["exclude_origin_surfaces"] = list(exclude_origin_surfaces)
         payload = self._post(
             f"/api/remote-codex/machines/{machine_id}/tasks/claim-next",
-            {
-                "actor_id": actor_id,
-                "lease_seconds": lease_seconds,
-            },
+            payload,
         )
         task = payload.get("task") if isinstance(payload, dict) else payload
         if not task:

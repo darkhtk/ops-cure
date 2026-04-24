@@ -278,6 +278,48 @@ def test_remote_task_service_claim_next_prefers_priority_and_is_machine_scoped(a
     assert untouched.owner_actor_id is None
 
 
+def test_remote_task_service_claim_next_can_exclude_browser_origin(app_env):
+    from app.schemas import RemoteTaskClaimNextRequest, RemoteTaskCreateRequest
+    from app.services.remote_task_service import RemoteTaskService
+
+    service = RemoteTaskService()
+    browser_task = service.create_task(
+        RemoteTaskCreateRequest(
+            machine_id="machine-g",
+            thread_id="thread-browser",
+            objective="Browser composer turn",
+            success_criteria={"browser": ["queued row"]},
+            created_by="browser-user",
+            origin_surface="browser",
+            priority="high",
+        ),
+    )
+    executor_task = service.create_task(
+        RemoteTaskCreateRequest(
+            machine_id="machine-g",
+            thread_id="thread-executor",
+            objective="Background executor task",
+            success_criteria={"executor": ["work complete"]},
+            created_by="service",
+            origin_surface="executor",
+            priority="normal",
+        ),
+    )
+
+    claimed = service.claim_next_task(
+        machine_id="machine-g",
+        payload=RemoteTaskClaimNextRequest(
+            actor_id="codex-executor",
+            lease_seconds=90,
+            exclude_origin_surfaces=["browser"],
+        ),
+    )
+
+    assert claimed is not None
+    assert claimed.id == executor_task.id
+    assert service.get_task(browser_task.id).status == "queued"
+
+
 def test_remote_task_service_can_settle_stale_task_without_active_lease(app_env):
     from datetime import timedelta
 

@@ -170,7 +170,7 @@ class RemoteCodexStateService:
     def __init__(self) -> None:
         self._subscribers: dict[tuple[str, str], dict[str, asyncio.Queue[dict[str, Any]]]] = defaultdict(dict)
 
-    def subscribe_thread(self, machine_id: str, thread_id: str) -> SubscriptionHandle:
+    def _subscribe(self, machine_id: str, thread_id: str) -> SubscriptionHandle:
         queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         subscription_id = str(uuid.uuid4())
         key = (machine_id, thread_id)
@@ -183,15 +183,29 @@ class RemoteCodexStateService:
 
         return SubscriptionHandle(queue=queue, unsubscribe=unsubscribe)
 
+    def subscribe_thread(self, machine_id: str, thread_id: str) -> SubscriptionHandle:
+        return self._subscribe(machine_id, thread_id)
+
+    def subscribe_machine(self, machine_id: str) -> SubscriptionHandle:
+        return self._subscribe(machine_id, "*")
+
     def _publish(self, machine_id: str, thread_id: str, payload: dict[str, Any]) -> None:
+        queues: list[asyncio.Queue[dict[str, Any]]] = []
         if thread_id == "*":
             for (next_machine_id, _next_thread_id), subscribers in list(self._subscribers.items()):
                 if next_machine_id != machine_id:
                     continue
-                for queue in list(subscribers.values()):
-                    queue.put_nowait(payload)
-            return
-        for queue in list(self._subscribers.get((machine_id, thread_id), {}).values()):
+                queues.extend(list(subscribers.values()))
+        else:
+            queues.extend(list(self._subscribers.get((machine_id, thread_id), {}).values()))
+            queues.extend(list(self._subscribers.get((machine_id, "*"), {}).values()))
+
+        seen_queue_ids: set[int] = set()
+        for queue in queues:
+            queue_id = id(queue)
+            if queue_id in seen_queue_ids:
+                continue
+            seen_queue_ids.add(queue_id)
             queue.put_nowait(payload)
 
     def _machine_row_to_public(self, row: RemoteCodexMachineModel, *, thread_count: int | None = None) -> dict[str, Any]:

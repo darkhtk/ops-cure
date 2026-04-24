@@ -31,6 +31,22 @@ class StubRemoteCodexService:
             }
         }
 
+    def get_machine(self, machine_id):
+        self.calls.append(("get_machine", machine_id))
+        now = datetime.now(timezone.utc).isoformat()
+        return {
+            "machineId": machine_id,
+            "displayName": machine_id,
+            "status": "online",
+            "activeTransport": "standalone-app-server",
+            "runtimeMode": "standalone-app-server",
+            "runtimeAvailable": True,
+            "capabilities": {"liveControl": True},
+            "lastSeenAt": now,
+            "lastSyncAt": now,
+            "threadCount": 1,
+        }
+
 
 def test_remote_codex_router_uses_behavior_prefix(app_env) -> None:
     from app.behaviors.remote_codex.api import router

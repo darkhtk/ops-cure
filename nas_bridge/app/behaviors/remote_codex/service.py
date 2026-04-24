@@ -243,6 +243,9 @@ class RemoteCodexBehaviorService:
     def list_machines(self) -> dict[str, Any]:
         return {"machines": self.state_service.list_machines(active_only=True)}
 
+    def get_machine(self, machine_id: str) -> dict[str, Any] | None:
+        return self.state_service.get_machine(machine_id)
+
     def list_machine_threads(self, machine_id: str, *, query: str = "", limit: int = 60) -> dict[str, Any]:
         machine = self.state_service.get_machine(machine_id)
         if machine is None:
@@ -837,3 +840,6 @@ class RemoteCodexBehaviorService:
 
     async def subscribe_thread(self, machine_id: str, thread_id: str):
         return self.state_service.subscribe_thread(machine_id, thread_id)
+
+    async def subscribe_machine(self, machine_id: str):
+        return self.state_service.subscribe_machine(machine_id)

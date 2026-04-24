@@ -139,7 +139,7 @@ class RemoteTaskService:
         payload: RemoteTaskClaimNextRequest,
     ) -> RemoteTaskSummaryResponse | None:
         with session_scope() as db:
-            row = db.scalar(
+            query = (
                 select(RemoteTaskModel)
                 .options(
                     selectinload(RemoteTaskModel.assignments),
@@ -161,8 +161,13 @@ class RemoteTaskService:
                     ),
                     RemoteTaskModel.created_at.asc(),
                 )
-                .limit(1),
+                .limit(1)
             )
+            if payload.exclude_origin_surfaces:
+                query = query.where(
+                    ~RemoteTaskModel.origin_surface.in_(tuple(payload.exclude_origin_surfaces)),
+                )
+            row = db.scalar(query)
             if row is None:
                 return None
             self._claim_task_in_session(db=db, row=row, actor_id=payload.actor_id, lease_seconds=payload.lease_seconds)

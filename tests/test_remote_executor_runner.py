@@ -3,7 +3,12 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
-from pc_launcher.connectors.remote_executor.runner import RunnerConfig, parse_args, run_cycle
+from pc_launcher.connectors.remote_executor.runner import (
+    RunnerConfig,
+    _should_wake_for_machine_event,
+    parse_args,
+    run_cycle,
+)
 
 
 class FailingDeviceAgent:
@@ -16,7 +21,7 @@ class FailingDeviceAgent:
 
 class RecordingBridge:
     def __init__(self) -> None:
-        self.claim_calls: list[tuple[str, str, int]] = []
+        self.claim_calls: list[tuple[str, str, int, tuple[str, ...]]] = []
 
     def claim_next_remote_task_for_machine(
         self,
@@ -24,8 +29,16 @@ class RecordingBridge:
         machine_id: str,
         actor_id: str,
         lease_seconds: int = 90,
+        exclude_origin_surfaces: list[str] | None = None,
     ):
-        self.claim_calls.append((machine_id, actor_id, lease_seconds))
+        self.claim_calls.append(
+            (
+                machine_id,
+                actor_id,
+                lease_seconds,
+                tuple(exclude_origin_surfaces or []),
+            )
+        )
         return None
 
 
@@ -55,6 +68,7 @@ class FailingBridge:
         machine_id: str,
         actor_id: str,
         lease_seconds: int = 90,
+        exclude_origin_surfaces: list[str] | None = None,
     ):
         raise self.error
 
@@ -79,6 +93,13 @@ def test_parse_args_uses_tighter_default_poll_interval() -> None:
     assert config.poll_interval_seconds == 1.0
 
 
+def test_should_wake_for_machine_event_on_remote_codex_signals() -> None:
+    assert _should_wake_for_machine_event("ready", {})
+    assert _should_wake_for_machine_event("command", {"kind": "command"})
+    assert _should_wake_for_machine_event("message", {"kind": "task"})
+    assert not _should_wake_for_machine_event("ping", {"at": 123})
+
+
 def test_run_cycle_survives_device_agent_connection_error() -> None:
     bridge = RecordingBridge()
     session = SimpleNamespace(
@@ -90,6 +111,7 @@ def test_run_cycle_survives_device_agent_connection_error() -> None:
     worked = run_cycle(session, _config())
 
     assert worked is False
+    assert bridge.claim_calls == []
 
 
 class ClaimingBridge:
@@ -99,6 +121,7 @@ class ClaimingBridge:
         machine_id: str,
         actor_id: str,
         lease_seconds: int = 90,
+        exclude_origin_surfaces: list[str] | None = None,
     ):
         return {
             "id": "task-1",
@@ -140,3 +163,19 @@ def test_run_cycle_survives_remote_task_claim_error() -> None:
     worked = run_cycle(session, _config())
 
     assert worked is False
+
+
+def test_run_cycle_excludes_browser_origin_from_generic_task_claim() -> None:
+    bridge = RecordingBridge()
+    session = SimpleNamespace(
+        bridge=bridge,
+        runtime=None,
+        device_agent=IdleDeviceAgent(),
+    )
+
+    worked = run_cycle(session, _config())
+
+    assert worked is False
+    assert bridge.claim_calls == [
+        ("homedev", "codex-executor", 90, ("browser",)),
+    ]

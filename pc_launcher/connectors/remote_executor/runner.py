@@ -50,6 +50,7 @@ except ImportError:  # pragma: no cover - script mode support
 
 
 LOGGER = logging.getLogger(__name__)
+DEFAULT_KEEPALIVE_SYNC_SECONDS = 30.0
 
 
 @dataclass(slots=True)
@@ -111,7 +112,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--poll-seconds",
         type=float,
         default=1.0,
-        help="Idle poll interval when no remote task is available.",
+        help="Reconnect backoff in seconds when the remote_codex live stream drops.",
     )
     parser.add_argument(
         "--lease-seconds",
@@ -400,6 +401,7 @@ def run_cycle(session: RunnerSession, config: RunnerConfig) -> bool:
             machine_id=config.machine_id,
             actor_id=config.actor_id,
             lease_seconds=config.lease_seconds,
+            exclude_origin_surfaces=["browser"],
         )
     except Exception as exc:
         LOGGER.warning(
@@ -440,6 +442,46 @@ def run_once(config: RunnerConfig) -> bool:
     return run_cycle(session, config)
 
 
+def _machine_stream_subscriber_id(config: RunnerConfig) -> str:
+    return compact_text(
+        f"{config.machine_id}:{config.actor_id}:remote-executor",
+        "remote-executor",
+    )
+
+
+def _should_wake_for_machine_event(event_name: str, payload: dict[str, Any]) -> bool:
+    if event_name in {"ready", "machine"}:
+        return True
+    kind = compact_text(payload.get("kind")).lower()
+    if kind in {"snapshot", "thread", "command", "task"}:
+        return True
+    if event_name in {"snapshot", "thread", "command", "task"}:
+        return True
+    return False
+
+
+def _consume_machine_stream(session: RunnerSession, config: RunnerConfig) -> None:
+    last_keepalive_at = time.monotonic()
+    for event_name, payload in session.bridge.stream_remote_codex_machine(
+        machine_id=config.machine_id,
+        subscriber_id=_machine_stream_subscriber_id(config),
+    ):
+        if event_name == "ping":
+            now = time.monotonic()
+            if now - last_keepalive_at >= DEFAULT_KEEPALIVE_SYNC_SECONDS:
+                session.device_agent.maintenance_sync()
+                last_keepalive_at = now
+            continue
+
+        if not _should_wake_for_machine_event(event_name, payload):
+            continue
+
+        run_cycle(session, config)
+        last_keepalive_at = time.monotonic()
+
+    raise ConnectionError(f"remote_codex machine stream for {config.machine_id} ended unexpectedly")
+
+
 def run_forever(config: RunnerConfig) -> None:
     session: RunnerSession | None = None
     failure_count = 0
@@ -447,12 +489,11 @@ def run_forever(config: RunnerConfig) -> None:
         try:
             if session is None:
                 session = build_session(config)
-            worked = run_cycle(session, config)
+            run_cycle(session, config)
             failure_count = 0
             if config.run_once:
                 return
-            if not worked:
-                time.sleep(config.poll_interval_seconds)
+            _consume_machine_stream(session, config)
         except KeyboardInterrupt:
             raise
         except Exception as exc:
