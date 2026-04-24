@@ -26,6 +26,46 @@ DEFAULT_PENDING_COMMAND_SYNC_LIMIT = 8
 REMOTE_CODEX_PENDING_PROMPT_TTL_SECONDS = 6 * 60 * 60
 REMOTE_CODEX_ATTACHMENT_DIRNAME = "remote_codex_attachments"
 DEFAULT_ATTACHMENT_FALLBACK_PROMPT = "Use the attached files and images as context for this turn."
+MAX_INLINE_TEXT_ATTACHMENT_BYTES = 128 * 1024
+TEXT_ATTACHMENT_SUFFIXES = {
+    ".md",
+    ".mdx",
+    ".txt",
+    ".json",
+    ".yaml",
+    ".yml",
+    ".toml",
+    ".ini",
+    ".cfg",
+    ".csv",
+    ".tsv",
+    ".xml",
+    ".html",
+    ".htm",
+    ".css",
+    ".js",
+    ".jsx",
+    ".ts",
+    ".tsx",
+    ".py",
+    ".rb",
+    ".go",
+    ".rs",
+    ".java",
+    ".kt",
+    ".swift",
+    ".c",
+    ".cc",
+    ".cpp",
+    ".h",
+    ".hpp",
+    ".cs",
+    ".php",
+    ".sh",
+    ".ps1",
+    ".sql",
+    ".log",
+}
 
 
 def compact_text(value: Any, fallback: str = "") -> str:
@@ -75,6 +115,47 @@ def normalize_attachment_kind(value: Any, *, name: str = "", mime_type: str = ""
     if Path(normalized_name).suffix.lower() in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"}:
         return "image"
     return "file"
+
+
+def is_inline_text_attachment(*, name: str, mime_type: str, payload: bytes) -> bool:
+    if not payload or len(payload) > MAX_INLINE_TEXT_ATTACHMENT_BYTES:
+        return False
+    normalized_mime_type = compact_text(mime_type).lower()
+    suffix = Path(compact_text(name).lower()).suffix
+    if normalized_mime_type.startswith("text/"):
+        return True
+    if normalized_mime_type in {
+        "application/json",
+        "application/ld+json",
+        "application/xml",
+        "application/x-yaml",
+        "application/yaml",
+        "application/toml",
+        "application/javascript",
+        "application/typescript",
+    }:
+        return True
+    if suffix in TEXT_ATTACHMENT_SUFFIXES:
+        return True
+    return b"\x00" not in payload
+
+
+def infer_attachment_code_fence(name: str, mime_type: str) -> str:
+    normalized_mime_type = compact_text(mime_type).lower()
+    suffix = Path(compact_text(name).lower()).suffix
+    if suffix == ".md":
+        return "md"
+    if suffix == ".mdx":
+        return "mdx"
+    if suffix in {".yaml", ".yml"}:
+        return "yaml"
+    if suffix == ".txt":
+        return "text"
+    if suffix:
+        return suffix.removeprefix(".")
+    if normalized_mime_type.startswith("text/"):
+        return normalized_mime_type.removeprefix("text/")
+    return ""
 
 
 def default_machine_id() -> str:
@@ -774,6 +855,34 @@ class LocalCodexBackend:
             return b""
         return base64.b64decode(encoded)
 
+    def _build_inline_text_attachment_blocks(self, attachments: list[dict[str, Any]]) -> list[str]:
+        blocks: list[str] = []
+        for index, attachment in enumerate(attachments, start=1):
+            if normalize_attachment_kind(
+                attachment.get("kind"),
+                name=attachment.get("name"),
+                mime_type=attachment.get("mimeType"),
+            ) == "image":
+                continue
+            payload = self._decode_attachment_bytes(attachment.get("bytesBase64"))
+            if not is_inline_text_attachment(
+                name=attachment.get("name"),
+                mime_type=attachment.get("mimeType"),
+                payload=payload,
+            ):
+                continue
+            filename = self._sanitize_attachment_filename(attachment.get("name"), index=index)
+            text = payload.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n").strip("\n")
+            if not text:
+                continue
+            fence = infer_attachment_code_fence(filename, compact_text(attachment.get("mimeType")))
+            header = f"Attached file: {filename}"
+            if fence:
+                blocks.append(f"{header}\n```{fence}\n{text}\n```")
+            else:
+                blocks.append(f"{header}\n```\n{text}\n```")
+        return blocks
+
     def _materialize_file_attachments(
         self,
         *,
@@ -797,6 +906,12 @@ class LocalCodexBackend:
                 continue
             payload = self._decode_attachment_bytes(attachment.get("bytesBase64"))
             if not payload:
+                continue
+            if is_inline_text_attachment(
+                name=attachment.get("name"),
+                mime_type=attachment.get("mimeType"),
+                payload=payload,
+            ):
                 continue
             filename = self._sanitize_attachment_filename(attachment.get("name"), index=index)
             stem = Path(filename).stem or f"attachment-{index}"
@@ -840,18 +955,22 @@ class LocalCodexBackend:
             }
             image_inputs.append(image_item)
 
+        inline_text_blocks = self._build_inline_text_attachment_blocks(normalized_attachments)
         file_paths = self._materialize_file_attachments(
             command_id=command_id,
             attachments=normalized_attachments,
         )
+        attachment_sections: list[str] = []
+        if inline_text_blocks:
+            attachment_sections.append("\n\n".join(inline_text_blocks))
         if file_paths:
             attachment_lines = "\n".join(f"- {path}" for path in file_paths)
-            file_context = f"Attached local files:\n{attachment_lines}"
-            normalized_prompt = (
-                f"{normalized_prompt}\n\n{file_context}"
-                if normalized_prompt
-                else f"{DEFAULT_ATTACHMENT_FALLBACK_PROMPT}\n\n{file_context}"
-            )
+            attachment_sections.append(f"Attached local files:\n{attachment_lines}")
+
+        if attachment_sections:
+            combined_attachment_context = "\n\n".join(attachment_sections)
+            prompt_prefix = normalized_prompt or DEFAULT_ATTACHMENT_FALLBACK_PROMPT
+            normalized_prompt = f"{prompt_prefix}\n\n{combined_attachment_context}"
         elif image_inputs and not normalized_prompt:
             normalized_prompt = DEFAULT_ATTACHMENT_FALLBACK_PROMPT
 

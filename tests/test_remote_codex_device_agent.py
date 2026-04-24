@@ -62,14 +62,29 @@ class FakeBackend:
     ) -> tuple[str, list[dict]]:
         normalized_prompt = str(prompt or "").strip()
         attachments = list(attachments or [])
-        file_names = [
-            str(item.get("name") or "").strip()
-            for item in attachments
-            if str(item.get("kind") or "").strip().lower() == "file" and str(item.get("name") or "").strip()
-        ]
+        inline_blocks: list[str] = []
+        file_names: list[str] = []
+        for item in attachments:
+            if str(item.get("kind") or "").strip().lower() != "file":
+                continue
+            name = str(item.get("name") or "").strip()
+            mime_type = str(item.get("mimeType") or "").strip().lower()
+            payload = str(item.get("bytesBase64") or "")
+            if mime_type.startswith("text/") and payload:
+                text = __import__("base64").b64decode(payload).decode("utf-8", errors="replace").strip("\n")
+                fence = "md" if name.lower().endswith(".md") else "text"
+                inline_blocks.append(f"Attached file: {name}\n```{fence}\n{text}\n```")
+                continue
+            if name:
+                file_names.append(name)
+        attachment_sections: list[str] = []
+        if inline_blocks:
+            attachment_sections.append("\n\n".join(inline_blocks))
         if file_names:
+            attachment_sections.append("Attached local files:\n" + "\n".join(f"- {name}" for name in file_names))
+        if attachment_sections:
             prompt_prefix = normalized_prompt or DEFAULT_ATTACHMENT_FALLBACK_PROMPT
-            normalized_prompt = prompt_prefix + "\n\nAttached local files:\n" + "\n".join(f"- {name}" for name in file_names)
+            normalized_prompt = prompt_prefix + "\n\n" + "\n\n".join(attachment_sections)
         input_items: list[dict] = []
         if normalized_prompt:
             input_items.append(
@@ -938,9 +953,10 @@ def test_remote_codex_device_agent_executes_turn_start_with_image_and_file_attac
     assert worked is True
     assert backend.start_turn_calls[0][0] == "thread-1"
     submitted_prompt = backend.start_turn_calls[0][1]
-    assert submitted_prompt.startswith("Please inspect the attached context.\n\nAttached local files:\n- ")
-    assert "Attached local files:" in submitted_prompt
-    assert "notes.md" in submitted_prompt
+    assert submitted_prompt.startswith("Please inspect the attached context.\n\nAttached file: notes.md\n```md\n# notes\n")
+    assert "Attached file: notes.md" in submitted_prompt
+    assert "```md\n# notes\n```" in submitted_prompt
+    assert "Attached local files:" not in submitted_prompt
     assert backend.start_turn_input_items[0][1] == [
         {
             "type": "text",
