@@ -949,13 +949,10 @@ class LocalCodexBackend:
             data_url = compact_text(attachment.get("dataUrl"))
             if not data_url:
                 continue
-            title = compact_text(attachment.get("name")) or None
             image_item = {
-                "type": "input_image",
-                "image_url": data_url,
+                "type": "image",
+                "url": data_url,
             }
-            if title:
-                image_item["title"] = title
             image_inputs.append(image_item)
 
         inline_text_blocks = self._build_inline_text_attachment_blocks(normalized_attachments)
