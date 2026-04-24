@@ -549,6 +549,7 @@ def test_local_backend_materializes_pending_browser_prompt_into_rollout() -> Non
             for line in rollout_path.read_text(encoding="utf-8").splitlines()
             if line.strip()
         ]
+        registry_payload = json.loads((Path(temp_dir) / "remote_codex_pending_rollout.json").read_text(encoding="utf-8"))
         with closing(sqlite3.connect(state_db_path)) as connection:
             updated_at_ms = connection.execute(
                 "select updated_at_ms from threads where id = ?",
@@ -562,14 +563,20 @@ def test_local_backend_materializes_pending_browser_prompt_into_rollout() -> Non
         "existing answer",
         "[TEST]hello",
     ]
-    pending_entries = [
-        entry
-        for entry in rollout_entries
-        if entry.get("payload", {}).get("remote_codex_pending") is True
-    ]
-    assert [entry["type"] for entry in pending_entries] == ["response_item", "event_msg"]
-    assert pending_entries[0]["payload"]["role"] == "user"
-    assert pending_entries[1]["payload"]["type"] == "user_message"
+    assert [entry["type"] for entry in rollout_entries[-2:]] == ["response_item", "event_msg"]
+    assert rollout_entries[-2]["payload"]["role"] == "user"
+    assert rollout_entries[-1]["payload"]["type"] == "user_message"
+    assert rollout_entries[-2]["payload"]["content"][0]["text"] == "[TEST]hello"
+    assert rollout_entries[-1]["payload"]["message"] == "[TEST]hello"
+    assert registry_payload == {
+        "thread-1": [
+            {
+                "timestamp": rollout_entries[-2]["timestamp"],
+                "commandId": "command-1",
+                "text": "[TEST]hello",
+            }
+        ]
+    }
     assert int(updated_at_ms) > 1700000000000
 
 
@@ -577,9 +584,23 @@ def test_local_backend_reconciles_pending_browser_prompt_after_actual_user_messa
     with TemporaryDirectory() as temp_dir:
         rollout_path = Path(temp_dir) / "rollout.jsonl"
         rollout_path.write_text(
-            '{"type":"response_item","timestamp":"2026-04-24T00:00:00+00:00","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"[TEST]hello\\r\\n"}],"remote_codex_pending":true,"commandId":"command-1","threadId":"thread-1"}}\n'
-            '{"type":"event_msg","timestamp":"2026-04-24T00:00:00+00:00","payload":{"type":"user_message","message":"[TEST]hello\\r\\n","remote_codex_pending":true,"commandId":"command-1","threadId":"thread-1"}}\n'
+            '{"type":"response_item","timestamp":"2026-04-24T00:00:00+00:00","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"[TEST]hello"}]}}\n'
+            '{"type":"event_msg","timestamp":"2026-04-24T00:00:00+00:00","payload":{"type":"user_message","message":"[TEST]hello"}}\n'
             '{"type":"event_msg","timestamp":"2026-04-24T00:00:10+00:00","payload":{"type":"user_message","message":"[TEST]hello"}}\n',
+            encoding="utf-8",
+        )
+        (Path(temp_dir) / "remote_codex_pending_rollout.json").write_text(
+            json.dumps(
+                {
+                    "thread-1": [
+                        {
+                            "timestamp": "2026-04-24T00:00:00+00:00",
+                            "commandId": "command-1",
+                            "text": "[TEST]hello",
+                        }
+                    ]
+                }
+            ),
             encoding="utf-8",
         )
         thread = {
@@ -609,11 +630,12 @@ def test_local_backend_reconciles_pending_browser_prompt_after_actual_user_messa
 
         snapshot = backend.read_thread_messages("thread-1", limit=20)
         rewritten = rollout_path.read_text(encoding="utf-8")
+        registry_exists = (Path(temp_dir) / "remote_codex_pending_rollout.json").exists()
 
     assert snapshot is not None
     assert [message["text"] for message in snapshot["messages"]] == ["[TEST]hello"]
-    assert '"remote_codex_pending":true' not in rewritten
     assert rewritten.count("[TEST]hello") == 1
+    assert not registry_exists
 
 
 def _sample_health(*, live_control: bool = True) -> dict[str, object]:

@@ -21,8 +21,6 @@ DEFAULT_MESSAGE_LIMIT = 200
 DEFAULT_TURN_MESSAGE_LOOKBACK = 24
 DEFAULT_RECENT_SIGNATURE_WINDOW = 80
 DEFAULT_PENDING_COMMAND_SYNC_LIMIT = 8
-REMOTE_CODEX_PENDING_ENTRY_FLAG = "remote_codex_pending"
-REMOTE_CODEX_PENDING_COMMAND_ID_KEY = "commandId"
 REMOTE_CODEX_PENDING_PROMPT_TTL_SECONDS = 6 * 60 * 60
 
 
@@ -410,64 +408,6 @@ def _rollout_entry_text(entry: dict[str, Any]) -> str:
     return compact_text(message.get("text"))
 
 
-def _is_pending_remote_codex_entry(entry: dict[str, Any]) -> bool:
-    payload = entry.get("payload") if isinstance(entry.get("payload"), dict) else {}
-    return bool(payload.get(REMOTE_CODEX_PENDING_ENTRY_FLAG))
-
-
-def _reconcile_pending_rollout_entries(lines: list[str]) -> tuple[list[str], bool]:
-    now = datetime.now(timezone.utc)
-    pending_by_text: dict[str, list[int]] = {}
-    drop_indices: set[int] = set()
-    parsed_entries: list[dict[str, Any] | None] = []
-
-    for index, line in enumerate(lines):
-        stripped = line.strip()
-        if not stripped:
-            parsed_entries.append(None)
-            continue
-        try:
-            entry = json.loads(stripped)
-        except json.JSONDecodeError:
-            parsed_entries.append(None)
-            continue
-        parsed_entries.append(entry)
-
-        text = _rollout_entry_text(entry)
-        if not text:
-            continue
-
-        if _is_pending_remote_codex_entry(entry):
-            timestamp_text = compact_text(entry.get("timestamp"))
-            if timestamp_text:
-                try:
-                    created_at = datetime.fromisoformat(timestamp_text.replace("Z", "+00:00"))
-                except ValueError:
-                    created_at = None
-            else:
-                created_at = None
-            if created_at is not None:
-                age_seconds = max(0.0, (now - created_at).total_seconds())
-                if age_seconds >= REMOTE_CODEX_PENDING_PROMPT_TTL_SECONDS:
-                    drop_indices.add(index)
-                    continue
-            pending_by_text.setdefault(text, []).append(index)
-            continue
-
-        message = normalize_rollout_message(entry, line_number=0)
-        if message is None or compact_text(message.get("role")) != "user":
-            continue
-        pending_indices = pending_by_text.get(text)
-        if pending_indices:
-            drop_indices.update(pending_indices)
-            pending_by_text[text] = []
-
-    if not drop_indices:
-        return lines, False
-    reconciled = [line for index, line in enumerate(lines) if index not in drop_indices]
-    return reconciled, True
-
-
 def merge_adjacent_message(previous: dict[str, Any] | None, current: dict[str, Any]) -> bool:
     if previous is None:
         return False
@@ -543,10 +483,139 @@ class LocalCodexBackend:
         self.app_server_client = app_server_client
         self.codex_home = Path(codex_home or os.getenv("CODEX_HOME") or (Path.home() / ".codex")).resolve()
         self.state_db_path = self.codex_home / "state_5.sqlite"
+        self.pending_rollout_registry_path = self.codex_home / "remote_codex_pending_rollout.json"
         self.runtime_descriptor = runtime_descriptor or {}
         self.last_runtime_error: str | None = None
         self.runtime_available = False
         self.active_transport = "filesystem-storage"
+
+    def _load_pending_rollout_registry(self) -> dict[str, list[dict[str, Any]]]:
+        if not self.pending_rollout_registry_path.exists():
+            return {}
+        try:
+            payload = json.loads(self.pending_rollout_registry_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        if not isinstance(payload, dict):
+            return {}
+        registry: dict[str, list[dict[str, Any]]] = {}
+        for thread_id, entries in payload.items():
+            next_thread_id = compact_text(thread_id)
+            if not next_thread_id or not isinstance(entries, list):
+                continue
+            normalized_entries: list[dict[str, Any]] = []
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                timestamp = compact_text(entry.get("timestamp"))
+                command_id = compact_text(entry.get("commandId"))
+                text = compact_text(entry.get("text"))
+                if not timestamp or not command_id or not text:
+                    continue
+                normalized_entries.append(
+                    {
+                        "timestamp": timestamp,
+                        "commandId": command_id,
+                        "text": text,
+                    }
+                )
+            if normalized_entries:
+                registry[next_thread_id] = normalized_entries
+        return registry
+
+    def _save_pending_rollout_registry(self, registry: dict[str, list[dict[str, Any]]]) -> None:
+        cleaned = {
+            thread_id: entries
+            for thread_id, entries in registry.items()
+            if compact_text(thread_id) and isinstance(entries, list) and entries
+        }
+        if not cleaned:
+            try:
+                self.pending_rollout_registry_path.unlink(missing_ok=True)
+            except OSError:
+                return
+            return
+        self.pending_rollout_registry_path.parent.mkdir(parents=True, exist_ok=True)
+        self.pending_rollout_registry_path.write_text(
+            json.dumps(cleaned, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+    def _reconcile_pending_rollout_entries(
+        self,
+        *,
+        thread_id: str,
+        lines: list[str],
+    ) -> tuple[list[str], bool]:
+        registry = self._load_pending_rollout_registry()
+        thread_entries = list(registry.get(thread_id) or [])
+        if not thread_entries:
+            return lines, False
+
+        now = datetime.now(timezone.utc)
+        pending_index_map: dict[tuple[str, str], list[int]] = {
+            (entry["timestamp"], entry["text"]): []
+            for entry in thread_entries
+        }
+        resolved_keys: set[tuple[str, str]] = set()
+
+        for index, line in enumerate(lines):
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                entry = json.loads(stripped)
+            except json.JSONDecodeError:
+                continue
+            message = normalize_rollout_message(entry, line_number=0)
+            if message is None or compact_text(message.get("role")) != "user":
+                continue
+            key = (compact_text(message.get("timestamp")), compact_text(message.get("text")))
+            if key in pending_index_map:
+                pending_index_map[key].append(index)
+                continue
+            message_timestamp = compact_text(message.get("timestamp"))
+            message_text = compact_text(message.get("text"))
+            for pending_entry in thread_entries:
+                if pending_entry["text"] != message_text:
+                    continue
+                if message_timestamp and message_timestamp != pending_entry["timestamp"]:
+                    resolved_keys.add((pending_entry["timestamp"], pending_entry["text"]))
+
+        drop_indices: set[int] = set()
+        next_thread_entries: list[dict[str, Any]] = []
+        registry_changed = False
+        for pending_entry in thread_entries:
+            key = (pending_entry["timestamp"], pending_entry["text"])
+            pending_indices = pending_index_map.get(key, [])
+            try:
+                created_at = datetime.fromisoformat(pending_entry["timestamp"].replace("Z", "+00:00"))
+            except ValueError:
+                created_at = None
+            expired = False
+            if created_at is not None:
+                expired = max(0.0, (now - created_at).total_seconds()) >= REMOTE_CODEX_PENDING_PROMPT_TTL_SECONDS
+
+            if key in resolved_keys or expired:
+                drop_indices.update(pending_indices)
+                registry_changed = True
+                continue
+            if not pending_indices:
+                registry_changed = True
+                continue
+            next_thread_entries.append(pending_entry)
+
+        if next_thread_entries:
+            registry[thread_id] = next_thread_entries
+        else:
+            registry.pop(thread_id, None)
+        if registry_changed:
+            self._save_pending_rollout_registry(registry)
+
+        if not drop_indices:
+            return lines, False
+        reconciled = [line for index, line in enumerate(lines) if index not in drop_indices]
+        return reconciled, True
 
     def _archived_thread_ids(self) -> set[str]:
         if not self.state_db_path.exists():
@@ -676,26 +745,12 @@ class LocalCodexBackend:
         if rollout_path is None:
             return False
         rollout_path.parent.mkdir(parents=True, exist_ok=True)
-
-        existing_lines: list[str] = []
-        if rollout_path.exists():
-            existing_lines = rollout_path.read_text(encoding="utf-8", errors="replace").splitlines()
-            for line in existing_lines:
-                stripped = line.strip()
-                if not stripped:
-                    continue
-                try:
-                    entry = json.loads(stripped)
-                except json.JSONDecodeError:
-                    continue
-                if not _is_pending_remote_codex_entry(entry):
-                    continue
-                payload = entry.get("payload") if isinstance(entry.get("payload"), dict) else {}
-                if compact_text(payload.get(REMOTE_CODEX_PENDING_COMMAND_ID_KEY)) == compact_text(command_id):
-                    return False
+        registry = self._load_pending_rollout_registry()
+        thread_entries = list(registry.get(thread_id) or [])
+        if any(compact_text(entry.get("commandId")) == compact_text(command_id) for entry in thread_entries):
+            return False
 
         prompt_text = prompt.rstrip("\r\n")
-        prompt_display = f"{prompt_text}\r\n"
         now = datetime.now(timezone.utc)
         timestamp = now.isoformat().replace("+00:00", "Z")
         entries = [
@@ -708,12 +763,9 @@ class LocalCodexBackend:
                     "content": [
                         {
                             "type": "input_text",
-                            "text": prompt_display,
+                            "text": prompt_text,
                         }
                     ],
-                    REMOTE_CODEX_PENDING_ENTRY_FLAG: True,
-                    REMOTE_CODEX_PENDING_COMMAND_ID_KEY: command_id,
-                    "threadId": thread_id,
                 },
             },
             {
@@ -721,13 +773,10 @@ class LocalCodexBackend:
                 "timestamp": timestamp,
                 "payload": {
                     "type": "user_message",
-                    "message": prompt_display,
+                    "message": prompt_text,
                     "images": [],
                     "local_images": [],
                     "text_elements": [],
-                    REMOTE_CODEX_PENDING_ENTRY_FLAG: True,
-                    REMOTE_CODEX_PENDING_COMMAND_ID_KEY: command_id,
-                    "threadId": thread_id,
                 },
             },
         ]
@@ -735,6 +784,15 @@ class LocalCodexBackend:
             for entry in entries:
                 handle.write(json.dumps(entry, ensure_ascii=False))
                 handle.write("\n")
+        thread_entries.append(
+            {
+                "timestamp": timestamp,
+                "commandId": compact_text(command_id),
+                "text": prompt_text,
+            }
+        )
+        registry[thread_id] = thread_entries
+        self._save_pending_rollout_registry(registry)
         self._touch_thread_updated_at(thread_id, now_ms=int(now.timestamp() * 1000))
         return True
 
@@ -842,7 +900,10 @@ class LocalCodexBackend:
             }
         raw = rollout_path.read_text(encoding="utf-8", errors="replace")
         lines = raw.splitlines()
-        reconciled_lines, changed = _reconcile_pending_rollout_entries(lines)
+        reconciled_lines, changed = self._reconcile_pending_rollout_entries(
+            thread_id=thread_id,
+            lines=lines,
+        )
         if changed:
             rollout_path.write_text(
                 "\n".join(reconciled_lines) + ("\n" if reconciled_lines else ""),
