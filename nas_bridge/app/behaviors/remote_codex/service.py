@@ -451,40 +451,21 @@ class RemoteCodexBehaviorService:
             return cleaned
 
         if command_type == TURN_START and command_status == COMMAND_COMPLETED:
-            if (command_turn_id and latest_turn_id and command_turn_id != latest_turn_id) or thread_status != "inProgress":
-                cleaned = self.remote_task_service.settle_stale_task(
-                    task.id,
-                    final_status="completed",
-                    summary="Turn request completed and the thread has already advanced past this queued task.",
-                    payload={
-                        "reason": "thread_advanced",
-                        "commandId": command.get("commandId"),
-                        "turnId": command_turn_id,
-                        "latestTurnId": latest_turn_id,
-                        "threadStatus": thread_status,
-                    },
-                )
-                self.state_service._publish(cleaned.machine_id, cleaned.thread_id, {"kind": "task", "task": self._task_to_browser(cleaned)})
-                return cleaned
-            if lease_expired and age_seconds >= STALE_BROWSER_TASK_GRACE_SECONDS and command_turn_status in {
-                "queued",
-                "inprogress",
-                "in_progress",
-                "running",
-            }:
-                cleaned = self.remote_task_service.settle_stale_task(
-                    task.id,
-                    final_status="failed",
-                    summary="Stale browser task cleanup: the turn stayed in progress after its tracking lease expired.",
-                    payload={
-                        "reason": "expired_in_progress",
-                        "commandId": command.get("commandId"),
-                        "turnId": command_turn_id,
-                        "turnStatus": command_turn_status,
-                    },
-                )
-                self.state_service._publish(cleaned.machine_id, cleaned.thread_id, {"kind": "task", "task": self._task_to_browser(cleaned)})
-                return cleaned
+            cleaned = self.remote_task_service.settle_stale_task(
+                task.id,
+                final_status="completed",
+                summary="Turn request accepted by the local Codex runtime.",
+                payload={
+                    "reason": "turn_command_completed",
+                    "commandId": command.get("commandId"),
+                    "turnId": command_turn_id,
+                    "latestTurnId": latest_turn_id,
+                    "turnStatus": command_turn_status,
+                    "threadStatus": thread_status,
+                },
+            )
+            self.state_service._publish(cleaned.machine_id, cleaned.thread_id, {"kind": "task", "task": self._task_to_browser(cleaned)})
+            return cleaned
 
         if lease_expired and age_seconds >= STALE_BROWSER_TASK_GRACE_SECONDS and command_status in {COMMAND_QUEUED, COMMAND_RUNNING}:
             cleaned = self.remote_task_service.settle_stale_task(
