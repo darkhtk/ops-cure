@@ -200,8 +200,14 @@ def build_device_agent(
     if isinstance(runtime, CodexCurrentThreadRemoteExecutorRuntime):
         live_control_client = runtime.client  # type: ignore[assignment]
         desktop_submit_thread_id = compact_text(config.codex_thread_id)
-        if os.name == "nt" and compact_text(os.getenv("REMOTE_EXECUTOR_DISABLE_DESKTOP_UI")).lower() not in {"1", "true", "yes"}:
-            desktop_prompt_submitter = WindowsCodexDesktopPromptSubmitter()
+        if (
+            os.name == "nt"
+            and desktop_submit_thread_id
+            and compact_text(os.getenv("REMOTE_EXECUTOR_DISABLE_DESKTOP_UI")).lower() not in {"1", "true", "yes"}
+        ):
+            desktop_prompt_submitter = WindowsCodexDesktopPromptSubmitter(
+                thread_id=desktop_submit_thread_id,
+            )
     else:
         live_control_client = build_live_control_client(cwd=config.workdir or default_workdir)
 

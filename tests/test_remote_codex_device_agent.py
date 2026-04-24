@@ -10,6 +10,7 @@ from tempfile import TemporaryDirectory
 from pc_launcher.connectors.remote_executor.device_agent import (
     LocalCodexBackend,
     RemoteCodexDeviceAgent,
+    WindowsCodexDesktopPromptSubmitter,
     build_thread_version,
     merge_missing_turn_messages,
     merge_adjacent_message,
@@ -28,7 +29,7 @@ class FakeBackend:
     materialized_prompts: list[tuple[str, str, str]] = field(default_factory=list)
     desktop_ui_submit_calls: list[tuple[str, str]] = field(default_factory=list)
     desktop_ui_enabled_threads: set[str] = field(default_factory=set)
-    desktop_ui_submit_result: bool = True
+    desktop_ui_submit_mode: str | None = "desktop-ipc"
     interrupt_calls: list[tuple[str, str]] = field(default_factory=list)
     delete_calls: list[str] = field(default_factory=list)
     actions: list[str] = field(default_factory=list)
@@ -68,12 +69,12 @@ class FakeBackend:
     def can_submit_prompt_via_desktop_ui(self, thread_id: str) -> bool:
         return thread_id in self.desktop_ui_enabled_threads
 
-    def submit_prompt_via_desktop_ui(self, *, thread_id: str, prompt: str) -> bool:
+    def submit_prompt_via_desktop_ui(self, *, thread_id: str, prompt: str) -> str | None:
         if not self.can_submit_prompt_via_desktop_ui(thread_id):
-            return False
+            return None
         self.actions.append("desktop_submit")
         self.desktop_ui_submit_calls.append((thread_id, prompt))
-        return self.desktop_ui_submit_result
+        return self.desktop_ui_submit_mode
 
     def interrupt_turn(self, thread_id: str, turn_id: str) -> dict:
         self.interrupt_calls.append((thread_id, turn_id))
@@ -902,12 +903,54 @@ def test_remote_codex_device_agent_executes_turn_start_commands_via_desktop_ui_w
     assert backend.materialized_prompts == []
     assert backend.actions[:1] == ["desktop_submit"]
     assert [item["phase"] for item in bridge.heartbeat_calls] == ["running", "executing"]
-    assert bridge.evidence_calls[0]["payload"]["submissionMode"] == "desktop-ui"
+    assert bridge.evidence_calls[0]["payload"]["submissionMode"] == "desktop-ipc"
     assert bridge.command_result_calls[0]["status"] == "completed"
     assert bridge.command_result_calls[0]["result"]["turnStatus"] == "queued"
-    assert bridge.command_result_calls[0]["result"]["submissionMode"] == "desktop-ui"
+    assert bridge.command_result_calls[0]["result"]["submissionMode"] == "desktop-ipc"
     assert bridge.fail_calls == []
     assert len(bridge.sync_calls) >= 2
+
+
+@dataclass
+class FakePromptSubmitter:
+    mode: str | None
+    calls: list[str] = field(default_factory=list)
+
+    def submit_prompt(self, prompt: str) -> str | None:
+        self.calls.append(prompt)
+        return self.mode
+
+
+def test_windows_codex_desktop_prompt_submitter_prefers_ipc_submitter() -> None:
+    ipc_submitter = FakePromptSubmitter("desktop-ipc")
+    fallback_submitter = FakePromptSubmitter("desktop-ui")
+    submitter = WindowsCodexDesktopPromptSubmitter(
+        thread_id="thread-1",
+        ipc_submitter=ipc_submitter,
+        fallback_submitter=fallback_submitter,
+    )
+
+    mode = submitter.submit_prompt("[TEST]desktop submit")
+
+    assert mode == "desktop-ipc"
+    assert ipc_submitter.calls == ["[TEST]desktop submit"]
+    assert fallback_submitter.calls == []
+
+
+def test_windows_codex_desktop_prompt_submitter_falls_back_to_ui_submitter() -> None:
+    ipc_submitter = FakePromptSubmitter(None)
+    fallback_submitter = FakePromptSubmitter("desktop-ui")
+    submitter = WindowsCodexDesktopPromptSubmitter(
+        thread_id="thread-1",
+        ipc_submitter=ipc_submitter,
+        fallback_submitter=fallback_submitter,
+    )
+
+    mode = submitter.submit_prompt("[TEST]desktop submit")
+
+    assert mode == "desktop-ui"
+    assert ipc_submitter.calls == ["[TEST]desktop submit"]
+    assert fallback_submitter.calls == ["[TEST]desktop submit"]
 
 
 def test_remote_codex_device_agent_executes_thread_delete_commands() -> None:

@@ -809,13 +809,13 @@ class LocalCodexBackend:
             and compact_text(thread_id) == compact_text(self.desktop_submit_thread_id)
         )
 
-    def submit_prompt_via_desktop_ui(self, *, thread_id: str, prompt: str) -> bool:
+    def submit_prompt_via_desktop_ui(self, *, thread_id: str, prompt: str) -> str | None:
         if not self.can_submit_prompt_via_desktop_ui(thread_id):
-            return False
+            return None
         submitter = self.desktop_prompt_submitter
         if submitter is None:
-            return False
-        return bool(submitter.submit_prompt(prompt))
+            return None
+        return compact_text(submitter.submit_prompt(prompt)) or None
 
     def _runtime_list_threads(self, *, limit: int) -> list[dict[str, Any]]:
         if self.app_server_client is None:
@@ -1120,16 +1120,16 @@ class RemoteCodexDeviceAgent:
                 prompt = compact_text(command.get("prompt"))
                 if not prompt:
                     raise RuntimeError("Turn prompt is empty.")
-                submitted_via_desktop_ui = self.backend.submit_prompt_via_desktop_ui(
+                desktop_submission_mode = self.backend.submit_prompt_via_desktop_ui(
                     thread_id=thread_id,
                     prompt=prompt,
                 )
-                if submitted_via_desktop_ui:
+                if desktop_submission_mode:
                     result = {
                         "accepted": True,
                         "turnId": None,
                         "turnStatus": "queued",
-                        "submissionMode": "desktop-ui",
+                        "submissionMode": desktop_submission_mode,
                     }
                 else:
                     if command_id:
@@ -1150,8 +1150,10 @@ class RemoteCodexDeviceAgent:
                         actor_id=self.machine_id,
                         kind="command_execution",
                         summary=(
-                            "Submitted the request through the Codex desktop UI."
-                            if submitted_via_desktop_ui
+                            "Submitted the request through the Codex desktop thread-follower IPC."
+                            if desktop_submission_mode == "desktop-ipc"
+                            else "Submitted the request through the Codex desktop UI."
+                            if desktop_submission_mode
                             else "Submitted a live turn command to the local Codex runtime."
                         ),
                         payload={
@@ -1167,8 +1169,10 @@ class RemoteCodexDeviceAgent:
                         actor_id=self.machine_id,
                         phase="executing",
                         summary=(
-                            "The Codex desktop UI accepted the request and queued it in the active thread."
-                            if submitted_via_desktop_ui
+                            "The Codex desktop IPC accepted the request and queued it in the active thread."
+                            if desktop_submission_mode == "desktop-ipc"
+                            else "The Codex desktop UI accepted the request and queued it in the active thread."
+                            if desktop_submission_mode
                             else "The local Codex runtime accepted the request and is updating the thread."
                         ),
                         commands_run_count=1,
@@ -1265,16 +1269,200 @@ class RemoteCodexDeviceAgent:
 
 
 class DesktopPromptSubmitter(Protocol):
-    def submit_prompt(self, prompt: str) -> bool: ...
+    def submit_prompt(self, prompt: str) -> str | None: ...
 
 
-class WindowsCodexDesktopPromptSubmitter:
-    def submit_prompt(self, prompt: str) -> bool:
+class WindowsCodexDesktopIpcPromptSubmitter:
+    def __init__(
+        self,
+        *,
+        thread_id: str,
+        pipe_name: str = "codex-ipc",
+        client_type: str = "remote-executor",
+        connect_timeout_ms: int = 5000,
+    ) -> None:
+        self.thread_id = compact_text(thread_id)
+        self.pipe_name = compact_text(pipe_name, "codex-ipc")
+        self.client_type = compact_text(client_type, "remote-executor")
+        self.connect_timeout_ms = max(250, int(connect_timeout_ms))
+
+    def submit_prompt(self, prompt: str) -> str | None:
         if os.name != "nt":
-            return False
+            return None
+        normalized_prompt = str(prompt or "").strip()
+        if not normalized_prompt or not self.thread_id:
+            return None
+
+        encoded_prompt = base64.b64encode(normalized_prompt.encode("utf-8")).decode("ascii")
+        encoded_thread_id = base64.b64encode(self.thread_id.encode("utf-8")).decode("ascii")
+        encoded_client_type = base64.b64encode(self.client_type.encode("utf-8")).decode("ascii")
+        encoded_pipe_name = base64.b64encode(self.pipe_name.encode("utf-8")).decode("ascii")
+        script = f"""
+const net = require('net');
+const {{ randomUUID }} = require('crypto');
+const prompt = Buffer.from('{encoded_prompt}', 'base64').toString('utf8');
+const threadId = Buffer.from('{encoded_thread_id}', 'base64').toString('utf8');
+const clientType = Buffer.from('{encoded_client_type}', 'base64').toString('utf8');
+const pipeName = Buffer.from('{encoded_pipe_name}', 'base64').toString('utf8');
+const pipePath = '\\\\\\\\.\\\\pipe\\\\' + pipeName;
+const connectTimeoutMs = {self.connect_timeout_ms};
+const socket = net.createConnection(pipePath);
+let buffer = Buffer.alloc(0);
+const pending = new Map();
+let settled = false;
+
+function finish(code, message) {{
+  if (settled) return;
+  settled = true;
+  if (message) {{
+    if (code === 0) process.stdout.write(String(message));
+    else process.stderr.write(String(message));
+  }}
+  try {{ socket.destroy(); }} catch (error) {{}}
+  process.exit(code);
+}}
+
+function sendFrame(payload) {{
+  const json = Buffer.from(JSON.stringify(payload), 'utf8');
+  const frame = Buffer.allocUnsafe(4 + json.length);
+  frame.writeUInt32LE(json.length, 0);
+  json.copy(frame, 4);
+  socket.write(frame);
+}}
+
+function waitForResponse(requestId) {{
+  return new Promise((resolve, reject) => {{
+    pending.set(requestId, {{ resolve, reject }});
+  }});
+}}
+
+function failPending(error) {{
+  for (const entry of pending.values()) {{
+    entry.reject(error);
+  }}
+  pending.clear();
+}}
+
+function drainFrames() {{
+  while (buffer.length >= 4) {{
+    const length = buffer.readUInt32LE(0);
+    if (buffer.length < 4 + length) return;
+    const payload = buffer.subarray(4, 4 + length).toString('utf8');
+    buffer = buffer.subarray(4 + length);
+    let message = null;
+    try {{
+      message = JSON.parse(payload);
+    }} catch (error) {{
+      continue;
+    }}
+    if (message && message.type === 'response' && pending.has(message.requestId)) {{
+      const entry = pending.get(message.requestId);
+      pending.delete(message.requestId);
+      entry.resolve(message);
+    }}
+  }}
+}}
+
+const timeoutHandle = setTimeout(() => {{
+  failPending(new Error('codex_ipc_timeout'));
+  finish(1, 'codex_ipc_timeout');
+}}, connectTimeoutMs + 10000);
+
+socket.on('connect', async () => {{
+  try {{
+    const initializeId = randomUUID();
+    const initializePromise = waitForResponse(initializeId);
+    sendFrame({{
+      type: 'request',
+      requestId: initializeId,
+      method: 'initialize',
+      version: 0,
+      params: {{ clientType }},
+    }});
+    const initializeResponse = await initializePromise;
+    if (initializeResponse.resultType !== 'success') {{
+      throw new Error('codex_ipc_initialize_failed');
+    }}
+
+    const requestId = randomUUID();
+    const requestPromise = waitForResponse(requestId);
+    sendFrame({{
+      type: 'request',
+      requestId: requestId,
+      method: 'thread-follower-start-turn',
+      version: 1,
+      params: {{
+        conversationId: threadId,
+        turnStartParams: {{
+          input: [{{ type: 'text', text: prompt, text_elements: [] }}],
+          cwd: null,
+          approvalPolicy: null,
+          approvalsReviewer: null,
+          sandboxPolicy: null,
+          model: null,
+          effort: null,
+          serviceTier: null,
+          summary: 'auto',
+          personality: null,
+          outputSchema: null,
+          collaborationMode: null,
+          attachments: [],
+        }},
+      }},
+    }});
+    const response = await requestPromise;
+    if (response.resultType !== 'success') {{
+      throw new Error('codex_ipc_start_turn_failed');
+    }}
+    clearTimeout(timeoutHandle);
+    finish(0, 'desktop-ipc');
+  }} catch (error) {{
+    clearTimeout(timeoutHandle);
+    failPending(error);
+    finish(1, String(error && error.message ? error.message : error));
+  }}
+}});
+
+socket.on('data', (chunk) => {{
+  buffer = Buffer.concat([buffer, chunk]);
+  drainFrames();
+}});
+
+socket.on('error', (error) => {{
+  clearTimeout(timeoutHandle);
+  failPending(error);
+  finish(1, String(error && error.message ? error.message : error));
+}});
+
+socket.on('close', () => {{
+  clearTimeout(timeoutHandle);
+  if (!settled) {{
+    failPending(new Error('codex_ipc_closed'));
+    finish(1, 'codex_ipc_closed');
+  }}
+}});
+"""
+        completed = subprocess.run(
+            [
+                "node",
+                "-e",
+                script,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=max(10, int(self.connect_timeout_ms / 1000) + 15),
+        )
+        return "desktop-ipc" if "desktop-ipc" in completed.stdout else None
+
+
+class WindowsCodexDesktopUiPromptSubmitter:
+    def submit_prompt(self, prompt: str) -> str | None:
+        if os.name != "nt":
+            return None
         normalized = str(prompt or "").strip()
         if not normalized:
-            return False
+            return None
         encoded = base64.b64encode(normalized.encode("utf-8")).decode("ascii")
         script = f"""
 $ErrorActionPreference = 'Stop'
@@ -1382,4 +1570,32 @@ try {{
             text=True,
             timeout=15,
         )
-        return "submitted" in completed.stdout
+        return "desktop-ui" if "submitted" in completed.stdout else None
+
+
+class WindowsCodexDesktopPromptSubmitter:
+    def __init__(
+        self,
+        *,
+        thread_id: str,
+        ipc_submitter: DesktopPromptSubmitter | None = None,
+        fallback_submitter: DesktopPromptSubmitter | None = None,
+    ) -> None:
+        self.thread_id = compact_text(thread_id)
+        self.ipc_submitter = ipc_submitter or WindowsCodexDesktopIpcPromptSubmitter(thread_id=self.thread_id)
+        self.fallback_submitter = fallback_submitter or WindowsCodexDesktopUiPromptSubmitter()
+
+    def submit_prompt(self, prompt: str) -> str | None:
+        if os.name != "nt":
+            return None
+        for submitter in (self.ipc_submitter, self.fallback_submitter):
+            if submitter is None:
+                continue
+            try:
+                mode = submitter.submit_prompt(prompt)
+            except Exception:
+                LOGGER.exception("Desktop prompt submitter failed")
+                continue
+            if compact_text(mode):
+                return compact_text(mode)
+        return None
