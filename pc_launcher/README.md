@@ -178,7 +178,7 @@ The current sample profile uses generic placeholder commands until replaced by p
 
 ## Local Artifacts
 
-The launcher writes local artifacts under the configured session directory, typically `_discord_sessions/` inside the project root.
+The launcher writes local artifacts under the configured session directory. The current recommended location is outside the repo under `C:\Users\darkh\Projects\_runtime\ops-cure\discord-sessions\`.
 
 Examples:
 

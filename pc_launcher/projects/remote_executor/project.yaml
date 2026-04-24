@@ -17,7 +17,7 @@ startup:
   restore_last_session: false
   open_tools: []
 artifacts:
-  sessions_dir: _discord_sessions
+  sessions_dir: ../_runtime/ops-cure/discord-sessions
   quiet_discord: true
 policy:
   max_parallel_agents: 1

@@ -61,7 +61,7 @@ startup:
   open_tools: []
 
 artifacts:
-  sessions_dir: "_discord_sessions"
+  sessions_dir: "./_runtime/ops-cure/discord-sessions"
   quiet_discord: true
 
 policy:

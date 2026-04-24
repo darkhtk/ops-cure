@@ -138,7 +138,7 @@ def _chat_participant_project_payload(
             "open_tools": [],
         },
         "artifacts": {
-            "sessions_dir": "_discord_sessions",
+            "sessions_dir": "../_runtime/ops-cure/discord-sessions",
             "quiet_discord": True,
         },
         "policy": {
@@ -183,7 +183,7 @@ def _remote_executor_project_payload(
             "open_tools": [],
         },
         "artifacts": {
-            "sessions_dir": "_discord_sessions",
+            "sessions_dir": "../_runtime/ops-cure/discord-sessions",
             "quiet_discord": True,
         },
         "policy": {

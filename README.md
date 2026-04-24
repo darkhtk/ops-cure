@@ -348,12 +348,16 @@ Examples:
 
 - The current sample workflow runtime uses Claude locally because that CLI is confirmed working in this Windows environment.
 - `pc_launcher` should be thought of as an orchestration runtime package, not a universal runtime for every behavior.
+- Runtime artifacts should live outside the repo under `C:\Users\darkh\Projects\_runtime\ops-cure\`.
+- The current default session workspace is `C:\Users\darkh\Projects\_runtime\ops-cure\discord-sessions\`.
 - Existing `_discord_sessions/` markdown files are still useful for debugging orchestration runs, but they are not generic kernel truth.
+- Deploy the current clean `HEAD:nas_bridge` snapshot with `scripts/deploy-nas.ps1`.
 
 ## Additional Documentation
 
 - Architecture guide: [docs/architecture.md](docs/architecture.md)
 - Generic kernel notes: [docs/generic-kernel.md](docs/generic-kernel.md)
 - Guardrails and checklists: [docs/checklists.md](docs/checklists.md)
+- Workspace layout: [docs/workspace-layout.md](docs/workspace-layout.md)
 - Bridge details: [C:\Users\darkh\Projects\ops-cure\nas_bridge\README.md](C:/Users/darkh/Projects/ops-cure/nas_bridge/README.md)
 - Launcher details: [C:\Users\darkh\Projects\ops-cure\pc_launcher\README.md](C:/Users/darkh/Projects/ops-cure/pc_launcher/README.md)
