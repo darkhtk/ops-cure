@@ -101,8 +101,9 @@ class FakeBackend:
             if data_url:
                 input_items.append(
                     {
-                        "type": "image",
-                        "url": data_url,
+                        "type": "input_image",
+                        "image_url": data_url,
+                        "title": str(item.get("name") or "").strip() or None,
                     }
                 )
         return normalized_prompt, input_items
@@ -964,8 +965,9 @@ def test_remote_codex_device_agent_executes_turn_start_with_image_and_file_attac
             "text_elements": [],
         },
         {
-            "type": "image",
-            "url": "data:image/png;base64,abc123",
+            "type": "input_image",
+            "image_url": "data:image/png;base64,abc123",
+            "title": "screenshot.png",
         },
     ]
 
