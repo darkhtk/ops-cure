@@ -55,6 +55,33 @@ class WorkerRegistry:
                 db.add(launcher)
                 db.flush()
             else:
+                # Detect cross-machine launcher_id collision: if the same
+                # launcher_id is currently held by a different hostname AND
+                # that other host has heartbeated within the stale-after
+                # window, the new register effectively yanks ownership away
+                # from a live launcher. Keep the takeover to preserve today's
+                # behavior, but log a WARNING so an operator can spot the
+                # duplicate and renumber one of the launchers.
+                if launcher.hostname != hostname:
+                    last_seen = self._coerce_aware(launcher.last_seen_at)
+                    age = (now - last_seen) if last_seen is not None else self._stale_after
+                    if age < self._stale_after:
+                        LOGGER.warning(
+                            "launcher_id collision: %s currently held by %s "
+                            "(last seen %s, %.1fs ago); takeover by %s",
+                            launcher_id,
+                            launcher.hostname,
+                            last_seen,
+                            age.total_seconds(),
+                            hostname,
+                        )
+                    else:
+                        LOGGER.info(
+                            "launcher_id %s reclaimed from stale host %s by %s",
+                            launcher_id,
+                            launcher.hostname,
+                            hostname,
+                        )
                 launcher.hostname = hostname
                 launcher.status = "online"
                 launcher.last_seen_at = now
@@ -77,6 +104,30 @@ class WorkerRegistry:
             launcher_id,
             len(projects),
         )
+
+    def is_launcher_id_active_elsewhere(
+        self,
+        *,
+        launcher_id: str,
+        hostname: str,
+    ) -> bool:
+        """Returns True if ``launcher_id`` is currently registered to a
+        DIFFERENT hostname and the last heartbeat is within the stale-after
+        window. Caller (typically a fresh runner about to register) can use
+        this to bail out before clobbering another live launcher.
+        """
+        with session_scope() as db:
+            launcher = db.scalar(
+                select(LauncherRecordModel).where(LauncherRecordModel.launcher_id == launcher_id),
+            )
+            if launcher is None:
+                return False
+            if launcher.hostname == hostname:
+                return False
+            last_seen = self._coerce_aware(launcher.last_seen_at)
+            if last_seen is None:
+                return False
+            return (utcnow() - last_seen) < self._stale_after
 
     def prune_stale_launchers(self) -> None:
         cutoff = utcnow() - self._stale_after
@@ -166,6 +217,19 @@ class WorkerRegistry:
                 )
                 or 0,
             )
+
+    @staticmethod
+    def _coerce_aware(value: datetime | None) -> datetime | None:
+        """SQLite drivers can hand back naive datetimes even when the column
+        is declared with ``DateTime(timezone=True)``. Treat any naive value
+        as UTC so timedelta arithmetic against ``utcnow()`` doesn't blow up
+        with TypeError when comparing aware vs naive datetimes.
+        """
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value
 
     @staticmethod
     def _manifest_from_entry(entry: LauncherCatalogEntryModel | None) -> ProjectManifest | None:
