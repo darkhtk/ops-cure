@@ -808,3 +808,52 @@ class KernelApprovalModel(Base):
     resolution: Mapped[str | None] = mapped_column(index=True, nullable=True)
     note: Mapped[str | None] = mapped_column(Text(), nullable=True)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class KernelTaskModel(Base):
+    """Generic kernel-level work-queue ledger.
+
+    Behaviors that need a "queue → claim → execute → complete" lifecycle
+    share this primitive instead of each rolling its own table. Today
+    that pattern is duplicated across orchestration's session launches /
+    project finds / verification claims and remote_codex's
+    tasks/claim-next + agent/commands/claim. The generic shape is the
+    same in every case — the behavior contributes a ``kind`` plus an
+    opaque payload, the kernel owns the lifecycle and lease semantics.
+
+    Lease model: a worker calls ``claim_next`` with an actor id and a
+    lease duration. The kernel atomically transitions the task to
+    ``claimed`` and stamps ``owner_actor_id`` / ``lease_token`` /
+    ``lease_expires_at``. The worker periodically extends the lease
+    via ``heartbeat``. If the lease lapses without a heartbeat or
+    completion, ``release_expired_leases`` returns the task to the
+    queue for another claim.
+    """
+
+    __tablename__ = "kernel_tasks"
+    __table_args__ = (
+        Index("ix_kernel_tasks_space_status_created", "space_id", "status", "created_at"),
+        Index("ix_kernel_tasks_kind_status", "kind", "status"),
+        Index("ix_kernel_tasks_status_priority_created", "status", "priority", "created_at"),
+        Index("ix_kernel_tasks_owner", "owner_actor_id"),
+        Index("ix_kernel_tasks_lease_expires_at", "lease_expires_at"),
+    )
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=lambda: str(uuid.uuid4()))
+    space_id: Mapped[str] = mapped_column(index=True)
+    kind: Mapped[str] = mapped_column(index=True)
+    status: Mapped[str] = mapped_column(index=True, default="queued")
+    priority: Mapped[int] = mapped_column(Integer(), default=0)
+    payload_json: Mapped[str] = mapped_column(Text(), default="{}")
+    requested_by: Mapped[str] = mapped_column(index=True, default="")
+    owner_actor_id: Mapped[str | None] = mapped_column(index=True, nullable=True)
+    lease_token: Mapped[str | None] = mapped_column(nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    claim_count: Mapped[int] = mapped_column(Integer(), default=0)
+    result_json: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    error_json: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    parent_task_id: Mapped[str | None] = mapped_column(index=True, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
