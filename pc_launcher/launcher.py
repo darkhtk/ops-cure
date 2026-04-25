@@ -33,6 +33,15 @@ LOGGER = logging.getLogger(__name__)
 ARG_PATTERN_TEMPLATE = r"--{name}\s+(?P<quote>[\"']?)(?P<value>.+?)(?P=quote)(?:\s+--|\s*$)"
 
 
+def _default_launcher_lock_path(*, launcher_id: str) -> Path:
+    override = os.getenv("OPS_CURE_LAUNCHER_LOCK_PATH", "").strip()
+    if override:
+        return Path(override).expanduser().resolve()
+    repo_root = Path(__file__).resolve().parents[1]
+    runtime_root = repo_root.parent / "_runtime" / repo_root.name
+    return runtime_root / "launcher" / f".ops-cure-launcher-{launcher_id}.lock"
+
+
 @dataclass(slots=True)
 class ManagedWorker:
     process: subprocess.Popen[str]
@@ -585,7 +594,7 @@ def main() -> None:
         find_capacity=args.find_capacity,
         verify_capacity=args.verify_capacity,
     )
-    lock_path = Path(args.projects_dir).resolve() / f".ops-cure-launcher-{args.launcher_id}.lock"
+    lock_path = _default_launcher_lock_path(launcher_id=args.launcher_id)
     with LauncherInstanceLock(lock_path):
         daemon.run_forever()
 
