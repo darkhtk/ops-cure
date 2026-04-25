@@ -835,6 +835,79 @@ class BridgeClient:
                 )
             yield from parse_sse_stream(response.iter_lines(decode_unicode=True))
 
+    # ---------- Generic kernel approvals (KernelApprovalService HTTP wrapper) ----------
+
+    def request_kernel_approval(
+        self,
+        *,
+        space_id: str,
+        kind: str,
+        payload: dict[str, Any] | None = None,
+        requested_by: str = "",
+        ttl_seconds: int | None = None,
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {
+            "space_id": space_id,
+            "kind": kind,
+            "payload": payload or {},
+            "requested_by": requested_by,
+        }
+        if ttl_seconds is not None:
+            body["ttl_seconds"] = int(ttl_seconds)
+        return self._post("/api/kernel/approvals", body)
+
+    def resolve_kernel_approval(
+        self,
+        *,
+        approval_id: str,
+        resolution: str,
+        resolved_by: str = "",
+        note: str | None = None,
+    ) -> dict[str, Any] | None:
+        body: dict[str, Any] = {
+            "resolution": resolution,
+            "resolved_by": resolved_by,
+        }
+        if note is not None:
+            body["note"] = note
+        try:
+            return self._post(
+                f"/api/kernel/approvals/{quote_plus(approval_id)}/resolve",
+                body,
+            )
+        except BridgeClientError as exc:
+            if "404" in str(exc):
+                return None
+            raise
+
+    def get_kernel_approval(self, *, approval_id: str) -> dict[str, Any] | None:
+        try:
+            return self._get(f"/api/kernel/approvals/{quote_plus(approval_id)}")
+        except BridgeClientError as exc:
+            if "404" in str(exc):
+                return None
+            raise
+
+    def list_pending_kernel_approvals(
+        self,
+        *,
+        space_id: str,
+        kinds: list[str] | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        params: list[tuple[str, str]] = [("space_id", space_id), ("limit", str(int(limit)))]
+        if kinds:
+            for kind in kinds:
+                params.append(("kinds", kind))
+        try:
+            payload = self._get_with_params("/api/kernel/approvals", params)
+        except BridgeClientError:
+            return []
+        if not isinstance(payload, dict):
+            return []
+        approvals = payload.get("approvals")
+        return list(approvals) if isinstance(approvals, list) else []
+
     # ---------- Generic kernel scratch (KernelScratchService HTTP wrapper) ----------
 
     def get_kernel_scratch(
@@ -915,7 +988,11 @@ class BridgeClient:
         )
         return self._handle_response(path, response)
 
-    def _get_with_params(self, path: str, params: dict[str, Any]) -> Any:
+    def _get_with_params(
+        self,
+        path: str,
+        params: dict[str, Any] | list[tuple[str, str]],
+    ) -> Any:
         response = self.session.get(
             f"{self.base_url}{path}",
             params=params,
