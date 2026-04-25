@@ -741,3 +741,32 @@ class RemoteCodexCommandModel(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class KernelScratchModel(Base):
+    """Generic kernel-level small key/value scratch store, scoped by actor and
+    space. Designed as a shared primitive so behaviors and runtimes can stop
+    inventing their own per-feature JSON files or columns for tiny state like
+    dedup keys, last-seen sequences, or rate-limit counters.
+
+    Either ``actor_id`` or ``space_id`` may be the empty string to widen the
+    scope: ``("homedev", "")`` is a per-actor global key, ``("", space_id)``
+    is a space-wide key, ``("", "")`` is a behavior-global key. The unique
+    constraint covers the (actor_id, space_id, key) triple, so concurrent
+    writers stay safe under the existing UPSERT helper.
+    """
+
+    __tablename__ = "kernel_scratch"
+    __table_args__ = (
+        UniqueConstraint("actor_id", "space_id", "key", name="uq_kernel_scratch_actor_space_key"),
+        Index("ix_kernel_scratch_expires_at", "expires_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer(), primary_key=True, autoincrement=True)
+    actor_id: Mapped[str] = mapped_column(index=True, default="")
+    space_id: Mapped[str] = mapped_column(index=True, default="")
+    key: Mapped[str] = mapped_column(index=True)
+    value_json: Mapped[str] = mapped_column(Text(), default="null")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
