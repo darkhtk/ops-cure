@@ -463,31 +463,44 @@ def _machine_stream_subscriber_id(config: RunnerConfig) -> str:
     )
 
 
-def _should_wake_for_machine_event(event_name: str, payload: dict[str, Any]) -> bool:
-    if event_name in {"ready", "machine"}:
-        return True
-    kind = compact_text(payload.get("kind")).lower()
-    if kind in {"snapshot", "thread", "command", "task"}:
-        return True
-    if event_name in {"snapshot", "thread", "command", "task"}:
-        return True
+def _should_wake_for_kernel_frame(frame: dict[str, Any]) -> bool:
+    """Decide whether a generic kernel SSE frame should trigger a run cycle.
+
+    The mirror in ``RemoteCodexStateService._mirror_to_kernel_broker`` only
+    publishes ``remote_codex.command.*`` envelopes, so frames carrying that
+    kind are the actionable signal. ``open`` / ``reset`` / ``heartbeat`` are
+    connection markers and should not wake the runner — keepalive sync is
+    handled by the maintenance loop instead.
+    """
+    event_name = compact_text(frame.get("event")).lower()
+    if event_name in {"open", "heartbeat", "ping", "reset"}:
+        return False
+    payload = frame.get("data")
+    if not isinstance(payload, dict):
+        return False
+    event = payload.get("event")
+    if isinstance(event, dict):
+        kind = compact_text(event.get("kind")).lower()
+        if kind.startswith("remote_codex."):
+            return True
     return False
 
 
 def _consume_machine_stream(session: RunnerSession, config: RunnerConfig) -> None:
     last_keepalive_at = time.monotonic()
-    for event_name, payload in session.bridge.stream_remote_codex_machine(
+    for frame in session.bridge.stream_machine_kernel_events(
         machine_id=config.machine_id,
         subscriber_id=_machine_stream_subscriber_id(config),
     ):
-        if event_name == "ping":
+        event_name = compact_text(frame.get("event")).lower()
+        if event_name in {"heartbeat", "ping"}:
             now = time.monotonic()
             if now - last_keepalive_at >= DEFAULT_KEEPALIVE_SYNC_SECONDS:
                 session.device_agent.maintenance_sync()
                 last_keepalive_at = now
             continue
 
-        if not _should_wake_for_machine_event(event_name, payload):
+        if not _should_wake_for_kernel_frame(frame):
             continue
 
         run_cycle(session, config)

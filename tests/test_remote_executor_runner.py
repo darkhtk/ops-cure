@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 from pc_launcher.connectors.remote_executor.runner import (
     RunnerConfig,
-    _should_wake_for_machine_event,
+    _should_wake_for_kernel_frame,
     parse_args,
     run_cycle,
 )
@@ -93,11 +93,51 @@ def test_parse_args_uses_tighter_default_poll_interval() -> None:
     assert config.poll_interval_seconds == 1.0
 
 
-def test_should_wake_for_machine_event_on_remote_codex_signals() -> None:
-    assert _should_wake_for_machine_event("ready", {})
-    assert _should_wake_for_machine_event("command", {"kind": "command"})
-    assert _should_wake_for_machine_event("message", {"kind": "task"})
-    assert not _should_wake_for_machine_event("ping", {"at": 123})
+def test_should_wake_for_kernel_frame_on_remote_codex_command_envelope() -> None:
+    """A generic kernel SSE frame carrying a ``remote_codex.command.*``
+    envelope is the only actionable signal for the remote executor — the
+    legacy ``ready`` / ``snapshot`` / ``machine`` channels are mapped to
+    keepalive sync, not full run cycles.
+    """
+    queued_frame = {
+        "event": "event",
+        "data": {
+            "cursor": "cur-1",
+            "space_id": "remote_codex.machine:homedev",
+            "event": {"id": "cmd-1", "kind": "remote_codex.command.queued"},
+        },
+    }
+    assert _should_wake_for_kernel_frame(queued_frame)
+
+    completed_frame = {
+        "event": "event",
+        "data": {
+            "cursor": "cur-2",
+            "space_id": "remote_codex.machine:homedev",
+            "event": {"id": "cmd-1", "kind": "remote_codex.command.completed"},
+        },
+    }
+    assert _should_wake_for_kernel_frame(completed_frame)
+
+
+def test_should_wake_for_kernel_frame_ignores_open_and_heartbeats() -> None:
+    """Connection markers (open / heartbeat / reset) and unrelated kinds
+    must not fire ``run_cycle`` — keepalive maintenance is handled by the
+    consume-loop's separate cadence.
+    """
+    open_frame = {"event": "open", "data": {"space_id": "remote_codex.machine:homedev"}}
+    heartbeat_frame = {"event": "heartbeat", "data": {"space_id": "remote_codex.machine:homedev"}}
+    reset_frame = {"event": "reset", "data": {"space_id": "remote_codex.machine:homedev"}}
+    foreign_kind_frame = {
+        "event": "event",
+        "data": {"event": {"kind": "chat.message.created"}},
+    }
+
+    assert not _should_wake_for_kernel_frame(open_frame)
+    assert not _should_wake_for_kernel_frame(heartbeat_frame)
+    assert not _should_wake_for_kernel_frame(reset_frame)
+    assert not _should_wake_for_kernel_frame(foreign_kind_frame)
+    assert not _should_wake_for_kernel_frame({"event": "event", "data": None})
 
 
 def test_run_cycle_survives_device_agent_connection_error() -> None:

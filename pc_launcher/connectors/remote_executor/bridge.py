@@ -14,6 +14,13 @@ class RemoteExecutorBridge(Protocol):
         subscriber_id: str | None = None,
     ) -> Iterator[tuple[str, dict[str, Any]]]: ...
 
+    def stream_machine_kernel_events(
+        self,
+        *,
+        machine_id: str,
+        subscriber_id: str | None = None,
+    ) -> Iterator[dict[str, Any]]: ...
+
     def sync_remote_codex_agent(
         self,
         *,
@@ -148,6 +155,13 @@ class RemoteExecutorBridge(Protocol):
     ) -> dict[str, Any]: ...
 
 
+REMOTE_CODEX_MACHINE_SPACE_PREFIX = "remote_codex.machine:"
+
+
+def remote_codex_machine_space_id(machine_id: str) -> str:
+    return f"{REMOTE_CODEX_MACHINE_SPACE_PREFIX}{machine_id}"
+
+
 @dataclass(slots=True)
 class BridgeRemoteExecutorClient:
     bridge_client: BridgeClient
@@ -160,6 +174,17 @@ class BridgeRemoteExecutorClient:
     ) -> Iterator[tuple[str, dict[str, Any]]]:
         return self.bridge_client.stream_remote_codex_machine(
             machine_id=machine_id,
+            subscriber_id=subscriber_id,
+        )
+
+    def stream_machine_kernel_events(
+        self,
+        *,
+        machine_id: str,
+        subscriber_id: str | None = None,
+    ) -> Iterator[dict[str, Any]]:
+        return self.bridge_client.stream_kernel_events(
+            space_id=remote_codex_machine_space_id(machine_id),
             subscriber_id=subscriber_id,
         )
 
