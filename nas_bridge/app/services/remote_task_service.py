@@ -7,6 +7,7 @@ from sqlalchemy import case, select
 from sqlalchemy.orm import selectinload
 
 from ..db import session_scope
+from ..kernel.approvals import KernelApprovalService
 from ..kernel.presence import (
     ActorSessionUpsertRequest,
     PresenceService,
@@ -66,11 +67,23 @@ WORK_EVIDENCE_KINDS = {
 
 REMOTE_TASK_RESOURCE_KIND = "remote_task"
 MACHINE_SCOPE_KIND = "machine"
+REMOTE_TASK_APPROVAL_KIND = "remote_task.approval"
+REMOTE_TASK_SPACE_PREFIX = "remote_task:"
+
+
+def remote_task_space_id(task_id: str) -> str:
+    return f"{REMOTE_TASK_SPACE_PREFIX}{task_id}"
 
 
 class RemoteTaskService:
-    def __init__(self, *, presence_service: PresenceService | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        presence_service: PresenceService | None = None,
+        kernel_approval_service: KernelApprovalService | None = None,
+    ) -> None:
         self.presence_service = presence_service or PresenceService()
+        self.kernel_approval_service = kernel_approval_service or KernelApprovalService()
 
     def create_task(self, payload: RemoteTaskCreateRequest) -> RemoteTaskSummaryResponse:
         with session_scope() as db:
@@ -254,20 +267,25 @@ class RemoteTaskService:
                 actor_id=payload.actor_id,
                 lease_token=payload.lease_token,
             )
-            row.approvals.append(
-                RemoteTaskApprovalModel(
-                    task_id=row.id,
-                    actor_id=payload.actor_id,
-                    reason=payload.reason,
-                    note=payload.note,
-                    status="pending",
-                ),
+            approval_row = RemoteTaskApprovalModel(
+                task_id=row.id,
+                actor_id=payload.actor_id,
+                reason=payload.reason,
+                note=payload.note,
+                status="pending",
             )
+            row.approvals.append(approval_row)
             row.status = "blocked_approval"
             row.owner_actor_id = payload.actor_id
             row.updated_at = utcnow()
             db.flush()
             db.refresh(row)
+            db.refresh(approval_row)
+            self._mirror_approval_request(
+                db,
+                task_id=row.id,
+                approval=approval_row,
+            )
             return self._to_summary(row)
 
     def get_latest_approval(self, task_id: str) -> RemoteTaskApprovalSummary | None:
@@ -295,6 +313,13 @@ class RemoteTaskService:
             row.updated_at = utcnow()
             db.flush()
             db.refresh(row)
+            self._mirror_approval_resolve(
+                db,
+                approval_id=approval.id,
+                resolution=payload.resolution,
+                resolved_by=payload.resolved_by,
+                note=payload.note,
+            )
             return self._to_summary(row)
 
     def add_note(self, task_id: str, payload: RemoteTaskNoteRequest) -> RemoteTaskNoteSummary:
@@ -538,6 +563,56 @@ class RemoteTaskService:
         if not row.approvals:
             return None
         return max(row.approvals, key=lambda item: item.requested_at)
+
+    def _mirror_approval_request(
+        self,
+        db,
+        *,
+        task_id: str,
+        approval: RemoteTaskApprovalModel,
+    ) -> None:
+        """Mirror a freshly-created legacy approval row into the generic
+        kernel approvals primitive. The kernel record reuses the legacy
+        approval id as its primary key so the two tables stay 1:1
+        without an extra join column. Failures are swallowed: the legacy
+        write must remain authoritative until the kernel side proves
+        itself in production.
+        """
+        try:
+            self.kernel_approval_service.request(
+                db,
+                space_id=remote_task_space_id(task_id),
+                kind=REMOTE_TASK_APPROVAL_KIND,
+                payload={
+                    "task_id": task_id,
+                    "actor_id": approval.actor_id,
+                    "reason": approval.reason,
+                },
+                requested_by=approval.actor_id or "",
+                approval_id=approval.id,
+            )
+        except Exception:  # noqa: BLE001 — mirror must not destabilize the legacy write
+            pass
+
+    def _mirror_approval_resolve(
+        self,
+        db,
+        *,
+        approval_id: str,
+        resolution: str,
+        resolved_by: str,
+        note: str | None,
+    ) -> None:
+        try:
+            self.kernel_approval_service.resolve(
+                db,
+                approval_id=approval_id,
+                resolution=resolution,
+                resolved_by=resolved_by or "",
+                note=note,
+            )
+        except Exception:  # noqa: BLE001 — mirror must not destabilize the legacy write
+            pass
 
     def _require_active_assignment(
         self,

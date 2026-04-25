@@ -132,6 +132,7 @@ class KernelApprovalService:
         payload: dict[str, Any] | None = None,
         requested_by: str = "",
         ttl_seconds: int | None = None,
+        approval_id: str | None = None,
     ) -> ApprovalRecord:
         if not space_id:
             raise ValueError("space_id is required")
@@ -143,15 +144,21 @@ class KernelApprovalService:
             if ttl_seconds is not None and ttl_seconds > 0
             else None
         )
-        row = KernelApprovalModel(
-            space_id=str(space_id),
-            kind=str(kind),
-            payload_json=json.dumps(payload or {}, ensure_ascii=False, default=str),
-            status=APPROVAL_STATUS_PENDING,
-            requested_by=str(requested_by or ""),
-            requested_at=now,
-            expires_at=expires_at,
-        )
+        row_kwargs: dict[str, Any] = {
+            "space_id": str(space_id),
+            "kind": str(kind),
+            "payload_json": json.dumps(payload or {}, ensure_ascii=False, default=str),
+            "status": APPROVAL_STATUS_PENDING,
+            "requested_by": str(requested_by or ""),
+            "requested_at": now,
+            "expires_at": expires_at,
+        }
+        if approval_id:
+            # Behaviors that mirror an existing approval row reuse its id
+            # so the kernel record is the same primary key — keeps the
+            # 1:1 correspondence stable without an extra join column.
+            row_kwargs["id"] = str(approval_id)
+        row = KernelApprovalModel(**row_kwargs)
         session.add(row)
         session.flush()
         return _record_from_row(row)
