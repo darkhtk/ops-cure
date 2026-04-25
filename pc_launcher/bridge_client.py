@@ -835,6 +835,148 @@ class BridgeClient:
                 )
             yield from parse_sse_stream(response.iter_lines(decode_unicode=True))
 
+    # ---------- Generic kernel tasks (KernelTaskService HTTP wrapper) ----------
+
+    def enqueue_kernel_task(
+        self,
+        *,
+        space_id: str,
+        kind: str,
+        payload: dict[str, Any] | None = None,
+        priority: int = 0,
+        requested_by: str = "",
+        parent_task_id: str | None = None,
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {
+            "space_id": space_id,
+            "kind": kind,
+            "payload": payload or {},
+            "priority": int(priority),
+            "requested_by": requested_by,
+        }
+        if parent_task_id:
+            body["parent_task_id"] = parent_task_id
+        return self._post("/api/kernel/tasks", body)
+
+    def claim_next_kernel_task(
+        self,
+        *,
+        actor_id: str,
+        lease_seconds: int = 60,
+        space_id: str | None = None,
+        kinds: list[str] | None = None,
+    ) -> dict[str, Any] | None:
+        body: dict[str, Any] = {
+            "actor_id": actor_id,
+            "lease_seconds": int(lease_seconds),
+        }
+        if space_id:
+            body["space_id"] = space_id
+        if kinds:
+            body["kinds"] = list(kinds)
+        result = self._post("/api/kernel/tasks/claim-next", body)
+        return result if isinstance(result, dict) and result else None
+
+    def heartbeat_kernel_task(
+        self,
+        *,
+        task_id: str,
+        lease_token: str,
+        lease_seconds: int = 60,
+        status: str = "executing",
+    ) -> dict[str, Any]:
+        return self._post(
+            f"/api/kernel/tasks/{quote_plus(task_id)}/heartbeat",
+            {
+                "lease_token": lease_token,
+                "lease_seconds": int(lease_seconds),
+                "status": status,
+            },
+        )
+
+    def complete_kernel_task(
+        self,
+        *,
+        task_id: str,
+        lease_token: str,
+        result: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {"lease_token": lease_token}
+        if result is not None:
+            body["result"] = result
+        return self._post(
+            f"/api/kernel/tasks/{quote_plus(task_id)}/complete",
+            body,
+        )
+
+    def fail_kernel_task(
+        self,
+        *,
+        task_id: str,
+        lease_token: str,
+        error: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {"lease_token": lease_token}
+        if error is not None:
+            body["error"] = error
+        return self._post(
+            f"/api/kernel/tasks/{quote_plus(task_id)}/fail",
+            body,
+        )
+
+    def cancel_kernel_task(
+        self,
+        *,
+        task_id: str,
+        reason: str | None = None,
+    ) -> dict[str, Any] | None:
+        body: dict[str, Any] = {}
+        if reason is not None:
+            body["reason"] = reason
+        try:
+            return self._post(
+                f"/api/kernel/tasks/{quote_plus(task_id)}/cancel",
+                body,
+            )
+        except BridgeClientError as exc:
+            if "404" in str(exc):
+                return None
+            raise
+
+    def get_kernel_task(self, *, task_id: str) -> dict[str, Any] | None:
+        try:
+            return self._get(f"/api/kernel/tasks/{quote_plus(task_id)}")
+        except BridgeClientError as exc:
+            if "404" in str(exc):
+                return None
+            raise
+
+    def list_kernel_tasks(
+        self,
+        *,
+        space_id: str | None = None,
+        kinds: list[str] | None = None,
+        statuses: list[str] | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        params: list[tuple[str, str]] = [("limit", str(int(limit)))]
+        if space_id:
+            params.append(("space_id", space_id))
+        if kinds:
+            for kind in kinds:
+                params.append(("kinds", kind))
+        if statuses:
+            for status in statuses:
+                params.append(("statuses", status))
+        try:
+            payload = self._get_with_params("/api/kernel/tasks", params)
+        except BridgeClientError:
+            return []
+        if not isinstance(payload, dict):
+            return []
+        tasks = payload.get("tasks")
+        return list(tasks) if isinstance(tasks, list) else []
+
     # ---------- Generic kernel approvals (KernelApprovalService HTTP wrapper) ----------
 
     def request_kernel_approval(

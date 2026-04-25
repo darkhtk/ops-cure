@@ -8,7 +8,7 @@ import asyncio
 
 from fastapi import FastAPI
 
-from .api import actors, behaviors, events, health, kernel_approvals, kernel_scratch, presence, remote_tasks, sessions, spaces, verification, workers
+from .api import actors, behaviors, events, health, kernel_approvals, kernel_scratch, kernel_tasks, presence, remote_tasks, sessions, spaces, verification, workers
 from .behaviors.catalog import BehaviorCatalogService
 from .behaviors.chat import api as chat_api
 from .behaviors.remote_codex import api as remote_codex_api
@@ -46,6 +46,7 @@ from .kernel.registry import WorkerRegistry
 from .kernel.scratch import KernelScratchService
 from .kernel.spaces import SpaceService
 from .kernel.subscriptions import InProcessSubscriptionBroker
+from .kernel.tasks import KernelTaskService
 from .presenters.discord.status_cards import AnnouncementService
 from .services.remote_task_service import RemoteTaskService
 from .transports.discord.gateway import DiscordGateway
@@ -71,6 +72,7 @@ class ServiceContainer:
     event_service: EventService
     kernel_approval_service: KernelApprovalService
     kernel_scratch_service: KernelScratchService
+    kernel_task_service: KernelTaskService
     space_service: SpaceService
     thread_manager: ThreadManager
     announcement_service: AnnouncementService
@@ -212,6 +214,7 @@ def build_services(settings: Settings) -> ServiceContainer:
     )
     kernel_approval_service = KernelApprovalService()
     kernel_scratch_service = KernelScratchService()
+    kernel_task_service = KernelTaskService()
     return ServiceContainer(
         settings=settings,
         registry=registry,
@@ -221,6 +224,7 @@ def build_services(settings: Settings) -> ServiceContainer:
         event_service=event_service,
         kernel_approval_service=kernel_approval_service,
         kernel_scratch_service=kernel_scratch_service,
+        kernel_task_service=kernel_task_service,
         thread_manager=thread_manager,
         announcement_service=announcement_service,
         chat_service=chat_service,
@@ -270,6 +274,7 @@ app.include_router(behaviors.router)
 app.include_router(events.router)
 app.include_router(kernel_approvals.router)
 app.include_router(kernel_scratch.router)
+app.include_router(kernel_tasks.router)
 app.include_router(presence.router)
 app.include_router(remote_tasks.router)
 app.include_router(remote_codex_api.router)
