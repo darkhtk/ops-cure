@@ -83,6 +83,12 @@ class AppServerThreadClient(Protocol):
 
     def interrupt_turn(self, thread_id: str, turn_id: str) -> dict[str, Any]: ...
 
+    def inject_items(
+        self,
+        thread_id: str,
+        items: list[dict[str, Any]],
+    ) -> dict[str, Any]: ...
+
     def wait_for_turn_completion(
         self,
         *,
@@ -534,6 +540,19 @@ class CodexAppServerProcessClient:
             {
                 "threadId": thread_id,
                 "turnId": turn_id,
+            },
+        )
+
+    def inject_items(
+        self,
+        thread_id: str,
+        items: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        return self._send_request(
+            "thread/inject_items",
+            {
+                "threadId": thread_id,
+                "items": items,
             },
         )
 

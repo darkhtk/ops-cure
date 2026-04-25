@@ -294,6 +294,12 @@ class FakeAppServerClient:
     def interrupt_turn(self, thread_id: str, turn_id: str) -> dict:
         return {"ok": True}
 
+    def inject_items(self, thread_id: str, items: list[dict]) -> dict:
+        # Fakes the codex app-server happy path. Real client returns an empty
+        # response; tests that want to exercise the rollout-append fallback
+        # should swap this out with one that raises.
+        return {}
+
     def wait_for_turn_completion(self, *, thread_id: str, turn_id: str, timeout_seconds: float) -> tuple[dict, str]:
         raise NotImplementedError
 
@@ -647,7 +653,10 @@ def test_local_backend_materializes_pending_browser_prompt_into_rollout() -> Non
         backend = LocalCodexBackend(
             machine_id="homedev",
             display_name="Home Dev",
-            app_server_client=FakeAppServerClient(payload={"thread": {"id": "thread-1", "turns": []}}),
+            # app_server_client intentionally None so this test exercises the
+            # rollout-file fallback path. The inject_items happy path is
+            # covered separately below.
+            app_server_client=None,
             codex_home=temp_dir,
         )
         backend.get_thread_by_id = lambda thread_id: dict(thread)
@@ -697,6 +706,97 @@ def test_local_backend_materializes_pending_browser_prompt_into_rollout() -> Non
         ]
     }
     assert int(updated_at_ms) > 1700000000000
+
+
+def test_local_backend_materializes_pending_browser_prompt_via_inject_items_when_app_server_present() -> None:
+    """Happy path: when an app_server_client is wired up, the backend pushes
+    pending browser prompts through codex's own thread/inject_items RPC and
+    skips the rollout-file fallback entirely.
+    """
+
+    class RecordingAppServerClient:
+        def __init__(self) -> None:
+            self.inject_calls: list[tuple[str, list[dict]]] = []
+
+        def list_threads(self, *, limit: int = 60) -> dict:
+            return {"threads": []}
+
+        def resume_thread(self, thread_id: str) -> dict:
+            return {"ok": True}
+
+        def read_thread(self, thread_id: str, *, include_turns: bool = False) -> dict:
+            return {"thread": {"id": thread_id, "turns": []}}
+
+        def start_turn(
+            self, thread_id: str, prompt: str, input_items: list[dict] | None = None
+        ) -> dict:
+            return {"turn": {"id": "turn-1", "status": "inProgress"}}
+
+        def interrupt_turn(self, thread_id: str, turn_id: str) -> dict:
+            return {"ok": True}
+
+        def inject_items(self, thread_id: str, items: list[dict]) -> dict:
+            self.inject_calls.append((thread_id, list(items)))
+            return {}
+
+        def wait_for_turn_completion(
+            self, *, thread_id: str, turn_id: str, timeout_seconds: float
+        ) -> tuple[dict, str]:
+            raise NotImplementedError
+
+        def close(self) -> None:
+            return None
+
+    with TemporaryDirectory() as temp_dir:
+        rollout_path = Path(temp_dir) / "rollout.jsonl"
+        rollout_path.write_text("", encoding="utf-8")
+        thread = {
+            "id": "thread-1",
+            "title": "Thread 1",
+            "cwd": r"C:\\Users\\darkh\\Projects\\ops-cure",
+            "rolloutPath": str(rollout_path),
+        }
+        recorder = RecordingAppServerClient()
+        backend = LocalCodexBackend(
+            machine_id="homedev",
+            display_name="Home Dev",
+            app_server_client=recorder,
+            codex_home=temp_dir,
+        )
+        backend.get_thread_by_id = lambda thread_id: dict(thread)
+
+        created = backend.materialize_pending_browser_prompt(
+            thread_id="thread-1",
+            command_id="command-1",
+            prompt="[TEST]hello",
+            attachments=[
+                {
+                    "name": "screenshot.png",
+                    "mimeType": "image/png",
+                    "kind": "image",
+                    "size": 8,
+                    "dataUrl": "data:image/png;base64,abc123",
+                }
+            ],
+        )
+
+        assert created is True
+        assert len(recorder.inject_calls) == 1
+        sent_thread_id, sent_items = recorder.inject_calls[0]
+        assert sent_thread_id == "thread-1"
+        assert len(sent_items) == 1
+        message_item = sent_items[0]
+        assert message_item["type"] == "message"
+        assert message_item["role"] == "user"
+        content_types = [c.get("type") for c in message_item["content"]]
+        assert "input_text" in content_types
+        assert "input_image" in content_types
+        image_item = next(c for c in message_item["content"] if c.get("type") == "input_image")
+        assert image_item["image_url"].startswith("data:image/png;base64,")
+        assert image_item["detail"] == "high"
+
+        # File-fallback path must NOT have run when inject_items succeeded.
+        assert rollout_path.read_text(encoding="utf-8") == ""
 
 
 def test_local_backend_reconciles_pending_browser_prompt_after_actual_user_message_arrives() -> None:

@@ -883,6 +883,65 @@ class LocalCodexBackend:
                 blocks.append(f"{header}\n```\n{text}\n```")
         return blocks
 
+    def _decode_image_attachment_bytes(self, attachment: dict[str, Any]) -> bytes:
+        payload = self._decode_attachment_bytes(attachment.get("bytesBase64"))
+        if payload:
+            return payload
+        data_url = compact_text(attachment.get("dataUrl"))
+        if not data_url or "," not in data_url:
+            return b""
+        header, _, b64 = data_url.partition(",")
+        if "base64" not in header.lower():
+            return b""
+        try:
+            return base64.b64decode(b64)
+        except Exception:  # noqa: BLE001 — malformed dataUrl is treated as missing payload
+            return b""
+
+    def _materialize_image_attachments(
+        self,
+        *,
+        command_id: str,
+        attachments: list[dict[str, Any]],
+    ) -> list[str]:
+        """Write image attachments under the attachment root and return their
+        local paths in input order. Used by the live submit path so codex can
+        receive ``{type: "localImage", path}`` items instead of paying the
+        base64 inflation cost of inlined data URLs.
+        """
+        if not attachments:
+            return []
+        target_dir = self.attachment_root / compact_text(command_id, "browser-turn")
+        target_dir.mkdir(parents=True, exist_ok=True)
+        used_names: set[str] = set()
+        local_paths: list[str] = []
+        for index, attachment in enumerate(attachments, start=1):
+            if normalize_attachment_kind(
+                attachment.get("kind"),
+                name=attachment.get("name"),
+                mime_type=attachment.get("mimeType"),
+            ) != "image":
+                continue
+            payload = self._decode_image_attachment_bytes(attachment)
+            if not payload:
+                continue
+            filename = self._sanitize_attachment_filename(
+                attachment.get("name") or f"image-{index}.png",
+                index=index,
+            )
+            stem = Path(filename).stem or f"image-{index}"
+            suffix = Path(filename).suffix or ".png"
+            candidate = filename if Path(filename).suffix else f"{stem}{suffix}"
+            dedupe_index = 2
+            while candidate.lower() in used_names:
+                candidate = f"{stem}-{dedupe_index}{suffix}"
+                dedupe_index += 1
+            used_names.add(candidate.lower())
+            file_path = target_dir / candidate
+            file_path.write_bytes(payload)
+            local_paths.append(str(file_path))
+        return local_paths
+
     def _materialize_file_attachments(
         self,
         *,
@@ -939,6 +998,16 @@ class LocalCodexBackend:
         normalized_attachments = list(attachments or [])
         image_inputs: list[dict[str, Any]] = []
 
+        # Materialize image attachments to disk so codex can read them via
+        # `{type: "localImage", path}` — the v2 UserInput shape it prefers
+        # for files that already live on the same machine. Avoids the ~33%
+        # base64 inflation cost of inlining a dataUrl, and keeps large
+        # screenshots from blowing up the JSON-RPC envelope.
+        image_local_paths = self._materialize_image_attachments(
+            command_id=command_id,
+            attachments=normalized_attachments,
+        )
+        local_path_iter = iter(image_local_paths)
         for attachment in normalized_attachments:
             if normalize_attachment_kind(
                 attachment.get("kind"),
@@ -946,14 +1015,16 @@ class LocalCodexBackend:
                 mime_type=attachment.get("mimeType"),
             ) != "image":
                 continue
-            data_url = compact_text(attachment.get("dataUrl"))
-            if not data_url:
+            local_path = next(local_path_iter, None)
+            if local_path:
+                image_inputs.append({"type": "localImage", "path": local_path})
                 continue
-            image_item = {
-                "type": "image",
-                "url": data_url,
-            }
-            image_inputs.append(image_item)
+            # Fallback: image bytes were not extractable to a file (no
+            # bytesBase64 and no decodable dataUrl). Fall back to the inlined
+            # url variant so the user still sees their attachment land.
+            data_url = compact_text(attachment.get("dataUrl"))
+            if data_url:
+                image_inputs.append({"type": "image", "url": data_url})
 
         inline_text_blocks = self._build_inline_text_attachment_blocks(normalized_attachments)
         file_paths = self._materialize_file_attachments(
@@ -1006,8 +1077,8 @@ class LocalCodexBackend:
         prompt_text = prompt.rstrip("\r\n")
         now = datetime.now(timezone.utc)
         timestamp = now.isoformat().replace("+00:00", "Z")
-        image_content = []
-        image_event_entries = []
+        image_content: list[dict[str, Any]] = []
+        image_event_entries: list[dict[str, Any]] = []
         for index, attachment in enumerate(attachments or [], start=1):
             if normalize_attachment_kind(
                 attachment.get("kind"),
@@ -1034,38 +1105,61 @@ class LocalCodexBackend:
                 }
             )
 
-        entries = [
-            {
-                "type": "response_item",
-                "timestamp": timestamp,
-                "payload": {
-                    "type": "message",
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "input_text",
-                            "text": prompt_text,
-                        }
-                    ]
-                    + image_content,
+        response_message = {
+            "type": "message",
+            "role": "user",
+            "content": [
+                {
+                    "type": "input_text",
+                    "text": prompt_text,
+                }
+            ]
+            + image_content,
+        }
+
+        # Prefer codex's own thread/inject_items RPC over direct rollout writes:
+        # the app-server takes the same Responses-API content shape, applies it
+        # to the thread's model-visible history, and codex desktop picks up the
+        # update through normal state propagation. This drops the homemade
+        # rollout-append + dedup-registry dance for the common case where the
+        # standalone-app-server transport is wired up.
+        injected_via_app_server = False
+        if self.app_server_client is not None:
+            try:
+                self.app_server_client.inject_items(thread_id, [response_message])
+                injected_via_app_server = True
+            except Exception as exc:  # noqa: BLE001 — fall back to file write on any RPC failure
+                LOGGER.warning(
+                    "thread/inject_items failed for %s; falling back to rollout file append: %s",
+                    thread_id,
+                    exc,
+                )
+
+        if not injected_via_app_server:
+            user_event = {
+                "type": "user_message",
+                "message": prompt_text,
+                "images": image_event_entries,
+                "local_images": [],
+                "text_elements": [],
+            }
+            entries = [
+                {
+                    "type": "response_item",
+                    "timestamp": timestamp,
+                    "payload": response_message,
                 },
-            },
-            {
-                "type": "event_msg",
-                "timestamp": timestamp,
-                "payload": {
-                    "type": "user_message",
-                    "message": prompt_text,
-                    "images": image_event_entries,
-                    "local_images": [],
-                    "text_elements": [],
+                {
+                    "type": "event_msg",
+                    "timestamp": timestamp,
+                    "payload": user_event,
                 },
-            },
-        ]
-        with rollout_path.open("a", encoding="utf-8", newline="\n") as handle:
-            for entry in entries:
-                handle.write(json.dumps(entry, ensure_ascii=False))
-                handle.write("\n")
+            ]
+            with rollout_path.open("a", encoding="utf-8", newline="\n") as handle:
+                for entry in entries:
+                    handle.write(json.dumps(entry, ensure_ascii=False))
+                    handle.write("\n")
+
         thread_entries.append(
             {
                 "timestamp": timestamp,
