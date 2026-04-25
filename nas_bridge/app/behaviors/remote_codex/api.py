@@ -53,8 +53,8 @@ def _attachment_kind_for(mime_type: str, filename: str) -> str:
 
 
 async def _extract_turn_payload(request: Request) -> tuple[str, list[dict[str, Any]]]:
-    content_type = str(request.headers.get("content-type") or "").lower()
-    if content_type.startswith("multipart/form-data"):
+    content_type = str(request.headers.get("content-type") or "")
+    if content_type.lower().startswith("multipart/form-data"):
         raw_body = await request.body()
         raw_message = (
             f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode("utf-8") + raw_body
