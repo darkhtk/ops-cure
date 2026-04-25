@@ -15,6 +15,58 @@ class BridgeClientError(RuntimeError):
     pass
 
 
+def parse_sse_stream(lines: Iterator[str]) -> Iterator[dict[str, Any]]:
+    """Parse a server-sent-event byte stream into ``{"event", "data"}`` dicts.
+
+    Pulled out of ``BridgeClient.stream_kernel_events`` as a free function
+    so it can be unit-tested without a live HTTP connection. Follows the
+    minimum SSE shape the bridge emits:
+    - lines beginning with ``event:`` set the event name
+    - lines beginning with ``data:`` accumulate into the JSON payload
+    - empty lines flush a complete event
+    Any non-JSON ``data`` payload yields ``data=None`` so the caller can
+    still observe the event name (heartbeats, opens, resets).
+    """
+    event_name: str | None = None
+    data_chunks: list[str] = []
+
+    for raw_line in lines:
+        if raw_line is None:
+            continue
+        line = raw_line.rstrip("\r")
+        if line == "":
+            if event_name is not None or data_chunks:
+                payload: Any = None
+                if data_chunks:
+                    body = "\n".join(data_chunks)
+                    try:
+                        payload = json.loads(body)
+                    except json.JSONDecodeError:
+                        payload = body
+                yield {"event": event_name or "message", "data": payload}
+            event_name = None
+            data_chunks = []
+            continue
+        if line.startswith(":"):
+            # Comment line per SSE spec (used as keep-alive on some servers).
+            continue
+        if line.startswith("event:"):
+            event_name = line[len("event:"):].strip()
+        elif line.startswith("data:"):
+            data_chunks.append(line[len("data:"):].lstrip())
+
+    # Flush any trailing event without a terminating blank line.
+    if event_name is not None or data_chunks:
+        payload = None
+        if data_chunks:
+            body = "\n".join(data_chunks)
+            try:
+                payload = json.loads(body)
+            except json.JSONDecodeError:
+                payload = body
+        yield {"event": event_name or "message", "data": payload}
+
+
 class BridgeClient:
     def __init__(self, *, base_url: str, auth_token: str, timeout_seconds: int = 30) -> None:
         self.base_url = base_url.rstrip("/")
@@ -736,6 +788,52 @@ class BridgeClient:
             "latest_heartbeat": latest_heartbeat,
             "recent_evidence": task.get("recentEvidence") or [],
         }
+
+    # ---------- Generic kernel event subscription (SSE consumer) ----------
+
+    def stream_kernel_events(
+        self,
+        *,
+        space_id: str,
+        kinds: list[str] | None = None,
+        after_cursor: str | None = None,
+        subscriber_id: str | None = None,
+        connect_timeout: float = 15.0,
+    ) -> Iterator[dict[str, Any]]:
+        """Yield SSE events from ``/api/events/spaces/{space_id}/stream``
+        as parsed dicts, one per server-sent event frame.
+
+        Each yielded value has the shape ``{"event": str, "data": Any}``.
+        ``event`` is one of ``open`` / ``event`` / ``reset`` / ``heartbeat``
+        (whatever the server emits). ``data`` is the JSON payload, or
+        ``None`` if the frame did not carry a parseable JSON body.
+
+        The iterator runs until the underlying HTTP stream closes. The
+        caller is responsible for reconnect / backoff — the bridge can
+        rotate or restart, and exponential backoff is best handled by the
+        consumer's main loop, not buried inside this primitive.
+        """
+        params: list[tuple[str, str]] = []
+        if kinds:
+            for kind in kinds:
+                params.append(("kinds", kind))
+        if after_cursor:
+            params.append(("after_cursor", after_cursor))
+        if subscriber_id:
+            params.append(("subscriber_id", subscriber_id))
+
+        url = f"{self.base_url}/api/events/spaces/{quote_plus(space_id)}/stream"
+        with self.session.get(
+            url,
+            params=params,
+            stream=True,
+            timeout=(connect_timeout, None),
+        ) as response:
+            if not response.ok:
+                raise BridgeClientError(
+                    f"{url} -> {response.status_code}: {response.text[:200]}"
+                )
+            yield from parse_sse_stream(response.iter_lines(decode_unicode=True))
 
     # ---------- Generic kernel scratch (KernelScratchService HTTP wrapper) ----------
 
