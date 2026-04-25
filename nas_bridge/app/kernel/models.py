@@ -3,6 +3,7 @@
 from ..models import (
     AgentModel,
     ExecutionTargetModel,
+    KernelApprovalModel,
     KernelScratchModel,
     LauncherCatalogEntryModel,
     LauncherRecordModel,
@@ -14,6 +15,7 @@ from ..models import (
 __all__ = [
     "AgentModel",
     "ExecutionTargetModel",
+    "KernelApprovalModel",
     "KernelScratchModel",
     "LauncherCatalogEntryModel",
     "LauncherRecordModel",

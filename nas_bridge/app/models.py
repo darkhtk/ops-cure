@@ -770,3 +770,41 @@ class KernelScratchModel(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class KernelApprovalModel(Base):
+    """Generic kernel-level approval ledger.
+
+    Behaviors that need a "wait for human (or another actor) before
+    proceeding" gate share this single primitive instead of each one
+    rolling its own approval table. The behavior describes the request
+    via ``kind`` plus an opaque ``payload_json``; the kernel only owns
+    the lifecycle (pending → approved | rejected | expired) and the
+    audit fields (who requested, who resolved, when).
+
+    Codex's typed approval shapes (apply_patch, exec_command,
+    file_change, command_execution) drop in as ``kind`` values with the
+    matching JSON-Schema payload. ops, chat, and orchestration reuse the
+    same row shape with their own kind tags so a unified "things waiting
+    on me" view works across behaviors.
+    """
+
+    __tablename__ = "kernel_approvals"
+    __table_args__ = (
+        Index("ix_kernel_approvals_space_status_requested", "space_id", "status", "requested_at"),
+        Index("ix_kernel_approvals_kind_status", "kind", "status"),
+        Index("ix_kernel_approvals_expires_at", "expires_at"),
+    )
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=lambda: str(uuid.uuid4()))
+    space_id: Mapped[str] = mapped_column(index=True)
+    kind: Mapped[str] = mapped_column(index=True)
+    payload_json: Mapped[str] = mapped_column(Text(), default="{}")
+    status: Mapped[str] = mapped_column(index=True, default="pending")
+    requested_by: Mapped[str] = mapped_column(index=True, default="")
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    resolved_by: Mapped[str | None] = mapped_column(index=True, nullable=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolution: Mapped[str | None] = mapped_column(index=True, nullable=True)
+    note: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
