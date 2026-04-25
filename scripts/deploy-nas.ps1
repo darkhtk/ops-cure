@@ -64,7 +64,7 @@ try {
         throw "Failed to create git archive from $sourceRoot"
     }
 
-    & scp -P $sshPort $archivePath "${sshUser}@${sshHost}:${remoteArchive}"
+    & scp -O -P $sshPort $archivePath "${sshUser}@${sshHost}:${remoteArchive}"
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to upload archive to NAS"
     }
