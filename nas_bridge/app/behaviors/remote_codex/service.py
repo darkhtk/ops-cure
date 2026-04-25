@@ -126,10 +126,12 @@ class RemoteCodexBehaviorService:
         remote_task_service: RemoteTaskService | None = None,
         state_service: RemoteCodexStateService | None = None,
         kernel_subscription_broker: Any | None = None,
+        kernel_task_service: Any | None = None,
     ) -> None:
         self.remote_task_service = remote_task_service or RemoteTaskService()
         self.state_service = state_service or RemoteCodexStateService(
             kernel_subscription_broker=kernel_subscription_broker,
+            kernel_task_service=kernel_task_service,
         )
 
     def _task_to_browser(self, task: RemoteTaskSummaryResponse) -> dict[str, Any]:

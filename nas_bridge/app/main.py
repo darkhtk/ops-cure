@@ -112,10 +112,17 @@ def build_services(settings: Settings) -> ServiceContainer:
         announcement_service=announcement_service,
     )
     presence_service = PresenceService()
-    remote_task_service = RemoteTaskService(presence_service=presence_service)
+    kernel_approval_service = KernelApprovalService()
+    kernel_scratch_service = KernelScratchService()
+    kernel_task_service = KernelTaskService()
+    remote_task_service = RemoteTaskService(
+        presence_service=presence_service,
+        kernel_approval_service=kernel_approval_service,
+    )
     remote_codex_service = RemoteCodexBehaviorService(
         remote_task_service=remote_task_service,
         kernel_subscription_broker=subscription_broker,
+        kernel_task_service=kernel_task_service,
     )
     power_provider = RoutedPowerProvider([NoopPowerProvider(), WakeOnLanPowerProvider()])
     execution_provider = RoutedExecutionProvider([WindowsLauncherExecutionProvider(registry)])
@@ -212,9 +219,6 @@ def build_services(settings: Settings) -> ServiceContainer:
         behavior_bindings=discord_behaviors,
         thread_manager=thread_manager,
     )
-    kernel_approval_service = KernelApprovalService()
-    kernel_scratch_service = KernelScratchService()
-    kernel_task_service = KernelTaskService()
     return ServiceContainer(
         settings=settings,
         registry=registry,

@@ -167,20 +167,28 @@ class KernelTaskService:
         priority: int = 0,
         requested_by: str = "",
         parent_task_id: str | None = None,
+        task_id: str | None = None,
     ) -> KernelTaskRecord:
         if not space_id:
             raise ValueError("space_id is required")
         if not kind:
             raise ValueError("kind is required")
-        row = KernelTaskModel(
-            space_id=str(space_id),
-            kind=str(kind),
-            status=TASK_STATUS_QUEUED,
-            priority=int(priority),
-            payload_json=json.dumps(payload or {}, ensure_ascii=False, default=str),
-            requested_by=str(requested_by or ""),
-            parent_task_id=str(parent_task_id) if parent_task_id else None,
-        )
+        row_kwargs: dict[str, Any] = {
+            "space_id": str(space_id),
+            "kind": str(kind),
+            "status": TASK_STATUS_QUEUED,
+            "priority": int(priority),
+            "payload_json": json.dumps(payload or {}, ensure_ascii=False, default=str),
+            "requested_by": str(requested_by or ""),
+            "parent_task_id": str(parent_task_id) if parent_task_id else None,
+        }
+        if task_id:
+            # Behaviors that mirror an externally-keyed row (e.g. a
+            # remote_codex command) reuse its id as the kernel task id
+            # so the kernel record stays 1:1 with the legacy row without
+            # needing a separate join column.
+            row_kwargs["id"] = str(task_id)
+        row = KernelTaskModel(**row_kwargs)
         session.add(row)
         session.flush()
         return _record_from_row(row)

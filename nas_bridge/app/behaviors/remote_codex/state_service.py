@@ -12,7 +12,14 @@ from sqlalchemy import delete, func, select
 
 from ...db import session_scope
 from ...kernel.events import EventEnvelope, EventSummary, encode_event_cursor
+from ...kernel.tasks import (
+    KernelTaskService,
+    TASK_STATUS_CLAIMED,
+    TASK_STATUS_COMPLETED,
+    TASK_STATUS_FAILED,
+)
 from ...models import (
+    KernelTaskModel,
     RemoteCodexCommandModel,
     RemoteCodexMachineModel,
     RemoteCodexMessageModel,
@@ -253,8 +260,16 @@ def remote_codex_machine_space_id(machine_id: str) -> str:
     return f"{REMOTE_CODEX_MACHINE_SPACE_PREFIX}{machine_id}"
 
 
+REMOTE_CODEX_COMMAND_KIND = "remote_codex.command"
+
+
 class RemoteCodexStateService:
-    def __init__(self, *, kernel_subscription_broker: Any | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        kernel_subscription_broker: Any | None = None,
+        kernel_task_service: KernelTaskService | None = None,
+    ) -> None:
         self._subscribers: dict[tuple[str, str], dict[str, asyncio.Queue[dict[str, Any]]]] = defaultdict(dict)
         # Optional kernel-level broker so machine-scoped command events also
         # flow out through the generic /api/events/... pipe. Behavior is a
@@ -262,6 +277,11 @@ class RemoteCodexStateService:
         # same payload the legacy /api/remote-codex/.../live SSE was already
         # publishing; when None, only the legacy pipe runs (today's path).
         self._kernel_subscription_broker = kernel_subscription_broker
+        # Optional kernel task service so the legacy ``remote_codex_commands``
+        # writes also create / transition a generic ``KernelTaskModel`` row
+        # keyed off the same primary key. Mirror is best-effort during the
+        # migration window — failures must not destabilize the legacy flow.
+        self._kernel_task_service = kernel_task_service or KernelTaskService()
 
     def _subscribe(self, machine_id: str, thread_id: str) -> SubscriptionHandle:
         queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
@@ -332,6 +352,76 @@ class RemoteCodexStateService:
         try:
             broker.publish(space_id=space_id, item=envelope)
         except Exception:  # noqa: BLE001 — broker dispatch failures must not break the legacy publish
+            pass
+
+    def _mirror_command_enqueue(
+        self,
+        db,
+        *,
+        row: RemoteCodexCommandModel,
+        command_type: str,
+    ) -> None:
+        """Mirror a freshly-enqueued remote_codex command into a generic
+        ``KernelTaskModel`` row keyed off the command id. The kernel side
+        is best-effort during the migration window — failures are
+        swallowed so the legacy enqueue stays the source of truth.
+        """
+        try:
+            self._kernel_task_service.enqueue(
+                db,
+                space_id=remote_codex_machine_space_id(row.machine_id),
+                kind=REMOTE_CODEX_COMMAND_KIND,
+                payload={
+                    "machine_id": row.machine_id,
+                    "thread_id": row.thread_id,
+                    "command_type": command_type,
+                    "turn_id": row.turn_id,
+                    "task_id": row.task_id,
+                },
+                requested_by=compact_text(loads_json(row.requested_by_json, {}).get("actorId") or ""),
+                task_id=row.command_id,
+            )
+        except Exception:  # noqa: BLE001 — mirror must not destabilize the legacy write
+            pass
+
+    def _mirror_command_transition(
+        self,
+        db,
+        *,
+        command_id: str,
+        status: str,
+        owner_actor_id: str | None,
+        result: dict[str, Any] | None = None,
+        error: dict[str, Any] | None = None,
+    ) -> None:
+        """Drive the mirrored kernel task row to the same terminal /
+        intermediate status as the legacy command row, bypassing lease
+        semantics: the legacy worker_id field already enforces single-
+        ownership, so the kernel mirror just shadows the status, owner,
+        and result/error blob without an extra lease handshake.
+        """
+        try:
+            kernel_row = db.get(KernelTaskModel, command_id)
+            if kernel_row is None:
+                return
+            now = utcnow()
+            kernel_row.status = status
+            if owner_actor_id is not None:
+                kernel_row.owner_actor_id = owner_actor_id
+            if status == TASK_STATUS_CLAIMED:
+                kernel_row.claim_count = int(kernel_row.claim_count or 0) + 1
+                kernel_row.started_at = kernel_row.started_at or now
+            if status == TASK_STATUS_COMPLETED and result is not None:
+                kernel_row.result_json = dumps_json(result)
+                kernel_row.completed_at = now
+                kernel_row.lease_expires_at = None
+            elif status == TASK_STATUS_FAILED:
+                kernel_row.error_json = dumps_json(error or {"message": "Unknown error"})
+                kernel_row.completed_at = now
+                kernel_row.lease_expires_at = None
+            kernel_row.updated_at = now
+            db.flush()
+        except Exception:  # noqa: BLE001 — mirror must not destabilize the legacy write
             pass
 
     def _publish(self, machine_id: str, thread_id: str, payload: dict[str, Any]) -> None:
@@ -964,6 +1054,7 @@ class RemoteCodexStateService:
             db.add(row)
             db.flush()
             public = self._command_row_to_public(row)
+            self._mirror_command_enqueue(db, row=row, command_type=command_type)
         self._publish(machine_id, thread_id, {"kind": "command", "command": public})
         return public
 
@@ -987,6 +1078,12 @@ class RemoteCodexStateService:
             db.flush()
             public = self._command_row_to_public(row, include_attachment_data=True)
             broadcast = self._command_row_to_public(row)
+            self._mirror_command_transition(
+                db,
+                command_id=row.command_id,
+                status=TASK_STATUS_CLAIMED,
+                owner_actor_id=row.worker_id,
+            )
         self._publish(machine_id, public["threadId"], {"kind": "command", "command": broadcast})
         return public
 
@@ -1006,6 +1103,13 @@ class RemoteCodexStateService:
                     row.turn_id = next_turn_id
             db.flush()
             public = self._command_row_to_public(row)
+            self._mirror_command_transition(
+                db,
+                command_id=row.command_id,
+                status=TASK_STATUS_COMPLETED,
+                owner_actor_id=row.worker_id,
+                result=result,
+            )
         self._publish(public["machineId"], public["threadId"], {"kind": "command", "command": public})
         return public
 
@@ -1021,5 +1125,12 @@ class RemoteCodexStateService:
             row.updated_at = row.completed_at
             db.flush()
             public = self._command_row_to_public(row)
+            self._mirror_command_transition(
+                db,
+                command_id=row.command_id,
+                status=TASK_STATUS_FAILED,
+                owner_actor_id=row.worker_id,
+                error=error,
+            )
         self._publish(public["machineId"], public["threadId"], {"kind": "command", "command": public})
         return public
