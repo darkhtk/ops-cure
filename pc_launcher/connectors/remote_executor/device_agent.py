@@ -572,6 +572,9 @@ def extract_turn_status(result: dict[str, Any] | None) -> str | None:
     return compact_text(result.get("status")) or None
 
 
+PENDING_PROMPT_SCRATCH_KEY = "remote_codex.pending_prompt"
+
+
 class LocalCodexBackend:
     def __init__(
         self,
@@ -583,6 +586,7 @@ class LocalCodexBackend:
         runtime_descriptor: dict[str, Any] | None = None,
         desktop_submit_thread_id: str | None = None,
         desktop_prompt_submitter: DesktopPromptSubmitter | None = None,
+        kernel_scratch_client: Any | None = None,
     ) -> None:
         self.machine_id = machine_id
         self.display_name = display_name
@@ -594,9 +598,109 @@ class LocalCodexBackend:
         self.runtime_descriptor = runtime_descriptor or {}
         self.desktop_submit_thread_id = compact_text(desktop_submit_thread_id) or None
         self.desktop_prompt_submitter = desktop_prompt_submitter
+        # When provided, the kernel scratch client gives us a centralised
+        # store for pending-prompt dedup state. The legacy on-disk JSON file
+        # at ``remote_codex_pending_rollout.json`` stays as a fallback so
+        # ops-cure keeps working when the bridge is briefly unreachable, but
+        # the scratch is the source of truth on the happy path.
+        self.kernel_scratch_client = kernel_scratch_client
         self.last_runtime_error: str | None = None
         self.runtime_available = False
         self.active_transport = "filesystem-storage"
+
+    def _normalize_pending_thread_entries(
+        self, entries: Any
+    ) -> list[dict[str, Any]]:
+        if not isinstance(entries, list):
+            return []
+        normalized: list[dict[str, Any]] = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            timestamp = compact_text(entry.get("timestamp"))
+            command_id = compact_text(entry.get("commandId"))
+            text = compact_text(entry.get("text"))
+            if not timestamp or not command_id or not text:
+                continue
+            normalized.append(
+                {
+                    "timestamp": timestamp,
+                    "commandId": command_id,
+                    "text": text,
+                }
+            )
+        return normalized
+
+    def _load_pending_thread_entries(self, thread_id: str) -> list[dict[str, Any]]:
+        """Read the pending-prompt dedup list for a single thread.
+
+        Prefers the kernel scratch when a client is wired up, so multiple
+        runners and launcher restarts can share the same idempotency state.
+        Falls back to the on-disk JSON registry for offline operation and
+        for the migration window where some entries still live in the file.
+        """
+        if self.kernel_scratch_client is not None:
+            try:
+                value = self.kernel_scratch_client.get_kernel_scratch(
+                    actor_id=self.machine_id,
+                    space_id=thread_id,
+                    key=PENDING_PROMPT_SCRATCH_KEY,
+                    default=None,
+                )
+            except Exception as exc:  # noqa: BLE001 — bridge unreachable is fall-through territory
+                LOGGER.debug(
+                    "kernel scratch fetch failed for thread=%s: %s; falling back to file",
+                    thread_id,
+                    exc,
+                )
+                value = None
+            if value is not None:
+                return self._normalize_pending_thread_entries(value)
+        registry = self._load_pending_rollout_registry()
+        return list(registry.get(thread_id) or [])
+
+    def _save_pending_thread_entries(
+        self, thread_id: str, entries: list[dict[str, Any]]
+    ) -> None:
+        """Write the pending-prompt dedup list for a single thread.
+
+        Mirrors writes into the kernel scratch when available, plus keeps
+        the legacy file in sync so an offline reader still sees fresh
+        state. Empty ``entries`` removes the row in both stores.
+        """
+        cleaned = self._normalize_pending_thread_entries(entries)
+
+        if self.kernel_scratch_client is not None:
+            try:
+                if cleaned:
+                    self.kernel_scratch_client.set_kernel_scratch(
+                        actor_id=self.machine_id,
+                        space_id=thread_id,
+                        key=PENDING_PROMPT_SCRATCH_KEY,
+                        value=cleaned,
+                    )
+                else:
+                    self.kernel_scratch_client.delete_kernel_scratch(
+                        actor_id=self.machine_id,
+                        space_id=thread_id,
+                        key=PENDING_PROMPT_SCRATCH_KEY,
+                    )
+            except Exception as exc:  # noqa: BLE001 — bridge unreachable is fall-through territory
+                LOGGER.debug(
+                    "kernel scratch write failed for thread=%s: %s; legacy file kept as backstop",
+                    thread_id,
+                    exc,
+                )
+
+        # Keep the legacy file in sync so a bridge outage that follows still
+        # sees the latest pending entries. The file is also the only source
+        # of truth when no kernel_scratch_client is configured.
+        registry = self._load_pending_rollout_registry()
+        if cleaned:
+            registry[thread_id] = cleaned
+        else:
+            registry.pop(thread_id, None)
+        self._save_pending_rollout_registry(registry)
 
     def _load_pending_rollout_registry(self) -> dict[str, list[dict[str, Any]]]:
         if not self.pending_rollout_registry_path.exists():
@@ -656,8 +760,7 @@ class LocalCodexBackend:
         thread_id: str,
         lines: list[str],
     ) -> tuple[list[str], bool]:
-        registry = self._load_pending_rollout_registry()
-        thread_entries = list(registry.get(thread_id) or [])
+        thread_entries = self._load_pending_thread_entries(thread_id)
         if not thread_entries:
             return lines, False
 
@@ -714,12 +817,8 @@ class LocalCodexBackend:
                 continue
             next_thread_entries.append(pending_entry)
 
-        if next_thread_entries:
-            registry[thread_id] = next_thread_entries
-        else:
-            registry.pop(thread_id, None)
         if registry_changed:
-            self._save_pending_rollout_registry(registry)
+            self._save_pending_thread_entries(thread_id, next_thread_entries)
 
         if not drop_indices:
             return lines, False
@@ -1069,8 +1168,7 @@ class LocalCodexBackend:
         if rollout_path is None:
             return False
         rollout_path.parent.mkdir(parents=True, exist_ok=True)
-        registry = self._load_pending_rollout_registry()
-        thread_entries = list(registry.get(thread_id) or [])
+        thread_entries = self._load_pending_thread_entries(thread_id)
         if any(compact_text(entry.get("commandId")) == compact_text(command_id) for entry in thread_entries):
             return False
 
@@ -1167,8 +1265,7 @@ class LocalCodexBackend:
                 "text": prompt_text,
             }
         )
-        registry[thread_id] = thread_entries
-        self._save_pending_rollout_registry(registry)
+        self._save_pending_thread_entries(thread_id, thread_entries)
         self._touch_thread_updated_at(thread_id, now_ms=int(now.timestamp() * 1000))
         return True
 

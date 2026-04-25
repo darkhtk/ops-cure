@@ -8,7 +8,7 @@ import asyncio
 
 from fastapi import FastAPI
 
-from .api import actors, behaviors, events, health, presence, remote_tasks, sessions, spaces, verification, workers
+from .api import actors, behaviors, events, health, kernel_scratch, presence, remote_tasks, sessions, spaces, verification, workers
 from .behaviors.catalog import BehaviorCatalogService
 from .behaviors.chat import api as chat_api
 from .behaviors.remote_codex import api as remote_codex_api
@@ -42,6 +42,7 @@ from .kernel.event_log import TranscriptService
 from .kernel.events import EventService
 from .kernel.presence import PresenceService
 from .kernel.registry import WorkerRegistry
+from .kernel.scratch import KernelScratchService
 from .kernel.spaces import SpaceService
 from .kernel.subscriptions import InProcessSubscriptionBroker
 from .presenters.discord.status_cards import AnnouncementService
@@ -67,6 +68,7 @@ class ServiceContainer:
     subscription_broker: InProcessSubscriptionBroker
     actor_service: ActorService
     event_service: EventService
+    kernel_scratch_service: KernelScratchService
     space_service: SpaceService
     thread_manager: ThreadManager
     announcement_service: AnnouncementService
@@ -203,6 +205,7 @@ def build_services(settings: Settings) -> ServiceContainer:
         behavior_bindings=discord_behaviors,
         thread_manager=thread_manager,
     )
+    kernel_scratch_service = KernelScratchService()
     return ServiceContainer(
         settings=settings,
         registry=registry,
@@ -210,6 +213,7 @@ def build_services(settings: Settings) -> ServiceContainer:
         subscription_broker=subscription_broker,
         actor_service=actor_service,
         event_service=event_service,
+        kernel_scratch_service=kernel_scratch_service,
         thread_manager=thread_manager,
         announcement_service=announcement_service,
         chat_service=chat_service,
@@ -257,6 +261,7 @@ app.include_router(health.router)
 app.include_router(actors.router)
 app.include_router(behaviors.router)
 app.include_router(events.router)
+app.include_router(kernel_scratch.router)
 app.include_router(presence.router)
 app.include_router(remote_tasks.router)
 app.include_router(remote_codex_api.router)

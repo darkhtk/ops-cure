@@ -737,10 +737,90 @@ class BridgeClient:
             "recent_evidence": task.get("recentEvidence") or [],
         }
 
+    # ---------- Generic kernel scratch (KernelScratchService HTTP wrapper) ----------
+
+    def get_kernel_scratch(
+        self,
+        *,
+        key: str,
+        actor_id: str = "",
+        space_id: str = "",
+        default: Any = None,
+    ) -> Any:
+        """Read a kernel scratch entry. Returns ``default`` when the entry
+        is missing or expired."""
+        params = {"key": key, "actor_id": actor_id, "space_id": space_id}
+        try:
+            payload = self._get_with_params("/api/kernel/scratch", params)
+        except BridgeClientError:
+            return default
+        if not isinstance(payload, dict) or not payload.get("found"):
+            return default
+        return payload.get("value", default)
+
+    def set_kernel_scratch(
+        self,
+        *,
+        key: str,
+        value: Any,
+        actor_id: str = "",
+        space_id: str = "",
+        ttl_seconds: int | None = None,
+    ) -> None:
+        body: dict[str, Any] = {
+            "actor_id": actor_id,
+            "space_id": space_id,
+            "key": key,
+            "value": value,
+        }
+        if ttl_seconds is not None:
+            body["ttl_seconds"] = int(ttl_seconds)
+        self._put("/api/kernel/scratch", body)
+
+    def delete_kernel_scratch(
+        self,
+        *,
+        key: str,
+        actor_id: str = "",
+        space_id: str = "",
+    ) -> bool:
+        body = {"actor_id": actor_id, "space_id": space_id, "key": key}
+        try:
+            payload = self._delete_with_body("/api/kernel/scratch", body)
+        except BridgeClientError:
+            return False
+        return bool(isinstance(payload, dict) and payload.get("removed"))
+
+    # -----------------------------------------------------------------------------
+
     def _post(self, path: str, payload: dict[str, Any]) -> Any:
         response = self.session.post(
             f"{self.base_url}{path}",
             json=payload,
+            timeout=self.timeout_seconds,
+        )
+        return self._handle_response(path, response)
+
+    def _put(self, path: str, payload: dict[str, Any]) -> Any:
+        response = self.session.put(
+            f"{self.base_url}{path}",
+            json=payload,
+            timeout=self.timeout_seconds,
+        )
+        return self._handle_response(path, response)
+
+    def _delete_with_body(self, path: str, payload: dict[str, Any]) -> Any:
+        response = self.session.delete(
+            f"{self.base_url}{path}",
+            json=payload,
+            timeout=self.timeout_seconds,
+        )
+        return self._handle_response(path, response)
+
+    def _get_with_params(self, path: str, params: dict[str, Any]) -> Any:
+        response = self.session.get(
+            f"{self.base_url}{path}",
+            params=params,
             timeout=self.timeout_seconds,
         )
         return self._handle_response(path, response)

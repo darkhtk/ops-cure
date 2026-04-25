@@ -217,6 +217,7 @@ def build_device_agent(
         app_server_client=live_control_client,
         desktop_submit_thread_id=desktop_submit_thread_id,
         desktop_prompt_submitter=desktop_prompt_submitter,
+        kernel_scratch_client=getattr(bridge, "bridge_client", None),
         runtime_descriptor={
             "runtimeMode": "standalone-app-server",
             "runtimeBin": getattr(getattr(live_control_client, "config", None), "executable", None),

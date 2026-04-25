@@ -708,6 +708,91 @@ def test_local_backend_materializes_pending_browser_prompt_into_rollout() -> Non
     assert int(updated_at_ms) > 1700000000000
 
 
+def test_local_backend_routes_pending_dedup_through_kernel_scratch_client() -> None:
+    """When a kernel_scratch_client is wired up, the per-thread pending
+    registry lives in the bridge-side kernel scratch instead of (only)
+    the legacy on-disk JSON file. The legacy file still mirrors the state
+    so an offline reader doesn't go blind, but the bridge call is what a
+    fresh runner instance reads on first claim.
+    """
+
+    class RecordingScratchClient:
+        def __init__(self) -> None:
+            self.store: dict[tuple[str, str, str], object] = {}
+            self.get_calls: list[tuple[str, str, str]] = []
+            self.set_calls: list[tuple[str, str, str, object]] = []
+            self.delete_calls: list[tuple[str, str, str]] = []
+
+        def get_kernel_scratch(
+            self, *, key: str, actor_id: str = "", space_id: str = "", default=None
+        ):
+            self.get_calls.append((actor_id, space_id, key))
+            return self.store.get((actor_id, space_id, key), default)
+
+        def set_kernel_scratch(
+            self, *, key: str, value, actor_id: str = "", space_id: str = "", ttl_seconds=None
+        ):
+            self.set_calls.append((actor_id, space_id, key, value))
+            self.store[(actor_id, space_id, key)] = value
+
+        def delete_kernel_scratch(
+            self, *, key: str, actor_id: str = "", space_id: str = ""
+        ):
+            self.delete_calls.append((actor_id, space_id, key))
+            return self.store.pop((actor_id, space_id, key), None) is not None
+
+    with TemporaryDirectory() as temp_dir:
+        rollout_path = Path(temp_dir) / "rollout.jsonl"
+        rollout_path.write_text("", encoding="utf-8")
+        thread = {
+            "id": "thread-1",
+            "title": "Thread 1",
+            "cwd": r"C:\\Users\\darkh\\Projects\\ops-cure",
+            "rolloutPath": str(rollout_path),
+        }
+        scratch_client = RecordingScratchClient()
+        backend = LocalCodexBackend(
+            machine_id="homedev",
+            display_name="Home Dev",
+            # No app_server_client → exercises the rollout-fallback materialize
+            # path so we can observe both stores being written for that branch.
+            app_server_client=None,
+            codex_home=temp_dir,
+            kernel_scratch_client=scratch_client,
+        )
+        backend.get_thread_by_id = lambda thread_id: dict(thread)
+
+        first = backend.materialize_pending_browser_prompt(
+            thread_id="thread-1",
+            command_id="cmd-1",
+            prompt="[TEST]hello",
+        )
+        duplicate = backend.materialize_pending_browser_prompt(
+            thread_id="thread-1",
+            command_id="cmd-1",
+            prompt="[TEST]hello",
+        )
+
+        assert first is True
+        assert duplicate is False  # dedup honored across both stores
+
+        # Kernel scratch was the load source on each call (homedev/thread-1
+        # scope, key "remote_codex.pending_prompt") and got the new entry on
+        # the first save.
+        assert ("homedev", "thread-1", "remote_codex.pending_prompt") in scratch_client.store
+        stored_entries = scratch_client.store[("homedev", "thread-1", "remote_codex.pending_prompt")]
+        assert isinstance(stored_entries, list) and len(stored_entries) == 1
+        assert stored_entries[0]["commandId"] == "cmd-1"
+        assert stored_entries[0]["text"] == "[TEST]hello"
+
+        # Legacy on-disk registry mirrors the same state so an offline
+        # reader still sees the dedup entry.
+        legacy_payload = json.loads(
+            (Path(temp_dir) / "remote_codex_pending_rollout.json").read_text(encoding="utf-8")
+        )
+        assert legacy_payload["thread-1"][0]["commandId"] == "cmd-1"
+
+
 def test_local_backend_materializes_pending_browser_prompt_via_inject_items_when_app_server_present() -> None:
     """Happy path: when an app_server_client is wired up, the backend pushes
     pending browser prompts through codex's own thread/inject_items RPC and
