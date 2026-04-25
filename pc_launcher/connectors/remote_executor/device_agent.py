@@ -1023,7 +1023,7 @@ class LocalCodexBackend:
                 {
                     "type": "input_image",
                     "image_url": data_url,
-                    "title": title,
+                    "detail": "high",
                 }
             )
             image_event_entries.append(
