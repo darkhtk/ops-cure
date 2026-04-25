@@ -109,7 +109,10 @@ def build_services(settings: Settings) -> ServiceContainer:
     )
     presence_service = PresenceService()
     remote_task_service = RemoteTaskService(presence_service=presence_service)
-    remote_codex_service = RemoteCodexBehaviorService(remote_task_service=remote_task_service)
+    remote_codex_service = RemoteCodexBehaviorService(
+        remote_task_service=remote_task_service,
+        kernel_subscription_broker=subscription_broker,
+    )
     power_provider = RoutedPowerProvider([NoopPowerProvider(), WakeOnLanPowerProvider()])
     execution_provider = RoutedExecutionProvider([WindowsLauncherExecutionProvider(registry)])
     recovery_service = RecoveryService(

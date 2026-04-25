@@ -11,6 +11,7 @@ from typing import Any, Callable
 from sqlalchemy import delete, func, select
 
 from ...db import session_scope
+from ...kernel.events import EventEnvelope, EventSummary, encode_event_cursor
 from ...models import (
     RemoteCodexCommandModel,
     RemoteCodexMachineModel,
@@ -240,9 +241,27 @@ class SubscriptionHandle:
     unsubscribe: Callable[[], None]
 
 
+REMOTE_CODEX_MACHINE_SPACE_PREFIX = "remote_codex.machine:"
+
+
+def remote_codex_machine_space_id(machine_id: str) -> str:
+    """Synthetic kernel ``space_id`` used to publish machine-scoped command
+    events into the kernel subscription broker. Lets device-side runners
+    subscribe via the existing ``/api/events/spaces/{space_id}/stream`` SSE
+    endpoint without inventing a new transport just for this behavior.
+    """
+    return f"{REMOTE_CODEX_MACHINE_SPACE_PREFIX}{machine_id}"
+
+
 class RemoteCodexStateService:
-    def __init__(self) -> None:
+    def __init__(self, *, kernel_subscription_broker: Any | None = None) -> None:
         self._subscribers: dict[tuple[str, str], dict[str, asyncio.Queue[dict[str, Any]]]] = defaultdict(dict)
+        # Optional kernel-level broker so machine-scoped command events also
+        # flow out through the generic /api/events/... pipe. Behavior is a
+        # pure superset: when this is wired up, kernel subscribers see the
+        # same payload the legacy /api/remote-codex/.../live SSE was already
+        # publishing; when None, only the legacy pipe runs (today's path).
+        self._kernel_subscription_broker = kernel_subscription_broker
 
     def _subscribe(self, machine_id: str, thread_id: str) -> SubscriptionHandle:
         queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
@@ -263,6 +282,58 @@ class RemoteCodexStateService:
     def subscribe_machine(self, machine_id: str) -> SubscriptionHandle:
         return self._subscribe(machine_id, "*")
 
+    def _mirror_to_kernel_broker(
+        self,
+        machine_id: str,
+        thread_id: str,
+        payload: dict[str, Any],
+    ) -> None:
+        """Forward command-related publishes onto the generic kernel
+        subscription broker so device-side runners can use the regular
+        ``/api/events/spaces/.../stream`` SSE channel instead of polling
+        ``claim-next`` / ``agent/sync`` in a hot loop. We only mirror
+        ``command`` events for now — that's what runners need to wake on.
+        """
+        broker = self._kernel_subscription_broker
+        if broker is None:
+            return
+        if payload.get("kind") != "command":
+            return
+        command = payload.get("command")
+        if not isinstance(command, dict):
+            return
+
+        command_id = compact_text(command.get("commandId"))
+        if not command_id:
+            return
+        status = compact_text(command.get("status"))
+        kind = f"remote_codex.command.{status}" if status else "remote_codex.command"
+        actor_name = compact_text(command.get("workerId")) or compact_text(machine_id) or "remote_codex"
+        space_id = remote_codex_machine_space_id(machine_id)
+        created_at = utcnow()
+        envelope = EventEnvelope(
+            cursor=encode_event_cursor(created_at=created_at, event_id=command_id),
+            space_id=space_id,
+            event=EventSummary(
+                id=command_id,
+                kind=kind,
+                actor_name=actor_name,
+                content=json.dumps(
+                    {
+                        "machineId": machine_id,
+                        "threadId": thread_id,
+                        "command": command,
+                    },
+                    ensure_ascii=False,
+                ),
+                created_at=created_at,
+            ),
+        )
+        try:
+            broker.publish(space_id=space_id, item=envelope)
+        except Exception:  # noqa: BLE001 — broker dispatch failures must not break the legacy publish
+            pass
+
     def _publish(self, machine_id: str, thread_id: str, payload: dict[str, Any]) -> None:
         queues: list[asyncio.Queue[dict[str, Any]]] = []
         if thread_id == "*":
@@ -273,6 +344,8 @@ class RemoteCodexStateService:
         else:
             queues.extend(list(self._subscribers.get((machine_id, thread_id), {}).values()))
             queues.extend(list(self._subscribers.get((machine_id, "*"), {}).values()))
+
+        self._mirror_to_kernel_broker(machine_id, thread_id, payload)
 
         seen_queue_ids: set[int] = set()
         for queue in queues:

@@ -111,7 +111,9 @@ class RemoteCodexBehaviorDescriptor:
 
     def build_kernel_binding(self, context: BehaviorContext) -> KernelBehaviorBinding | None:
         del context
-        return None
+        from .remote_codex.kernel_binding import build_remote_codex_kernel_binding
+
+        return build_remote_codex_kernel_binding()
 
 
 def default_behavior_descriptors() -> tuple[BehaviorDescriptor, ...]:
