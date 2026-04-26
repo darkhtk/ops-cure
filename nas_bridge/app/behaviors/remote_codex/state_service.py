@@ -41,6 +41,9 @@ COMMAND_FAILED = "failed"
 TURN_START = "turn.start"
 TURN_INTERRUPT = "turn.interrupt"
 THREAD_DELETE = "thread.delete"
+THREAD_START = "thread.start"
+FS_LIST = "fs.list"
+FS_MKDIR = "fs.mkdir"
 
 
 def utcnow() -> datetime:

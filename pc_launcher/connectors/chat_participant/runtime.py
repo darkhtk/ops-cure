@@ -513,6 +513,27 @@ class CodexAppServerProcessClient:
     def resume_thread(self, thread_id: str) -> dict[str, Any]:
         return self._send_request("thread/resume", {"threadId": thread_id})
 
+    def start_thread(
+        self,
+        *,
+        cwd: str | None = None,
+        title: str | None = None,
+        model: str | None = None,
+        approval_policy: str | None = None,
+        sandbox: str | None = None,
+    ) -> dict[str, Any]:
+        """Wraps the codex app-server's `thread/start` JSON-RPC. All params
+        are optional — the caller passes whatever the user chose in the new-
+        thread card; codex fills in defaults for anything missing.
+        """
+        params: dict[str, Any] = {}
+        if cwd: params["cwd"] = cwd
+        if title: params["title"] = title
+        if model: params["model"] = model
+        if approval_policy: params["approvalPolicy"] = approval_policy
+        if sandbox: params["sandbox"] = sandbox
+        return self._send_request("thread/start", params)
+
     def start_turn(
         self,
         thread_id: str,

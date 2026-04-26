@@ -290,6 +290,72 @@ async def delete_thread(
         _raise_for_error(error)
 
 
+@router.post("/machines/{machine_id}/threads")
+async def create_thread(
+    machine_id: str,
+    request: Request,
+    caller: ControlBridgeCaller,
+) -> dict[str, Any]:
+    """Browser-driven thread creation. Forwards to the agent which calls the
+    codex app-server's `thread/start` JSON-RPC.
+    Body: {cwd?, title?, model?, approvalPolicy?, sandbox?}.
+    """
+    body = await request.json()
+    try:
+        return request.app.state.services.remote_codex_service.enqueue_thread_start(
+            machine_id=machine_id,
+            cwd=body.get("cwd"),
+            title=body.get("title"),
+            model=body.get("model"),
+            approval_policy=body.get("approvalPolicy"),
+            sandbox=body.get("sandbox"),
+            requested_by=_requested_by(caller),
+        )
+    except (ValueError, RuntimeError) as error:
+        _raise_for_error(error)
+
+
+@router.get("/machines/{machine_id}/fs/list")
+async def fs_list(
+    machine_id: str,
+    request: Request,
+    caller: ControlBridgeCaller,
+) -> dict[str, Any]:
+    """Queue an `fs.list` command. Browser polls the resulting commandId via
+    /commands until result lands. (Synchronous fetch via the agent isn't
+    feasible without a request/response RPC layer; the polling pattern reuses
+    the existing command lifecycle.)
+    """
+    path = request.query_params.get("path", "")
+    try:
+        return request.app.state.services.remote_codex_service.enqueue_fs_list(
+            machine_id=machine_id,
+            path=path,
+            requested_by=_requested_by(caller),
+        )
+    except (ValueError, RuntimeError) as error:
+        _raise_for_error(error)
+
+
+@router.post("/machines/{machine_id}/fs/mkdir")
+async def fs_mkdir(
+    machine_id: str,
+    request: Request,
+    caller: ControlBridgeCaller,
+) -> dict[str, Any]:
+    """Queue an `fs.mkdir` command. Body: {parent, name}."""
+    body = await request.json()
+    try:
+        return request.app.state.services.remote_codex_service.enqueue_fs_mkdir(
+            machine_id=machine_id,
+            parent=str(body.get("parent") or ""),
+            name=str(body.get("name") or ""),
+            requested_by=_requested_by(caller),
+        )
+    except (ValueError, RuntimeError) as error:
+        _raise_for_error(error)
+
+
 @router.get("/tasks/{task_id}")
 async def get_task(task_id: str, request: Request, _caller: ReadBridgeCaller) -> dict[str, Any]:
     return request.app.state.services.remote_codex_service.get_task(task_id)

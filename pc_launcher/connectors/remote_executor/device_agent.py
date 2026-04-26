@@ -1445,6 +1445,35 @@ class LocalCodexBackend:
         self.active_transport = "standalone-app-server"
         return result
 
+    def create_thread(
+        self,
+        *,
+        cwd: object | None = None,
+        title: object | None = None,
+        model: object | None = None,
+        approval_policy: object | None = None,
+        sandbox: object | None = None,
+    ) -> dict[str, Any]:
+        """Forwards a `thread.start` browser command into the codex app-server's
+        `thread/start` JSON-RPC. Returns whatever the app-server returned —
+        typically `{id: <threadId>, ...}` — so the agent can echo the new
+        thread id back to the bridge as the command result.
+        """
+        if self.app_server_client is None:
+            raise RuntimeError("Local Codex live control is unavailable.")
+        # Cast None / "" away so we send only the fields the user supplied;
+        # codex applies its own defaults for the rest.
+        result = self.app_server_client.start_thread(
+            cwd=str(cwd) if cwd else None,
+            title=str(title) if title else None,
+            model=str(model) if model else None,
+            approval_policy=str(approval_policy) if approval_policy else None,
+            sandbox=str(sandbox) if sandbox else None,
+        )
+        self.runtime_available = True
+        self.active_transport = "standalone-app-server"
+        return result if isinstance(result, dict) else {}
+
     def interrupt_turn(self, thread_id: str, turn_id: str) -> dict[str, Any]:
         if self.app_server_client is None:
             raise RuntimeError("Local Codex live control is unavailable.")
@@ -1706,6 +1735,109 @@ class RemoteCodexDeviceAgent:
                 result = {
                     "threadId": thread_id,
                     "archived": bool(response.get("archived")),
+                }
+            elif command_type == "thread.start":
+                # Payload was JSON-encoded into the prompt field by service.py
+                # because RemoteCodexCommandModel doesn't carry a payload column
+                # yet. Decode and forward into the codex app-server.
+                import json as _json
+                params: dict[str, object] = {}
+                raw_prompt = command.get("prompt") or "{}"
+                try:
+                    parsed = _json.loads(raw_prompt)
+                    if isinstance(parsed, dict): params = parsed
+                except Exception:
+                    pass
+                response = self.backend.create_thread(
+                    cwd=params.get("cwd"),
+                    title=params.get("title"),
+                    model=params.get("model"),
+                    approval_policy=params.get("approvalPolicy"),
+                    sandbox=params.get("sandbox"),
+                )
+                result = {
+                    "threadId": response.get("id") if isinstance(response, dict) else None,
+                    "created": True,
+                }
+            elif command_type == "fs.list":
+                import json as _json
+                from pathlib import Path
+                params: dict[str, object] = {}
+                try:
+                    params = _json.loads(command.get("prompt") or "{}")
+                except Exception:
+                    pass
+                target = str(params.get("path") or "")
+                # Empty/root → drives on Windows, '/' on POSIX.
+                entries: list[dict] = []
+                resolved = ""
+                parent_dir: str | None = None
+                try:
+                    if not target.strip() or target in ("/", "\\"):
+                        if hasattr(Path, "home") and Path.cwd().drive:
+                            # Windows — enumerate accessible drive letters
+                            for letter in "CDEFGH":
+                                root = Path(f"{letter}:/")
+                                if root.exists():
+                                    entries.append({"name": f"{letter}:\\", "fullPath": f"{letter}:\\", "isDir": True})
+                            resolved = ""
+                        else:
+                            for child in sorted(Path("/").iterdir(), key=lambda p: p.name.lower()):
+                                if child.name.startswith("."): continue
+                                if child.is_dir():
+                                    entries.append({"name": child.name, "fullPath": str(child), "isDir": True})
+                            resolved = "/"
+                    else:
+                        path_obj = Path(target).expanduser().resolve()
+                        if not path_obj.exists():
+                            raise FileNotFoundError(target)
+                        if not path_obj.is_dir():
+                            raise NotADirectoryError(target)
+                        for child in sorted(path_obj.iterdir(), key=lambda p: p.name.lower()):
+                            if child.name.startswith("."): continue
+                            if child.is_dir():
+                                entries.append({
+                                    "name": child.name,
+                                    "fullPath": str(child),
+                                    "isDir": True,
+                                })
+                        resolved = str(path_obj)
+                        parent_dir = str(path_obj.parent) if str(path_obj.parent) != str(path_obj) else None
+                except FileNotFoundError:
+                    result = {"error": "ENOENT", "path": target}
+                    raise
+                except NotADirectoryError:
+                    result = {"error": "ENOTDIR", "path": target}
+                    raise
+                result = {"path": resolved, "parent": parent_dir, "entries": entries}
+            elif command_type == "fs.mkdir":
+                import json as _json
+                from pathlib import Path
+                import re as _re
+                params: dict[str, object] = {}
+                try:
+                    params = _json.loads(command.get("prompt") or "{}")
+                except Exception:
+                    pass
+                parent = str(params.get("parent") or "").strip()
+                name = str(params.get("name") or "").strip()
+                if not parent or not name:
+                    raise RuntimeError("EINVAL: parent and name required")
+                if _re.search(r'[\\/]|^\.{1,2}$|[<>:"|?*]', name):
+                    raise RuntimeError("EINVAL: invalid name")
+                parent_path = Path(parent).expanduser().resolve()
+                if not parent_path.exists():
+                    raise FileNotFoundError(parent)
+                if not parent_path.is_dir():
+                    raise NotADirectoryError(parent)
+                target_path = parent_path / name
+                if target_path.exists():
+                    raise RuntimeError(f"EEXIST: {target_path}")
+                target_path.mkdir()
+                result = {
+                    "path": str(target_path),
+                    "parent": str(parent_path),
+                    "name": name,
                 }
             else:
                 raise RuntimeError(f"Unsupported command type: {command_type}")

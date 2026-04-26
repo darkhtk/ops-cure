@@ -26,7 +26,10 @@ from .state_service import (
     COMMAND_FAILED,
     COMMAND_QUEUED,
     COMMAND_RUNNING,
+    FS_LIST,
+    FS_MKDIR,
     THREAD_DELETE,
+    THREAD_START,
     TURN_INTERRUPT,
     TURN_START,
     RemoteCodexStateService,
@@ -891,6 +894,97 @@ class RemoteCodexBehaviorService:
             "ok": True,
             "command": command,
         }
+
+    def enqueue_thread_start(
+        self,
+        *,
+        machine_id: str,
+        cwd: str | None = None,
+        title: str | None = None,
+        model: str | None = None,
+        approval_policy: str | None = None,
+        sandbox: str | None = None,
+        requested_by: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Queue a `thread.start` command. The agent picks it up and forwards
+        the parameters into the codex app-server's `thread/start` JSON-RPC.
+        Browser caller blocks on the returned commandId; the actual threadId
+        comes back via the command result + a subsequent agent sync.
+
+        Note: until the command model carries a dedicated `payload_json`
+        column, we serialize the start params into the `prompt` field. The
+        agent's `thread.start` handler parses it back as JSON.
+        """
+        import json
+        machine = self.state_service.get_machine(machine_id)
+        if machine is None:
+            raise ValueError("machine_not_found")
+        if machine["status"] != "online":
+            raise ValueError("machine_offline")
+        payload: dict[str, Any] = {}
+        if cwd: payload["cwd"] = compact_text(cwd)
+        if title: payload["title"] = compact_text(title)
+        if model: payload["model"] = compact_text(model)
+        if approval_policy: payload["approvalPolicy"] = compact_text(approval_policy)
+        if sandbox: payload["sandbox"] = compact_text(sandbox)
+        command = self.state_service.enqueue_command(
+            command_type=THREAD_START,
+            machine_id=machine_id,
+            thread_id="",
+            requested_by=requested_by,
+            prompt=json.dumps(payload),
+        )
+        return {"ok": True, "command": command}
+
+    def enqueue_fs_list(
+        self,
+        *,
+        machine_id: str,
+        path: str,
+        requested_by: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Queue a `fs.list` command. Agent returns dir listing on result."""
+        import json
+        machine = self.state_service.get_machine(machine_id)
+        if machine is None:
+            raise ValueError("machine_not_found")
+        if machine["status"] != "online":
+            raise ValueError("machine_offline")
+        command = self.state_service.enqueue_command(
+            command_type=FS_LIST,
+            machine_id=machine_id,
+            thread_id="",
+            requested_by=requested_by,
+            prompt=json.dumps({"path": compact_text(path) or ""}),
+        )
+        return {"ok": True, "command": command}
+
+    def enqueue_fs_mkdir(
+        self,
+        *,
+        machine_id: str,
+        parent: str,
+        name: str,
+        requested_by: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Queue an `fs.mkdir` command. Agent runs mkdir on the PC fs."""
+        import json
+        machine = self.state_service.get_machine(machine_id)
+        if machine is None:
+            raise ValueError("machine_not_found")
+        if machine["status"] != "online":
+            raise ValueError("machine_offline")
+        command = self.state_service.enqueue_command(
+            command_type=FS_MKDIR,
+            machine_id=machine_id,
+            thread_id="",
+            requested_by=requested_by,
+            prompt=json.dumps({
+                "parent": compact_text(parent) or "",
+                "name": compact_text(name) or "",
+            }),
+        )
+        return {"ok": True, "command": command}
 
     async def subscribe_thread(self, machine_id: str, thread_id: str):
         return self.state_service.subscribe_thread(machine_id, thread_id)
