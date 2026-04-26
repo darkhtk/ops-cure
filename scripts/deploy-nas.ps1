@@ -71,6 +71,9 @@ try {
 
     $remoteScript = @"
 set -e
+# Synology's non-interactive SSH starts with a minimal PATH; docker lives in
+# /usr/local/bin which isn't on the inherited PATH. Add it explicitly.
+export PATH=/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin
 mkdir -p '$DeployPath'
 find '$DeployPath' -mindepth 1 -maxdepth 1 ! -name '.env' ! -name 'data' -exec rm -rf {} +
 tar -xf '$remoteArchive' -C '$DeployPath'
