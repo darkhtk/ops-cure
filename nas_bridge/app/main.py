@@ -13,6 +13,9 @@ from .behaviors.catalog import BehaviorCatalogService
 from .behaviors.chat import api as chat_api
 from .behaviors.remote_codex import api as remote_codex_api
 from .behaviors.remote_codex.service import RemoteCodexBehaviorService
+from .behaviors.remote_claude import api as remote_claude_api
+from .behaviors.remote_claude.service import RemoteClaudeBehaviorService
+from .behaviors.remote_claude.state_service import RemoteClaudeStateService
 from .behaviors.chat.service import ChatBehaviorService
 from .behaviors.orchestration.policy import PolicyService
 from .behaviors.orchestration.recovery import RecoveryService
@@ -88,6 +91,7 @@ class ServiceContainer:
     verification_service: VerificationService
     remote_task_service: RemoteTaskService
     remote_codex_service: RemoteCodexBehaviorService
+    remote_claude_service: RemoteClaudeBehaviorService
     session_service: SessionService
     discord_gateway: DiscordGateway
     recovery_loop_task: asyncio.Task[None] | None = None
@@ -123,6 +127,10 @@ def build_services(settings: Settings) -> ServiceContainer:
         remote_task_service=remote_task_service,
         kernel_subscription_broker=subscription_broker,
         kernel_task_service=kernel_task_service,
+    )
+    remote_claude_state_service = RemoteClaudeStateService()
+    remote_claude_service = RemoteClaudeBehaviorService(
+        state_service=remote_claude_state_service,
     )
     power_provider = RoutedPowerProvider([NoopPowerProvider(), WakeOnLanPowerProvider()])
     execution_provider = RoutedExecutionProvider([WindowsLauncherExecutionProvider(registry)])
@@ -243,6 +251,7 @@ def build_services(settings: Settings) -> ServiceContainer:
         verification_service=verification_service,
         remote_task_service=remote_task_service,
         remote_codex_service=remote_codex_service,
+        remote_claude_service=remote_claude_service,
         session_service=session_service,
         discord_gateway=discord_gateway,
         space_service=space_service,
@@ -282,6 +291,7 @@ app.include_router(kernel_tasks.router)
 app.include_router(presence.router)
 app.include_router(remote_tasks.router)
 app.include_router(remote_codex_api.router)
+app.include_router(remote_claude_api.router)
 app.include_router(chat_api.router)
 app.include_router(sessions.router)
 app.include_router(spaces.router)

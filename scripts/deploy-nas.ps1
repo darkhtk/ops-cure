@@ -47,6 +47,7 @@ $config = Read-EnvFile -Path $CredentialFile
 $sshHost = $config["SSH_HOST"]
 $sshPort = $config["SSH_PORT"]
 $sshUser = $config["SSH_USER"]
+$sshPassword = $config["SSH_PASSWORD"]
 
 if (-not $sshHost -or -not $sshPort -or -not $sshUser) {
     throw "Missing SSH_HOST / SSH_PORT / SSH_USER in $CredentialFile"
@@ -69,6 +70,13 @@ try {
         throw "Failed to upload archive to NAS"
     }
 
+    # Pipe the SSH_PASSWORD through `sudo -S` because Synology's `discord`
+    # account has admin rights but sudo always prompts for the password,
+    # and non-interactive SSH has no TTY for prompting.
+    $sudoPassEsc = ""
+    if ($sshPassword) {
+        $sudoPassEsc = $sshPassword.Replace("'", "'\''")
+    }
     $remoteScript = @"
 set -e
 # Synology's non-interactive SSH starts with a minimal PATH; docker lives in
@@ -78,7 +86,7 @@ mkdir -p '$DeployPath'
 find '$DeployPath' -mindepth 1 -maxdepth 1 ! -name '.env' ! -name 'data' -exec rm -rf {} +
 tar -xf '$remoteArchive' -C '$DeployPath'
 cd '$DeployPath'
-(docker compose -f '$ComposeFile' up -d --build || sudo docker compose -f '$ComposeFile' up -d --build)
+echo '$sudoPassEsc' | sudo -S docker compose -f '$ComposeFile' up -d --build
 rm -f '$remoteArchive'
 "@
 

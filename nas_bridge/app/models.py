@@ -743,6 +743,89 @@ class RemoteCodexCommandModel(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class RemoteClaudeMachineModel(Base):
+    """Mirror of RemoteCodexMachineModel — registers a PC running the
+    claude-executor agent. Same heartbeat / status semantics."""
+    __tablename__ = "remote_claude_machines"
+
+    machine_id: Mapped[str] = mapped_column(primary_key=True)
+    display_name: Mapped[str] = mapped_column(index=True)
+    source: Mapped[str] = mapped_column(index=True, default="agent")
+    capabilities_json: Mapped[str] = mapped_column(Text(), default="{}")
+    last_runtime_error: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    last_sync_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+    sessions: Mapped[list["RemoteClaudeSessionModel"]] = relationship(
+        back_populates="machine",
+        cascade="all, delete-orphan",
+    )
+
+
+class RemoteClaudeSessionModel(Base):
+    """One entry per `~/.claude/projects/<encoded-cwd>/<session-id>.jsonl`.
+    Populated by the PC executor's session_sync; the bridge holds enough
+    metadata for the sidebar list + transcript stub. The full transcript is
+    streamed live from the agent on demand.
+    """
+    __tablename__ = "remote_claude_sessions"
+    __table_args__ = (
+        UniqueConstraint("machine_id", "session_id", name="uq_remote_claude_machine_session"),
+        Index("ix_remote_claude_sessions_machine_updated", "machine_id", "updated_at_ms"),
+    )
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=lambda: str(uuid.uuid4()))
+    machine_id: Mapped[str] = mapped_column(
+        ForeignKey("remote_claude_machines.machine_id", ondelete="CASCADE"),
+        index=True,
+    )
+    session_id: Mapped[str] = mapped_column(index=True)
+    title: Mapped[str] = mapped_column(Text(), default="(no preview)")
+    cwd: Mapped[str] = mapped_column(Text(), default="")
+    jsonl_path: Mapped[str] = mapped_column(Text(), default="")
+    updated_at_ms: Mapped[int] = mapped_column(Integer(), default=0)
+    created_at_ms: Mapped[int] = mapped_column(Integer(), default=0)
+    first_user_message: Mapped[str] = mapped_column(Text(), default="")
+    event_count: Mapped[int] = mapped_column(Integer(), default=0)
+    file_size: Mapped[int] = mapped_column(Integer(), default=0)
+    via: Mapped[str] = mapped_column(index=True, default="cli")  # "web" | "cli"
+    synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+    machine: Mapped[RemoteClaudeMachineModel] = relationship(back_populates="sessions")
+
+
+class RemoteClaudeCommandModel(Base):
+    """Command queue for the claude-executor agent.
+    Types: run.start | run.input | run.interrupt | session.delete |
+           fs.list | fs.mkdir | approval.respond
+    """
+    __tablename__ = "remote_claude_commands"
+    __table_args__ = (
+        Index("ix_remote_claude_commands_machine_status_created", "machine_id", "status", "created_at"),
+        Index("ix_remote_claude_commands_session_updated", "session_id", "updated_at"),
+    )
+
+    command_id: Mapped[str] = mapped_column(primary_key=True, default=lambda: str(uuid.uuid4()))
+    type: Mapped[str] = mapped_column(index=True)
+    status: Mapped[str] = mapped_column(index=True, default="queued")
+    machine_id: Mapped[str] = mapped_column(index=True)
+    session_id: Mapped[str] = mapped_column(index=True, default="")
+    run_id: Mapped[str | None] = mapped_column(index=True, nullable=True)
+    prompt: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    requested_by_json: Mapped[str] = mapped_column(Text(), default="{}")
+    worker_id: Mapped[str | None] = mapped_column(index=True, nullable=True)
+    result_json: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    error_json: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class KernelScratchModel(Base):
     """Generic kernel-level small key/value scratch store, scoped by actor and
     space. Designed as a shared primitive so behaviors and runtimes can stop
