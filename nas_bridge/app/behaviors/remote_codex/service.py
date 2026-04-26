@@ -986,6 +986,12 @@ class RemoteCodexBehaviorService:
         )
         return {"ok": True, "command": command}
 
+    def get_command(self, command_id: str) -> dict[str, Any] | None:
+        """Returns the public shape of a command by id, or None if missing.
+        Used by the browser to poll fs.list / fs.mkdir / thread.start results.
+        """
+        return self.state_service.get_command_public(command_id)
+
     async def subscribe_thread(self, machine_id: str, thread_id: str):
         return self.state_service.subscribe_thread(machine_id, thread_id)
 

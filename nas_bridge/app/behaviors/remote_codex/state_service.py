@@ -497,6 +497,21 @@ class RemoteCodexStateService:
             "images": loads_json(row.images_json, []),
         }
 
+    def get_command_public(self, command_id: str) -> dict[str, Any] | None:
+        """Public shape of a command by id, or None if not found. Used for
+        browser polling of fs.list / fs.mkdir / thread.start results.
+        Tries to map the public field name {commandId, status, result, ...}
+        to the legacy {id, status, result, ...} field set the browser uses.
+        """
+        with session_scope() as db:
+            row = db.get(RemoteCodexCommandModel, command_id)
+            if row is None:
+                return None
+            public = self._command_row_to_public(row)
+        # Normalize the id field — _command_row_to_public uses "commandId"
+        # but the rest of the codex-remote browser uses {id, status, ...}.
+        return {**public, "id": public.get("commandId")}
+
     def _command_row_to_public(
         self,
         row: RemoteCodexCommandModel,

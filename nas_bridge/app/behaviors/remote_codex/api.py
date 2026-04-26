@@ -361,6 +361,17 @@ async def get_task(task_id: str, request: Request, _caller: ReadBridgeCaller) ->
     return request.app.state.services.remote_codex_service.get_task(task_id)
 
 
+@router.get("/commands/{command_id}")
+async def get_command(command_id: str, request: Request, _caller: ReadBridgeCaller) -> dict[str, Any]:
+    """Browser polling endpoint for any command's status + result. Used by
+    the new-thread card to wait on fs.list / fs.mkdir / thread.start results.
+    """
+    command = request.app.state.services.remote_codex_service.get_command(command_id)
+    if command is None:
+        raise HTTPException(status_code=404, detail="command_not_found")
+    return {"command": command}
+
+
 @router.post("/tasks")
 async def create_task(request: Request, _caller: WriteBridgeCaller) -> dict[str, Any]:
     body = await request.json()
