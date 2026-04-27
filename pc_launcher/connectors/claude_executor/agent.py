@@ -59,6 +59,13 @@ class ClaudeExecutorAgent:
         self.poll_interval_seconds = poll_interval_seconds
         self._runs: dict[str, ClaudeRun] = {}      # session_id → ClaudeRun
         self._pending_runs: dict[str, ClaudeRun] = {}  # commandId → ClaudeRun (until session_id known)
+        # Session ids the agent itself spawned (via run.start from the
+        # browser). Reported as via="web" in sync so the sidebar can
+        # distinguish CLI vs web origin. In-memory only — the bridge keeps
+        # the value sticky across restarts, so losing the set on agent
+        # restart is fine: previously-seen sessions stay tagged "web" by
+        # the bridge's no-downgrade rule.
+        self._web_session_ids: set[str] = set()
         self._stop = False
         self._last_sync_at: float = 0.0
 
@@ -95,6 +102,13 @@ class ClaudeExecutorAgent:
     def _do_sync(self) -> None:
         try:
             sessions = scan_sessions()
+            # Tag agent-spawned sessions as via="web" so the sidebar can
+            # distinguish browser-initiated from CLI-initiated. Sessions we
+            # don't know about default to "cli". The bridge's no-downgrade
+            # rule means an agent restart (which clears _web_session_ids)
+            # won't overwrite the bridge's existing "web" tag with "cli".
+            for s in sessions:
+                s["via"] = "web" if s.get("sessionId") in self._web_session_ids else "cli"
             self.bridge.sync(
                 machine={
                     "machineId": self.machine_id,
@@ -274,6 +288,7 @@ class ClaudeExecutorAgent:
         # Pin the run to its session_id once we see system:init, then move
         # the entry from _pending_runs → _runs.
         sess_id = run.session_id or fallback_session_id or ""
+        promoted = False
         if run.session_id and run.session_id not in self._runs:
             # Promote from pending → keyed-by-session.
             for cid, pending in list(self._pending_runs.items()):
@@ -281,10 +296,20 @@ class ClaudeExecutorAgent:
                     self._pending_runs.pop(cid, None)
                     break
             self._runs[run.session_id] = run
+            # The agent itself spawned this session via run.start (browser-
+            # initiated). Tag it so the next sync reports via="web".
+            self._web_session_ids.add(run.session_id)
+            promoted = True
         try:
             self.bridge.publish_event(session_id=sess_id, event=event)
         except RuntimeError as e:
             print(f"[claude-executor] forward event failed: {e}", file=sys.stderr)
+        # Trigger an immediate sync the moment we learn the new session_id
+        # so the bridge fires its kind:"session" event right away. Without
+        # this the browser would have to wait up to sync_interval_seconds
+        # (default 30 s) before it can subscribe to the live stream.
+        if promoted:
+            self._do_sync()
 
     def _handle_run_exit(self, run: ClaudeRun, code: int | None) -> None:
         # Drop from registries so a follow-up run.input triggers a fresh

@@ -169,7 +169,12 @@ class RemoteClaudeStateService:
             row.file_size = int(session.get("fileSize") or 0)
             via = compact_text(session.get("via"), "cli")
             if via in ("web", "cli"):
-                row.via = via
+                # Sticky upgrade: never overwrite "web" with "cli". The
+                # agent's in-memory web-session set vanishes across
+                # restarts, but the browser-origin attribution is meant to
+                # be permanent for the life of the session row.
+                if not (row.via == "web" and via == "cli"):
+                    row.via = via
             row.synced_at = utcnow()
             row.updated_at = utcnow()
             public = self._session_row_to_public(row)
