@@ -74,6 +74,15 @@ class ClaudeExecutorAgent:
         # next sync. We merge these into the sync payload so the SSE event
         # fires for the freshly-created sessionId immediately.
         self._synthetic_sessions: dict[str, dict[str, Any]] = {}
+        # Sessions the agent just deleted. scan_sessions() may briefly still
+        # see the file due to filesystem caching, and even after that the
+        # bridge has no way to learn the row should stay gone (sync is upsert-
+        # only). Filter these out of every sync payload for a short window
+        # so the bridge's row -- which the bridge deleted on enqueue -- isn't
+        # resurrected by the next agent_sync. Time-based eviction in
+        # _do_sync; values are float timestamps when the deletion happened.
+        self._recently_deleted_session_ids: dict[str, float] = {}
+        self._RECENTLY_DELETED_TTL_S = 300.0
         self._stop = False
         self._last_sync_at: float = 0.0
 
@@ -109,12 +118,25 @@ class ClaudeExecutorAgent:
 
     def _do_sync(self, *, reason: str = "tick") -> None:
         try:
+            # Evict expired _recently_deleted entries first.
+            now_ts = time.time()
+            for sid in list(self._recently_deleted_session_ids):
+                if now_ts - self._recently_deleted_session_ids[sid] > self._RECENTLY_DELETED_TTL_S:
+                    self._recently_deleted_session_ids.pop(sid, None)
+
             sessions = scan_sessions()
+            # Drop any sessions we just deleted -- the bridge already removed
+            # the row at API time, and re-uploading it would resurrect the
+            # ghost in the sidebar.
+            sessions = [s for s in sessions if s.get("sessionId") not in self._recently_deleted_session_ids]
             scanned_ids = {s.get("sessionId") for s in sessions if s.get("sessionId")}
             # Merge in synthetic entries for sessions we know the agent
             # spawned but scan_sessions hasn't seen yet (race: stdout may
             # carry system:init before claude flushes the new jsonl).
             for sid, synth in list(self._synthetic_sessions.items()):
+                if sid in self._recently_deleted_session_ids:
+                    self._synthetic_sessions.pop(sid, None)
+                    continue
                 if sid not in scanned_ids:
                     sessions.append(synth)
                 else:
@@ -276,6 +298,11 @@ class ClaudeExecutorAgent:
         # sidebar a few seconds later.
         self._web_session_ids.discard(session_id)
         self._synthetic_sessions.pop(session_id, None)
+        # Remember this id so future _do_sync's filter it out of scan_sessions
+        # results too -- the OS may briefly still report the file via cached
+        # directory entries, and the bridge keeps any row that arrives in a
+        # sync (it has no "is this in the latest sync?" logic).
+        self._recently_deleted_session_ids[session_id] = time.time()
         path = find_session_jsonl(session_id)
         if path is None:
             return {"deleted": False, "reason": "not_found"}
