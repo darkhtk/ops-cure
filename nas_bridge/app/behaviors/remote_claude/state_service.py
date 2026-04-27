@@ -350,6 +350,13 @@ class RemoteClaudeStateService:
         for queue in list(self._session_subs.get(key, ())):
             try: queue.put_nowait(event)
             except Exception: pass
+        # Mirror command lifecycle events to machine-level subscribers so the
+        # browser can wait on fs.list / fs.mkdir / session.start results via
+        # one machine SSE instead of polling /commands/{id}. Other event kinds
+        # (stream-json messages, etc.) stay session-scoped to avoid blasting
+        # every browser subscribed to the machine with per-message traffic.
+        if event.get("kind") == "command":
+            self._publish_machine(machine_id, event)
 
     def _publish_machine(self, machine_id: str, event: dict[str, Any]) -> None:
         for queue in list(self._machine_subs.get(machine_id, ())):

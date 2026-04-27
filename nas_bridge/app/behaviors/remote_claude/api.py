@@ -251,6 +251,38 @@ async def stream_session(
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
+@router.get("/machines/{machine_id}/live")
+async def stream_machine(
+    machine_id: str,
+    request: Request,
+    _caller: StreamBridgeCaller,
+) -> StreamingResponse:
+    """Machine-scoped SSE feed: command lifecycle (fs.list / fs.mkdir /
+    session.start completion), session.created / .updated, and machine
+    status. Lets the browser drop the per-command polling loop on
+    /commands/{id} and the per-session-list refresh polling that used to
+    catch new sessions after a fresh chat.
+    """
+    state_service = request.app.state.services.remote_claude_service.state_service
+
+    async def event_stream():
+        async with state_service.subscribe_machine(machine_id) as queue:
+            yield f"event: ready\ndata: {{}}\n\n"
+            keepalive = 15.0
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    payload = await asyncio.wait_for(queue.get(), timeout=keepalive)
+                except asyncio.TimeoutError:
+                    yield ":keepalive\n\n"
+                    continue
+                event_kind = payload.get("kind") or "event"
+                yield f"event: {event_kind}\ndata: {json.dumps(payload)}\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
 # ---- Agent endpoints ----------------------------------------------------
 
 @router.post("/agent/sync")
