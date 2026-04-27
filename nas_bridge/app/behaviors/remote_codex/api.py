@@ -598,98 +598,12 @@ async def agent_task_fail(
         _raise_for_error(error)
 
 
-@router.get("/machines/{machine_id}/threads/{thread_id}/live")
-async def stream_thread(
-    machine_id: str,
-    thread_id: str,
-    request: Request,
-    _caller: StreamBridgeCaller,
-    afterLineNumber: int = Query(default=0, ge=0),
-):
-    service = request.app.state.services.remote_codex_service
-    handle = await service.subscribe_thread(machine_id, thread_id)
-
-    async def event_stream():
-        last_line_number = max(0, int(afterLineNumber))
-        try:
-            initial_snapshot = service.get_thread_messages(machine_id, thread_id, limit=0, after_line_number=last_line_number)
-            initial_tasks = service.list_thread_tasks(machine_id, thread_id, limit=8)["tasks"]
-        except ValueError as error:
-            yield f"event: error\ndata: {json.dumps({'message': str(error)})}\n\n"
-            handle.unsubscribe()
-            return
-
-        yield f"event: ready\ndata: {json.dumps({'machineId': machine_id, 'threadId': thread_id, 'totalMessages': initial_snapshot['totalMessages'], 'afterLineNumber': last_line_number, 'tasks': initial_tasks})}\n\n"
-        yield f"event: state\ndata: {json.dumps({'machine': initial_snapshot['machine'], 'thread': initial_snapshot['thread'], 'totalMessages': initial_snapshot['totalMessages'], 'lineCount': initial_snapshot['lineCount'], 'fileSize': initial_snapshot['fileSize'], 'syncedAt': initial_snapshot['syncedAt']})}\n\n"
-
-        while True:
-            if await request.is_disconnected():
-                break
-            try:
-                payload = await asyncio.wait_for(handle.queue.get(), timeout=15)
-            except TimeoutError:
-                yield f"event: ping\ndata: {json.dumps({'at': int(asyncio.get_running_loop().time() * 1000)})}\n\n"
-                continue
-            kind = payload.get("kind")
-            if kind in {"snapshot", "thread"}:
-                snapshot = service.get_thread_messages(machine_id, thread_id, limit=0, after_line_number=last_line_number)
-                if snapshot is None:
-                    yield f"event: error\ndata: {json.dumps({'message': 'thread_not_found'})}\n\n"
-                    continue
-                fresh_messages = snapshot["messages"]
-                if fresh_messages:
-                    last_line_number = max(last_line_number, max(int(item.get("lineNumber") or 0) for item in fresh_messages))
-                    yield f"event: messages\ndata: {json.dumps(fresh_messages)}\n\n"
-                yield f"event: state\ndata: {json.dumps({'machine': snapshot['machine'], 'thread': snapshot['thread'], 'totalMessages': snapshot['totalMessages'], 'lineCount': snapshot['lineCount'], 'fileSize': snapshot['fileSize'], 'syncedAt': snapshot['syncedAt']})}\n\n"
-            elif kind == "machine":
-                yield f"event: machine\ndata: {json.dumps(payload['machine'])}\n\n"
-            elif kind == "command":
-                command = payload["command"]
-                yield f"event: command\ndata: {json.dumps(command)}\n\n"
-                if command.get("type") == "turn.start":
-                    snapshot = service.get_thread_messages(machine_id, thread_id, limit=0, after_line_number=last_line_number)
-                    fresh_messages = snapshot["messages"]
-                    if fresh_messages:
-                        last_line_number = max(
-                            last_line_number,
-                            max(int(item.get("lineNumber") or 0) for item in fresh_messages),
-                        )
-                        yield f"event: messages\ndata: {json.dumps(fresh_messages)}\n\n"
-            elif kind == "task":
-                yield f"event: task\ndata: {json.dumps(payload['task'])}\n\n"
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
-
-
-@router.get("/machines/{machine_id}/live")
-async def stream_machine(
-    machine_id: str,
-    request: Request,
-    _caller: StreamBridgeCaller,
-):
-    service = request.app.state.services.remote_codex_service
-    handle = await service.subscribe_machine(machine_id)
-
-    async def event_stream():
-        try:
-            machine_snapshot = service.get_machine(machine_id)
-            if machine_snapshot is None:
-                yield f"event: error\ndata: {json.dumps({'message': 'machine_not_found'})}\n\n"
-                handle.unsubscribe()
-                return
-
-            yield f"event: ready\ndata: {json.dumps({'machine': machine_snapshot})}\n\n"
-
-            while True:
-                if await request.is_disconnected():
-                    break
-                try:
-                    payload = await asyncio.wait_for(handle.queue.get(), timeout=15)
-                except TimeoutError:
-                    yield f"event: ping\ndata: {json.dumps({'at': int(asyncio.get_running_loop().time() * 1000)})}\n\n"
-                    continue
-                kind = payload.get("kind") or "message"
-                yield f"event: {kind}\ndata: {json.dumps(payload)}\n\n"
-        finally:
-            handle.unsubscribe()
-
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+# Legacy /threads/{t}/live and /machines/{m}/live SSE endpoints removed in
+# the kernel-broker migration. State service mirrors all events to the
+# kernel subscription broker, so subscribers use the generic
+# /api/events/spaces/{space_id}/stream channel:
+#   - remote_codex.machine:{m}  - command lifecycle, machine status
+#   - remote_codex.thread:{t}   - per-thread events (messages / state /
+#                                  task / snapshot / ...)
+# Initial thread message history is still fetched via /threads/{t}/messages
+# when a thread is loaded; the kernel stream takes over for the live tail.
