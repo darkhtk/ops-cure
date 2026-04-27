@@ -29,11 +29,25 @@ class RemoteCodexKernelProvider:
         machine_id = space_id[len(REMOTE_CODEX_MACHINE_SPACE_PREFIX):]
         if not machine_id:
             return None
+        # Detach the row attributes while the session is still open. Reading
+        # `row.display_name` (or any other column) after the `with` block
+        # ends raises DetachedInstanceError because expire_on_commit closes
+        # the row's identity map slot. Capture what we need into plain
+        # locals first.
+        display_name: str | None = None
+        created_at = None
+        last_seen_at = None
+        found = False
         with session_scope() as db:
             row = db.scalar(
                 select(RemoteCodexMachineModel).where(RemoteCodexMachineModel.machine_id == machine_id),
             )
-        title = (row.display_name if row else None) or machine_id
+            if row is not None:
+                found = True
+                display_name = row.display_name
+                created_at = getattr(row, "created_at", None)
+                last_seen_at = getattr(row, "last_seen_at", None)
+        title = display_name or machine_id
         now = datetime.now(timezone.utc)
         return SpaceSummary(
             id=space_id,
@@ -41,9 +55,9 @@ class RemoteCodexKernelProvider:
             transport_kind="kernel_event_stream",
             transport_address=machine_id,
             title=title,
-            status="online" if row is not None else "unknown",
-            created_at=getattr(row, "created_at", None) or now,
-            updated_at=getattr(row, "last_seen_at", None) or now,
+            status="online" if found else "unknown",
+            created_at=created_at or now,
+            updated_at=last_seen_at or now,
             actors=[],
             metadata={"machine_id": machine_id},
         )
