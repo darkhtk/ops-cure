@@ -19,33 +19,88 @@ echo.
 echo === claude-remote PC enrollment ===
 echo.
 
-REM ---- 1. prereqs ------------------------------------------------------------
+REM ---- 1. prereqs (auto-install via winget) ---------------------------------
 
+where winget >nul 2>nul
+if errorlevel 1 (
+  echo [error] winget not found. Install "App Installer" from Microsoft Store:
+  echo         https://apps.microsoft.com/detail/9NBLGGH4NNS1
+  echo         Then re-run this script.
+  pause & exit /b 1
+)
+
+REM Common winget flags: silent + auto-accept license / source agreements.
+REM A package already installed makes winget exit non-zero; we don't fail
+REM the script on that since the post-install `where` check is the source
+REM of truth.
+set "WG_FLAGS=--silent --accept-source-agreements --accept-package-agreements -e --id"
+
+call :_install_if_missing python  Python.Python.3.12
+call :_install_if_missing git      Git.Git
+call :_install_if_missing node     OpenJS.NodeJS.LTS
+call :_install_if_missing tailscale tailscale.tailscale
+
+REM Refresh PATH from registry so newly installed tools are visible to
+REM THIS shell (not just future shells). Reads HKLM + HKCU Path values
+REM and prepends both to %PATH%.
+for /f "tokens=2*" %%a in ('reg query "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment" /v Path 2^>nul') do set "_HKLM_PATH=%%~b"
+for /f "tokens=2*" %%a in ('reg query "HKCU\Environment" /v Path 2^>nul') do set "_HKCU_PATH=%%~b"
+if defined _HKLM_PATH set "PATH=%_HKLM_PATH%;%PATH%"
+if defined _HKCU_PATH set "PATH=%PATH%;%_HKCU_PATH%"
+
+REM npm-installed CLIs land in %APPDATA%\npm by default; make sure that
+REM directory is on PATH for the claude check below.
+if exist "%APPDATA%\npm" set "PATH=%PATH%;%APPDATA%\npm"
+
+REM claude CLI lives on npm, install it now that node should be on PATH.
+where claude >nul 2>nul
+if errorlevel 1 (
+  where npm >nul 2>nul
+  if errorlevel 1 (
+    echo [warn]  npm still not on PATH after Node.js install. Open a NEW
+    echo         shell and run:  npm install -g @anthropic-ai/claude-code
+  ) else (
+    echo Installing claude CLI via npm...
+    call npm install -g @anthropic-ai/claude-code
+  )
+)
+
+REM Final hard-required prereq check (python + git). claude / tailscale are
+REM only warnings -- the agent boots without them but actual usage will fail.
 where python >nul 2>nul
 if errorlevel 1 (
-  echo [error] python not found on PATH. Install Python 3.11+ first:
-  echo         https://www.python.org/downloads/  (check "Add to PATH")
+  echo [error] python still not on PATH. Open a NEW shell and re-run this
+  echo         script (PATH propagation can need a fresh process).
   pause & exit /b 1
 )
 where git >nul 2>nul
 if errorlevel 1 (
-  echo [error] git not found on PATH. Install Git for Windows first:
-  echo         https://git-scm.com/download/win
+  echo [error] git still not on PATH. Open a NEW shell and re-run.
   pause & exit /b 1
 )
 where claude >nul 2>nul
-if errorlevel 1 (
-  echo [warn]  claude CLI not on PATH. Install with:
-  echo           npm install -g @anthropic-ai/claude-code
-  echo         The agent still starts but run.start commands will fail until claude exists.
-  echo.
-)
+if errorlevel 1 echo [warn]  claude CLI missing -- run.start will fail until you install it.
 where tailscale >nul 2>nul
 if errorlevel 1 (
-  echo [warn]  tailscale not on PATH. Install + log in to the same tailnet so this
-  echo         PC can reach the NAS bridge URL. (https://tailscale.com/download)
-  echo.
+  echo [warn]  tailscale missing or not in PATH. The bridge URL will be
+  echo         unreachable until Tailscale is installed AND you sign in
+  echo         to the same tailnet. (winget did try to install it.)
 )
+echo.
+goto :prereqs_done
+
+:_install_if_missing
+REM %1 = command to test, %2 = winget package id
+where %1 >nul 2>nul
+if errorlevel 1 (
+  echo [winget] installing %2 ...
+  winget install %WG_FLAGS% %2
+) else (
+  echo [winget] %1 already present, skip.
+)
+exit /b 0
+
+:prereqs_done
 
 REM ---- 2. clone / update repo -----------------------------------------------
 
