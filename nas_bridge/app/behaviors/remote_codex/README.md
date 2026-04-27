@@ -78,3 +78,27 @@ Until that migration lands:
 - keep the browser site in `codex-remote`
 - do not let the site become the canonical owner of task/evidence/approval state
 - keep the current product-layer remote task service as the implementation body, and let this package become the stable behavior-facing facade
+
+## Event transport — kernel subscription broker
+
+`state_service._mirror_to_kernel_broker` publishes every behavior-local
+event onto the kernel `subscription_broker`. Subscribers (browser + agent)
+use the generic `/api/events/spaces/{space_id}/stream` SSE channel that
+`chat`, `ops`, and `remote_claude` also use -- one transport, four
+behaviors.
+
+Synthetic spaces:
+
+| Space id | Carries |
+|---|---|
+| `remote_codex.machine:{machine_id}` | command lifecycle (`remote_codex.command.queued/running/completed/failed`), machine status |
+| `remote_codex.thread:{thread_id}`   | per-thread events (`remote_codex.messages`, `remote_codex.state`, `remote_codex.task`, `remote_codex.snapshot`, ...) |
+
+Each `EventEnvelope.event.content` is the JSON-serialized legacy payload
+(`{"kind": "command", "command": {...}}` etc.) so existing client-side
+dispatch logic still works -- the only frontend change is to subscribe to
+the kernel events stream instead of the (removed) behavior-specific
+`/threads/{t}/live` and `/machines/{m}/live` SSE endpoints.
+
+Phase status: command + machine + per-thread events all mirror. Subscribe-
+side migration on `codex-remote` complete (commit `6c25629`).

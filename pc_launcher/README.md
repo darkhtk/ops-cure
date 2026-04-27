@@ -87,16 +87,57 @@ The long-term goal is for project-specific behavior to stay inside:
 python -m pip install -r requirements.txt
 ```
 
-## Installable Behavior Packages
+## Adding a PC as a remote machine (claude-remote / codex-remote sites)
 
-The launcher directory now exposes installable runtime-side behaviors.
+To make a PC's disk + claude/codex CLI usable from the browser sites
+(claude-remote, codex-remote), run the per-connector executor agent on
+that PC. The agent registers itself with the NAS bridge as a "machine"
+and the new hostname appears in the browser sidebar within ~30 s.
 
-Current packaged behaviors are:
+There are two parallel connectors under `pc_launcher/connectors/`:
 
-- `chat-participant`
-- `remote-executor`
+| Connector | Browser site | Command type |
+|---|---|---|
+| `claude_executor` | claude-remote | `run.start` (claude --print stream-json) |
+| `remote_executor` | codex-remote  | `turn.start` (codex app-server) |
 
-Use it like this:
+Each ships three small batch scripts:
+
+- `install.bat` — interactive setup. Asks for bridge URL, bearer token, and
+  machine id; writes `.env` (or patches `pc_launcher/.env` + `project.yaml`
+  for `remote_executor`).
+- `start.bat` — launches the agent against the configured bridge. Logs to
+  `_runtime/ops-cure/logs/<connector>.log`.
+- `register-task.bat` — registers a Task Scheduler entry that runs
+  `start.bat` on user logon. Idempotent (delete-then-create). Uses
+  PowerShell's `Register-ScheduledTask` so it works without admin /
+  without `schtasks.exe` quirks on non-interactive sessions.
+
+Quick path for a fresh PC:
+
+```cmd
+git clone <ops-cure repo> %USERPROFILE%\Projects\ops-cure
+cd %USERPROFILE%\Projects\ops-cure
+python -m pip install -r requirements.txt
+
+REM claude
+cd pc_launcher\connectors\claude_executor
+install.bat
+register-task.bat
+
+REM codex (in another shell, or after the above)
+cd ..\remote_executor
+install.bat
+register-task.bat
+```
+
+Verify in the browser sidebar -- the new hostname should show up. If not,
+check the agent log file under `_runtime/ops-cure/logs/`.
+
+## Lower-level behavior tools (manual / scripting)
+
+The `behavior_tools` CLI is the underlying mechanism the install scripts
+above wrap. You normally don't need to call it directly.
 
 ```bash
 python -m pc_launcher.behavior_tools install chat-participant
