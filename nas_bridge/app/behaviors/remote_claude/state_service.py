@@ -9,6 +9,7 @@ subscribers without any kernel involvement.
 from __future__ import annotations
 
 import json
+import time
 from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any, Iterable
@@ -87,6 +88,14 @@ class RemoteClaudeStateService:
         # SSE stream waiting for events on that session.
         self._session_subs: dict[str, list[Any]] = defaultdict(list)
         self._machine_subs: dict[str, list[Any]] = defaultdict(list)
+        # Per-session ring buffer of recent events. The browser opens its
+        # /sessions/{sid}/live SSE shortly after run.start completes, but
+        # claude can produce its full stream-json reply before that
+        # subscribe lands. Without replay the user sees "no response".
+        # Cap size + time-based eviction in publish_event.
+        self._session_buffer: dict[str, list[tuple[float, dict[str, Any]]]] = defaultdict(list)
+        self._SESSION_BUFFER_MAX = 200
+        self._SESSION_BUFFER_TTL_S = 120.0
 
     # -------- Machines --------------------------------------------------
 
@@ -345,13 +354,34 @@ class RemoteClaudeStateService:
     # -------- Pub/sub for SSE -----------------------------------------
 
     def subscribe_session(self, machine_id: str, session_id: str):
-        return self._SubscriptionContext(self._session_subs, f"{machine_id}|{session_id}")
+        key = f"{machine_id}|{session_id}"
+        # Snapshot any buffered events so the new subscriber's queue gets
+        # them before any future publish. This bridges the race between
+        # the agent forwarding stream-json events and the browser opening
+        # its live SSE.
+        backlog = [evt for (_ts, evt) in self._session_buffer.get(key, [])]
+        return self._SubscriptionContext(self._session_subs, key, backlog=backlog)
 
     def subscribe_machine(self, machine_id: str):
         return self._SubscriptionContext(self._machine_subs, machine_id)
 
     def _publish_session(self, machine_id: str, session_id: str, event: dict[str, Any]) -> None:
         key = f"{machine_id}|{session_id}"
+        # Append to the per-session ring buffer so a late subscriber can
+        # replay. Skip command lifecycle events (those flow to the machine
+        # subscriber separately and don't need session-buffer replay).
+        if event.get("kind") != "command" and session_id:
+            now_ts = time.time()
+            buf = self._session_buffer[key]
+            # Drop expired entries first so the buffer doesn't grow forever
+            # for chatty sessions.
+            cutoff = now_ts - self._SESSION_BUFFER_TTL_S
+            while buf and buf[0][0] < cutoff:
+                buf.pop(0)
+            buf.append((now_ts, event))
+            if len(buf) > self._SESSION_BUFFER_MAX:
+                # Hard cap so a runaway session doesn't OOM the bridge.
+                del buf[: len(buf) - self._SESSION_BUFFER_MAX]
         for queue in list(self._session_subs.get(key, ())):
             try: queue.put_nowait(event)
             except Exception: pass
@@ -375,14 +405,20 @@ class RemoteClaudeStateService:
         self._publish_session(machine_id, session_id, event)
 
     class _SubscriptionContext:
-        def __init__(self, registry: dict, key: str) -> None:
+        def __init__(self, registry: dict, key: str, *, backlog: list | None = None) -> None:
             self._registry = registry
             self._key = key
             self._queue = None
+            self._backlog = list(backlog or ())
 
         async def __aenter__(self):
             import asyncio
             self._queue = asyncio.Queue()
+            # Pre-load the queue with the backlog so the SSE handler delivers
+            # past events before it starts waiting for new ones.
+            for evt in self._backlog:
+                try: self._queue.put_nowait(evt)
+                except Exception: pass
             self._registry[self._key].append(self._queue)
             return self._queue
 
