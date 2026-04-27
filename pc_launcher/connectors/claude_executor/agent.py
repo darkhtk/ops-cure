@@ -59,6 +59,7 @@ class ClaudeExecutorAgent:
         self.poll_interval_seconds = poll_interval_seconds
         self._runs: dict[str, ClaudeRun] = {}      # session_id → ClaudeRun
         self._pending_runs: dict[str, ClaudeRun] = {}  # commandId → ClaudeRun (until session_id known)
+        self._pending_prompts: dict[str, str] = {}  # commandId → first user prompt
         # Session ids the agent itself spawned (via run.start from the
         # browser). Reported as via="web" in sync so the sidebar can
         # distinguish CLI vs web origin. In-memory only — the bridge keeps
@@ -66,6 +67,13 @@ class ClaudeExecutorAgent:
         # restart is fine: previously-seen sessions stay tagged "web" by
         # the bridge's no-downgrade rule.
         self._web_session_ids: set[str] = set()
+        # Synthetic session metadata, keyed by session_id, for sessions the
+        # agent JUST spawned. scan_sessions() is racy at promotion time
+        # (claude may emit system:init on stdout before the jsonl is on
+        # disk), so the bridge would otherwise miss the new session in the
+        # next sync. We merge these into the sync payload so the SSE event
+        # fires for the freshly-created sessionId immediately.
+        self._synthetic_sessions: dict[str, dict[str, Any]] = {}
         self._stop = False
         self._last_sync_at: float = 0.0
 
@@ -99,16 +107,25 @@ class ClaudeExecutorAgent:
             return
         self._dispatch(command)
 
-    def _do_sync(self) -> None:
+    def _do_sync(self, *, reason: str = "tick") -> None:
         try:
             sessions = scan_sessions()
-            # Tag agent-spawned sessions as via="web" so the sidebar can
-            # distinguish browser-initiated from CLI-initiated. Sessions we
-            # don't know about default to "cli". The bridge's no-downgrade
-            # rule means an agent restart (which clears _web_session_ids)
-            # won't overwrite the bridge's existing "web" tag with "cli".
+            scanned_ids = {s.get("sessionId") for s in sessions if s.get("sessionId")}
+            # Merge in synthetic entries for sessions we know the agent
+            # spawned but scan_sessions hasn't seen yet (race: stdout may
+            # carry system:init before claude flushes the new jsonl).
+            for sid, synth in list(self._synthetic_sessions.items()):
+                if sid not in scanned_ids:
+                    sessions.append(synth)
+                else:
+                    # Disk has it now — drop the synthetic copy.
+                    self._synthetic_sessions.pop(sid, None)
+            web_in_payload = 0
             for s in sessions:
-                s["via"] = "web" if s.get("sessionId") in self._web_session_ids else "cli"
+                is_web = s.get("sessionId") in self._web_session_ids
+                s["via"] = "web" if is_web else "cli"
+                if is_web:
+                    web_in_payload += 1
             self.bridge.sync(
                 machine={
                     "machineId": self.machine_id,
@@ -119,8 +136,14 @@ class ClaudeExecutorAgent:
                 sessions=sessions,
             )
             self._last_sync_at = time.time()
+            print(
+                f"[claude-executor] sync ({reason}): {len(sessions)} sessions, "
+                f"{web_in_payload} web, web_set={len(self._web_session_ids)}, "
+                f"synthetic={len(self._synthetic_sessions)}",
+                file=sys.stderr,
+            )
         except RuntimeError as e:
-            print(f"[claude-executor] sync failed: {e}", file=sys.stderr)
+            print(f"[claude-executor] sync ({reason}) failed: {e}", file=sys.stderr)
 
     # -------- dispatcher --------------------------------------------------
 
@@ -183,6 +206,7 @@ class ClaudeExecutorAgent:
             on_exit=lambda code: self._handle_run_exit(run, code),
         )
         self._pending_runs[cid] = run
+        self._pending_prompts[cid] = prompt
         try:
             run.spawn()
             run.write_user_message(prompt, attachments=attachments)
@@ -291,14 +315,33 @@ class ClaudeExecutorAgent:
         promoted = False
         if run.session_id and run.session_id not in self._runs:
             # Promote from pending → keyed-by-session.
+            initiating_prompt = ""
             for cid, pending in list(self._pending_runs.items()):
                 if pending is run:
                     self._pending_runs.pop(cid, None)
+                    initiating_prompt = self._pending_prompts.pop(cid, "")
                     break
             self._runs[run.session_id] = run
             # The agent itself spawned this session via run.start (browser-
             # initiated). Tag it so the next sync reports via="web".
             self._web_session_ids.add(run.session_id)
+            # Stash a synthetic session entry so the upcoming _do_sync can
+            # publish a kind:"session" event for this sessionId even if the
+            # jsonl isn't on disk yet (claude flushes stdout earlier than
+            # the file in some cases). Cleared once scan_sessions catches up.
+            now_ms = int(time.time() * 1000)
+            title = (initiating_prompt or "(no preview)")[:80].strip()
+            self._synthetic_sessions[run.session_id] = {
+                "sessionId": run.session_id,
+                "cwd": run.cwd,
+                "title": title,
+                "firstUserMessage": initiating_prompt,
+                "updatedAtMs": now_ms,
+                "createdAtMs": now_ms,
+                "eventCount": 1,
+                "fileSize": 0,
+                "jsonlPath": "",
+            }
             promoted = True
         try:
             self.bridge.publish_event(session_id=sess_id, event=event)
@@ -309,7 +352,8 @@ class ClaudeExecutorAgent:
         # this the browser would have to wait up to sync_interval_seconds
         # (default 30 s) before it can subscribe to the live stream.
         if promoted:
-            self._do_sync()
+            print(f"[claude-executor] promoted session {run.session_id}, syncing", file=sys.stderr)
+            self._do_sync(reason=f"promote:{run.session_id[:8]}")
 
     def _handle_run_exit(self, run: ClaudeRun, code: int | None) -> None:
         # Drop from registries so a follow-up run.input triggers a fresh
