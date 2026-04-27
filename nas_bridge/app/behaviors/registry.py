@@ -116,12 +116,34 @@ class RemoteCodexBehaviorDescriptor:
         return build_remote_codex_kernel_binding()
 
 
+@dataclass(frozen=True, slots=True)
+class RemoteClaudeBehaviorDescriptor:
+    behavior_id: str = "remote_claude"
+    display_name: str = "Remote Claude"
+    description: str = (
+        "Browser-first remote Claude Code behavior. Mirrors machine + session "
+        "scoped events onto the kernel subscription broker so subscribers can "
+        "use the generic /api/events/spaces/.../stream channel."
+    )
+
+    def build_discord_binding(self, context: BehaviorContext) -> DiscordBehaviorBinding | None:
+        del context
+        return None
+
+    def build_kernel_binding(self, context: BehaviorContext) -> KernelBehaviorBinding | None:
+        del context
+        from .remote_claude.kernel_binding import build_remote_claude_kernel_binding
+
+        return build_remote_claude_kernel_binding()
+
+
 def default_behavior_descriptors() -> tuple[BehaviorDescriptor, ...]:
     return (
         OrchestrationBehaviorDescriptor(),
         ChatBehaviorDescriptor(),
         OpsBehaviorDescriptor(),
         RemoteCodexBehaviorDescriptor(),
+        RemoteClaudeBehaviorDescriptor(),
     )
 
 

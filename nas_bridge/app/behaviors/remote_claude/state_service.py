@@ -17,11 +17,28 @@ from typing import Any, Iterable
 from sqlalchemy import select
 
 from ...db import session_scope
+from ...kernel.events import EventEnvelope, EventSummary, encode_event_cursor
 from ...models import (
     RemoteClaudeCommandModel,
     RemoteClaudeMachineModel,
     RemoteClaudeSessionModel,
 )
+
+
+REMOTE_CLAUDE_MACHINE_SPACE_PREFIX = "remote_claude.machine:"
+REMOTE_CLAUDE_SESSION_SPACE_PREFIX = "remote_claude.session:"
+
+
+def remote_claude_machine_space_id(machine_id: str) -> str:
+    """Synthetic kernel space_id for machine-scoped events (command lifecycle,
+    session list updates, machine status). Lets browsers + agents subscribe
+    via the generic /api/events/spaces/{space_id}/stream channel."""
+    return f"{REMOTE_CLAUDE_MACHINE_SPACE_PREFIX}{machine_id}"
+
+
+def remote_claude_session_space_id(session_id: str) -> str:
+    """Synthetic kernel space_id for session-scoped stream-json events."""
+    return f"{REMOTE_CLAUDE_SESSION_SPACE_PREFIX}{session_id}"
 
 
 # Command types
@@ -84,19 +101,27 @@ class RemoteClaudeStateService:
     startup and shared (it holds an in-memory subscriber list).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, kernel_subscription_broker: Any | None = None) -> None:
         # session_id → list of asyncio.Queue. Each subscriber is a single
         # SSE stream waiting for events on that session.
+        # NOTE: behavior-local pub/sub kept for the legacy
+        # /api/remote-claude/.../live endpoints during the kernel-broker
+        # migration. New code should subscribe via
+        # /api/events/spaces/{space_id}/stream instead — those listeners are
+        # served by `kernel_subscription_broker` below.
         self._session_subs: dict[str, list[Any]] = defaultdict(list)
         self._machine_subs: dict[str, list[Any]] = defaultdict(list)
-        # Per-session ring buffer of recent events. The browser opens its
-        # /sessions/{sid}/live SSE shortly after run.start completes, but
-        # claude can produce its full stream-json reply before that
-        # subscribe lands. Without replay the user sees "no response".
-        # Cap size + time-based eviction in publish_event.
+        # Per-session ring buffer of recent events for the legacy SSE pipe.
+        # Kernel broker has its own deque (default 1024 events / space), so
+        # subscribers on the kernel channel get cursor-based replay for free
+        # and don't need this buffer.
         self._session_buffer: dict[str, list[tuple[float, dict[str, Any]]]] = defaultdict(list)
         self._SESSION_BUFFER_MAX = 200
         self._SESSION_BUFFER_TTL_S = 120.0
+        # Optional kernel broker. When wired (main.py passes it), every event
+        # is mirrored onto the generic /api/events/spaces/.../stream channel
+        # so the codex/chat/ops behaviors all share the same transport.
+        self._kernel_subscription_broker = kernel_subscription_broker
 
     # -------- Machines --------------------------------------------------
 
@@ -368,36 +393,95 @@ class RemoteClaudeStateService:
 
     def _publish_session(self, machine_id: str, session_id: str, event: dict[str, Any]) -> None:
         key = f"{machine_id}|{session_id}"
-        # Append to the per-session ring buffer so a late subscriber can
-        # replay. Skip command lifecycle events (those flow to the machine
-        # subscriber separately and don't need session-buffer replay).
+        # Append to the per-session ring buffer so a late subscriber on the
+        # legacy SSE can replay. Skip command lifecycle events (those flow
+        # to the machine subscriber separately and don't need it).
         if event.get("kind") != "command" and session_id:
             now_ts = time.time()
             buf = self._session_buffer[key]
-            # Drop expired entries first so the buffer doesn't grow forever
-            # for chatty sessions.
             cutoff = now_ts - self._SESSION_BUFFER_TTL_S
             while buf and buf[0][0] < cutoff:
                 buf.pop(0)
             buf.append((now_ts, event))
             if len(buf) > self._SESSION_BUFFER_MAX:
-                # Hard cap so a runaway session doesn't OOM the bridge.
                 del buf[: len(buf) - self._SESSION_BUFFER_MAX]
         for queue in list(self._session_subs.get(key, ())):
             try: queue.put_nowait(event)
             except Exception: pass
-        # Mirror command lifecycle events to machine-level subscribers so the
-        # browser can wait on fs.list / fs.mkdir / session.start results via
-        # one machine SSE instead of polling /commands/{id}. Other event kinds
-        # (stream-json messages, etc.) stay session-scoped to avoid blasting
-        # every browser subscribed to the machine with per-message traffic.
+        # Mirror command lifecycle events to machine-level legacy subscribers.
         if event.get("kind") == "command":
             self._publish_machine(machine_id, event)
+        # Kernel broker mirror: command + session events publish to the
+        # machine space, stream-json (claude.event etc.) publishes to the
+        # session space. Browser + agent subscribe via /api/events/...
+        self._mirror_to_kernel_broker(machine_id=machine_id, session_id=session_id, payload=event)
 
     def _publish_machine(self, machine_id: str, event: dict[str, Any]) -> None:
         for queue in list(self._machine_subs.get(machine_id, ())):
             try: queue.put_nowait(event)
             except Exception: pass
+        self._mirror_to_kernel_broker(machine_id=machine_id, session_id="", payload=event)
+
+    def _mirror_to_kernel_broker(self, *, machine_id: str, session_id: str, payload: dict[str, Any]) -> None:
+        """Publish the same payload onto the kernel subscription broker so
+        subscribers on /api/events/spaces/.../stream see exactly what the
+        legacy /api/remote-claude/.../live SSE pipes carry. Best-effort:
+        broker dispatch failures must not destabilize the legacy publish.
+        """
+        broker = self._kernel_subscription_broker
+        if broker is None:
+            return
+        kind = payload.get("kind") or "event"
+        # Pick the target space + event id + actor based on payload kind.
+        if kind == "command":
+            command = payload.get("command") or {}
+            event_id = compact_text(command.get("commandId")) or compact_text(machine_id) or "remote_claude.command"
+            status = compact_text(command.get("status"))
+            event_kind = f"remote_claude.command.{status}" if status else "remote_claude.command"
+            actor = compact_text(command.get("workerId")) or compact_text(machine_id) or "remote_claude"
+            space_id = remote_claude_machine_space_id(machine_id)
+        elif kind == "session":
+            session = payload.get("session") or {}
+            sid = compact_text(session.get("sessionId")) or session_id or machine_id
+            event_id = sid or "remote_claude.session"
+            event_kind = "remote_claude.session"
+            actor = compact_text(machine_id) or "remote_claude"
+            space_id = remote_claude_machine_space_id(machine_id)
+        elif kind == "machine":
+            event_id = compact_text(machine_id) or "remote_claude.machine"
+            event_kind = "remote_claude.machine"
+            actor = compact_text(machine_id) or "remote_claude"
+            space_id = remote_claude_machine_space_id(machine_id)
+        else:
+            # claude.event / claude.stderr / claude.exit / claude.parse_error:
+            # session-scoped stream-json. If session_id is empty (orphan /
+            # diagnostic event), drop — there's no useful target space.
+            if not session_id:
+                return
+            inner = payload.get("event") if isinstance(payload.get("event"), dict) else {}
+            inner_id = compact_text(inner.get("uuid")) or compact_text(inner.get("id"))
+            event_id = inner_id or f"{session_id}-{int(time.time() * 1_000_000)}"
+            event_kind = kind
+            actor = compact_text(machine_id) or "remote_claude"
+            space_id = remote_claude_session_space_id(session_id)
+
+        created_at = utcnow()
+        try:
+            envelope = EventEnvelope(
+                cursor=encode_event_cursor(created_at=created_at, event_id=event_id),
+                space_id=space_id,
+                event=EventSummary(
+                    id=event_id,
+                    kind=event_kind,
+                    actor_name=actor,
+                    content=json.dumps(payload, ensure_ascii=False),
+                    created_at=created_at,
+                ),
+            )
+            broker.publish(space_id=space_id, item=envelope)
+        except Exception:  # noqa: BLE001
+            # Broker dispatch failures must not break the legacy publish.
+            pass
 
     def publish_event(self, machine_id: str, session_id: str, event: dict[str, Any]) -> None:
         """Bridge entrypoint for pushing arbitrary events (e.g. claude

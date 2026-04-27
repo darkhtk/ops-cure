@@ -128,7 +128,9 @@ def build_services(settings: Settings) -> ServiceContainer:
         kernel_subscription_broker=subscription_broker,
         kernel_task_service=kernel_task_service,
     )
-    remote_claude_state_service = RemoteClaudeStateService()
+    remote_claude_state_service = RemoteClaudeStateService(
+        kernel_subscription_broker=subscription_broker,
+    )
     remote_claude_service = RemoteClaudeBehaviorService(
         state_service=remote_claude_state_service,
     )
