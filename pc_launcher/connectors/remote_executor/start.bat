@@ -27,6 +27,15 @@ if not exist "pc_launcher\projects\remote_executor\project.yaml" (
   exit /b 1
 )
 
-echo Starting remote_executor (codex) from %REPO_ROOT%...
-python -m pc_launcher.connectors.remote_executor.runner
+REM Mirror stdout + stderr to a rolling log so silent crashes (especially
+REM under Task Scheduler, which discards inherited streams) leave a trail.
+set "LOG_DIR=%REPO_ROOT%\..\_runtime\ops-cure\logs"
+if not exist "%LOG_DIR%" mkdir "%LOG_DIR%" >nul 2>&1
+set "LOG_FILE=%LOG_DIR%\remote_executor.log"
+
+echo. >> "%LOG_FILE%"
+echo === remote_executor start %DATE% %TIME% (pid %RANDOM%) === >> "%LOG_FILE%"
+
+echo Starting remote_executor (codex) from %REPO_ROOT%... (logs -^> %LOG_FILE%)
+python -u -m pc_launcher.connectors.remote_executor.runner >> "%LOG_FILE%" 2>&1
 endlocal

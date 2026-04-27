@@ -45,8 +45,20 @@ REM up to the repo root before invoking python.
 set "REPO_ROOT=%SCRIPT_DIR%\..\..\.."
 cd /d "%REPO_ROOT%"
 
-echo Starting claude_executor against %CLAUDE_BRIDGE_URL%...
-python -m pc_launcher.connectors.claude_executor.runner ^
+REM Mirror stdout + stderr to a rolling log so when Task Scheduler kills the
+REM process or the agent dies silently we can read what happened. Single
+REM file, appended; rotate manually if it grows too large. Drops next to the
+REM other ops-cure runtime data so it survives repo redeploys.
+set "LOG_DIR=%REPO_ROOT%\..\_runtime\ops-cure\logs"
+if not exist "%LOG_DIR%" mkdir "%LOG_DIR%" >nul 2>&1
+set "LOG_FILE=%LOG_DIR%\claude_executor.log"
+
+REM Marker for each new launch so the log is easy to scan.
+echo. >> "%LOG_FILE%"
+echo === claude_executor start %DATE% %TIME% (pid %RANDOM%) === >> "%LOG_FILE%"
+
+echo Starting claude_executor against %CLAUDE_BRIDGE_URL%... (logs -^> %LOG_FILE%)
+python -u -m pc_launcher.connectors.claude_executor.runner ^
   --bridge-url "%CLAUDE_BRIDGE_URL%" ^
-  --token "%CLAUDE_BRIDGE_TOKEN%"
+  --token "%CLAUDE_BRIDGE_TOKEN%" >> "%LOG_FILE%" 2>&1
 endlocal
