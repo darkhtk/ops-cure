@@ -409,18 +409,20 @@ class RemoteClaudeStateService:
             try: queue.put_nowait(event)
             except Exception: pass
         # Mirror command lifecycle events to machine-level legacy subscribers.
+        # Pass _suppress_mirror so we don't double-publish to the broker --
+        # the kernel mirror happens once, here, with the right space.
         if event.get("kind") == "command":
-            self._publish_machine(machine_id, event)
-        # Kernel broker mirror: command + session events publish to the
-        # machine space, stream-json (claude.event etc.) publishes to the
-        # session space. Browser + agent subscribe via /api/events/...
+            self._publish_machine(machine_id, event, _suppress_mirror=True)
+        # Kernel broker mirror: command -> machine space; stream-json
+        # (claude.event etc.) -> session space.
         self._mirror_to_kernel_broker(machine_id=machine_id, session_id=session_id, payload=event)
 
-    def _publish_machine(self, machine_id: str, event: dict[str, Any]) -> None:
+    def _publish_machine(self, machine_id: str, event: dict[str, Any], *, _suppress_mirror: bool = False) -> None:
         for queue in list(self._machine_subs.get(machine_id, ())):
             try: queue.put_nowait(event)
             except Exception: pass
-        self._mirror_to_kernel_broker(machine_id=machine_id, session_id="", payload=event)
+        if not _suppress_mirror:
+            self._mirror_to_kernel_broker(machine_id=machine_id, session_id="", payload=event)
 
     def _mirror_to_kernel_broker(self, *, machine_id: str, session_id: str, payload: dict[str, Any]) -> None:
         """Publish the same payload onto the kernel subscription broker so
