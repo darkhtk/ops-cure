@@ -270,6 +270,12 @@ class ClaudeExecutorAgent:
         if run is not None:
             try: run.close()
             except Exception: pass
+        # Drop in-memory traces too. Otherwise the next _do_sync would
+        # re-create the session row on the bridge from synthetic_sessions
+        # / web_session_ids and the deleted session would resurrect in the
+        # sidebar a few seconds later.
+        self._web_session_ids.discard(session_id)
+        self._synthetic_sessions.pop(session_id, None)
         path = find_session_jsonl(session_id)
         if path is None:
             return {"deleted": False, "reason": "not_found"}
