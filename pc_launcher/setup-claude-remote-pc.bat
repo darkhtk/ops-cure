@@ -65,17 +65,21 @@ if errorlevel 1 (
   )
 )
 
-REM Final hard-required prereq check (python + git). claude / tailscale are
-REM only warnings -- the agent boots without them but actual usage will fail.
+REM Final hard-required prereq check (python + tar). git / claude /
+REM tailscale are only warnings -- the agent boots without them but the
+REM script can't proceed without python (pip install) or tar (extract
+REM tarball).
 where python >nul 2>nul
 if errorlevel 1 (
   echo [error] python still not on PATH. Open a NEW shell and re-run this
   echo         script (PATH propagation can need a fresh process).
   pause & exit /b 1
 )
-where git >nul 2>nul
+where tar >nul 2>nul
 if errorlevel 1 (
-  echo [error] git still not on PATH. Open a NEW shell and re-run.
+  echo [error] tar.exe not found. Built into Win10 1803+; if you're on
+  echo         older Windows, install it (e.g. via Git for Windows, which
+  echo         ships GNU tar in usr\bin).
   pause & exit /b 1
 )
 where claude >nul 2>nul
@@ -102,30 +106,57 @@ exit /b 0
 
 :prereqs_done
 
-REM ---- 2. clone / update repo -----------------------------------------------
+REM ---- 2. download ops-cure tarball from claude-remote site ------------------
 
-set "DEFAULT_REPO=https://github.com/ymxclaude/ops-cure.git"
-set /p REPO_URL="ops-cure repo URL [%DEFAULT_REPO%]: "
-if "!REPO_URL!"=="" set "REPO_URL=%DEFAULT_REPO%"
+REM We pull a self-hosted tarball (published by claude-remote/scripts/
+REM publish-bootstrap.ps1) instead of git-cloning. Avoids needing repo
+REM credentials on the new PC. The endpoint is auth-gated by the same bearer
+REM token the agent will use, so we ask for that BEFORE downloading.
+
+set "DEFAULT_SITE=https://semirainnas.tailb6e1a3.ts.net:18443"
+set /p SITE_URL="claude-remote site URL [%DEFAULT_SITE%]: "
+if "!SITE_URL!"=="" set "SITE_URL=%DEFAULT_SITE%"
+
+REM Bridge URL + token are also collected here (rather than later) so we can
+REM use the token to download the tarball.
+set "DEFAULT_BRIDGE=http://semirainnas.tailb6e1a3.ts.net:18080"
+set /p BRIDGE_URL="Bridge base URL [%DEFAULT_BRIDGE%]: "
+if "!BRIDGE_URL!"=="" set "BRIDGE_URL=%DEFAULT_BRIDGE%"
+set /p BRIDGE_TOKEN="Bridge bearer token: "
+if "!BRIDGE_TOKEN!"=="" (
+  echo [error] bridge token is required.
+  pause & exit /b 1
+)
 
 set "DEFAULT_DIR=%USERPROFILE%\Projects\ops-cure"
 set /p REPO_DIR="install dir [%DEFAULT_DIR%]: "
 if "!REPO_DIR!"=="" set "REPO_DIR=%DEFAULT_DIR%"
 
-if exist "%REPO_DIR%\.git" (
-  echo Existing checkout found at %REPO_DIR% -- pulling latest.
-  pushd "%REPO_DIR%" && git pull --ff-only && popd
-  if errorlevel 1 (
-    echo [warn] git pull failed -- continuing with whatever HEAD is checked out.
-  )
-) else (
-  echo Cloning %REPO_URL% to %REPO_DIR% ...
-  git clone "%REPO_URL%" "%REPO_DIR%"
-  if errorlevel 1 (
-    echo [error] git clone failed.
-    pause & exit /b 1
-  )
+set "TARBALL_URL=%SITE_URL%/bootstrap/ops-cure.tar.gz?token=!BRIDGE_TOKEN!"
+set "TARBALL_PATH=%TEMP%\ops-cure-bootstrap.tar.gz"
+
+echo.
+echo Downloading bootstrap tarball...
+echo   from: %SITE_URL%/bootstrap/ops-cure.tar.gz
+echo   to:   %TARBALL_PATH%
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ProgressPreference='SilentlyContinue'; try { Invoke-WebRequest -Uri '!TARBALL_URL!' -OutFile '%TARBALL_PATH%' -UseBasicParsing -SkipCertificateCheck; exit 0 } catch { Write-Host 'download failed:' $_.Exception.Message; exit 1 }"
+if errorlevel 1 (
+  echo [error] download failed. Check site URL + bridge token + Tailscale connectivity.
+  pause & exit /b 1
 )
+
+if exist "%REPO_DIR%" (
+  echo Existing %REPO_DIR% found -- extracting over (overwrites tracked files).
+) else (
+  mkdir "%REPO_DIR%" 2>nul
+)
+echo Extracting tarball -^> %REPO_DIR% ...
+tar -xzf "%TARBALL_PATH%" -C "%REPO_DIR%"
+if errorlevel 1 (
+  echo [error] tar -xzf failed. Win10 1803+ should have built-in tar; verify with: where tar
+  pause & exit /b 1
+)
+del "%TARBALL_PATH%" >nul 2>nul
 
 REM ---- 3. python deps -------------------------------------------------------
 
@@ -153,23 +184,10 @@ if not exist "%AGENT_DIR%\install.bat" (
   pause & exit /b 1
 )
 
+REM Bridge URL + token were collected up front (needed to download the
+REM tarball). Just ask for the machine id now.
 echo.
-echo --- bridge config ---
-echo.
-echo Need the NAS bridge URL + a bearer token. The token must match BRIDGE_TOKEN
-echo in the NAS's pc_launcher/.env (ask the admin or copy from a working PC's
-echo agent .env).
-echo.
-set /p BRIDGE_URL="Bridge base URL (e.g. http://your-nas.example.ts.net:18080): "
-if "!BRIDGE_URL!"=="" (
-  echo [error] bridge URL is required.
-  pause & exit /b 1
-)
-set /p BRIDGE_TOKEN="Bridge bearer token: "
-if "!BRIDGE_TOKEN!"=="" (
-  echo [error] bridge token is required.
-  pause & exit /b 1
-)
+echo --- machine id ---
 set "MACHINE_ID=%COMPUTERNAME%"
 set /p USER_MACHINE_ID="Machine id [%MACHINE_ID%]: "
 if not "%USER_MACHINE_ID%"=="" set "MACHINE_ID=%USER_MACHINE_ID%"
