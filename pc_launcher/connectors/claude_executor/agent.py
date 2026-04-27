@@ -37,6 +37,7 @@ RUN_START = "run.start"
 RUN_INPUT = "run.input"
 RUN_INTERRUPT = "run.interrupt"
 SESSION_DELETE = "session.delete"
+SESSION_TRANSCRIPT = "session.transcript"
 FS_LIST = "fs.list"
 FS_MKDIR = "fs.mkdir"
 APPROVAL_RESPOND = "approval.respond"
@@ -182,6 +183,9 @@ class ClaudeExecutorAgent:
             elif ctype == SESSION_DELETE:
                 result = self._handle_session_delete(command)
                 self.bridge.report_result(cid, status="completed", result=result)
+            elif ctype == SESSION_TRANSCRIPT:
+                result = self._handle_session_transcript(command)
+                self.bridge.report_result(cid, status="completed", result=result)
             elif ctype == FS_LIST:
                 result = self._handle_fs_list(command)
                 self.bridge.report_result(cid, status="completed", result=result)
@@ -311,6 +315,38 @@ class ClaudeExecutorAgent:
             return {"deleted": True, "path": str(path)}
         except OSError as e:
             raise RuntimeError(f"unlink failed: {e}")
+
+    def _handle_session_transcript(self, command: dict[str, Any]) -> dict[str, Any]:
+        """Read the session's jsonl from disk and wrap each line as a
+        bridge stream-json event so the browser's transcript replay can
+        ingest it the same way as live SSE events. Each line in
+        ~/.claude/projects/<encoded-cwd>/<sid>.jsonl is a stream-json event;
+        we wrap as {"kind": "claude.event", "event": <line>} to mirror how
+        claude_runtime emits live events.
+        """
+        session_id = str(command.get("sessionId") or "")
+        if not _is_session_id(session_id):
+            raise RuntimeError("invalid_session_id")
+        path = find_session_jsonl(session_id)
+        if path is None:
+            return {"events": [], "reason": "not_found"}
+        events: list[dict[str, Any]] = []
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                for raw in fh:
+                    line = raw.strip()
+                    if not line:
+                        continue
+                    try:
+                        ev = json.loads(line)
+                    except Exception:
+                        continue
+                    if not isinstance(ev, dict):
+                        continue
+                    events.append({"kind": "claude.event", "event": ev})
+        except OSError as e:
+            raise RuntimeError(f"read failed: {e}")
+        return {"events": events, "path": str(path)}
 
     def _handle_fs_list(self, command: dict[str, Any]) -> dict[str, Any]:
         params = self._parse_payload(command)

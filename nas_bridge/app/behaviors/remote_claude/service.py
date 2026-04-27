@@ -18,6 +18,7 @@ from .state_service import (
     RUN_INTERRUPT,
     RUN_START,
     SESSION_DELETE,
+    SESSION_TRANSCRIPT,
     RemoteClaudeStateService,
     compact_text,
 )
@@ -128,6 +129,21 @@ class RemoteClaudeBehaviorService:
         self.state_service.delete_session_record(machine_id, session_id)
         command = self.state_service.enqueue_command(
             command_type=SESSION_DELETE,
+            machine_id=machine_id,
+            session_id=session_id,
+            requested_by=requested_by,
+        )
+        return {"ok": True, "command": command}
+
+    def enqueue_session_transcript(
+        self,
+        *,
+        machine_id: str,
+        session_id: str,
+        requested_by: dict[str, Any],
+    ) -> dict[str, Any]:
+        command = self.state_service.enqueue_command(
+            command_type=SESSION_TRANSCRIPT,
             machine_id=machine_id,
             session_id=session_id,
             requested_by=requested_by,

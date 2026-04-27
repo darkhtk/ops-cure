@@ -162,6 +162,48 @@ async def delete_session(
     except (ValueError, RuntimeError) as e: _raise_for_error(e)
 
 
+@router.get("/machines/{machine_id}/sessions/{session_id}/transcript")
+async def session_transcript(
+    machine_id: str,
+    session_id: str,
+    request: Request,
+    caller: ControlBridgeCaller,
+) -> dict[str, Any]:
+    """Return the saved jsonl transcript for a session as a list of wrapped
+    events. Internally enqueues a session.transcript command and waits
+    (using the same machine SSE pipe the browser uses for fs.list results)
+    for the agent to read the file from disk and report back."""
+    service = request.app.state.services.remote_claude_service
+    state = service.state_service
+    response = service.enqueue_session_transcript(
+        machine_id=machine_id,
+        session_id=session_id,
+        requested_by=_requested_by(caller),
+    )
+    command_id = response["command"]["commandId"]
+    # Wait up to 10 s for the agent to fulfil the command. We subscribe to
+    # the machine event stream and watch for the matching command id.
+    async with state.subscribe_machine(machine_id) as queue:
+        deadline = 10.0
+        while deadline > 0:
+            t0 = asyncio.get_event_loop().time()
+            try:
+                payload = await asyncio.wait_for(queue.get(), timeout=deadline)
+            except asyncio.TimeoutError:
+                break
+            deadline -= asyncio.get_event_loop().time() - t0
+            if payload.get("kind") != "command":
+                continue
+            cmd = payload.get("command") or {}
+            if cmd.get("commandId") != command_id:
+                continue
+            if cmd.get("status") == "completed":
+                return {"events": (cmd.get("result") or {}).get("events") or []}
+            if cmd.get("status") == "failed":
+                raise HTTPException(status_code=502, detail=str(cmd.get("error") or "agent_failed"))
+    raise HTTPException(status_code=504, detail="agent_timeout")
+
+
 @router.get("/machines/{machine_id}/fs/list")
 async def fs_list(
     machine_id: str,
