@@ -267,62 +267,13 @@ async def get_command(command_id: str, request: Request, _caller: ReadBridgeCall
 
 
 # ---- Live SSE -----------------------------------------------------------
-
-@router.get("/machines/{machine_id}/sessions/{session_id}/live")
-async def stream_session(
-    machine_id: str,
-    session_id: str,
-    request: Request,
-    _caller: StreamBridgeCaller,
-) -> StreamingResponse:
-    state_service = request.app.state.services.remote_claude_service.state_service
-
-    async def event_stream():
-        async with state_service.subscribe_session(machine_id, session_id) as queue:
-            yield f"event: ready\ndata: {{}}\n\n"
-            keepalive = 15.0
-            while True:
-                try:
-                    payload = await asyncio.wait_for(queue.get(), timeout=keepalive)
-                except asyncio.TimeoutError:
-                    yield ":keepalive\n\n"
-                    continue
-                event_kind = payload.get("kind") or "event"
-                yield f"event: {event_kind}\ndata: {json.dumps(payload)}\n\n"
-
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
-
-
-@router.get("/machines/{machine_id}/live")
-async def stream_machine(
-    machine_id: str,
-    request: Request,
-    _caller: StreamBridgeCaller,
-) -> StreamingResponse:
-    """Machine-scoped SSE feed: command lifecycle (fs.list / fs.mkdir /
-    session.start completion), session.created / .updated, and machine
-    status. Lets the browser drop the per-command polling loop on
-    /commands/{id} and the per-session-list refresh polling that used to
-    catch new sessions after a fresh chat.
-    """
-    state_service = request.app.state.services.remote_claude_service.state_service
-
-    async def event_stream():
-        async with state_service.subscribe_machine(machine_id) as queue:
-            yield f"event: ready\ndata: {{}}\n\n"
-            keepalive = 15.0
-            while True:
-                if await request.is_disconnected():
-                    break
-                try:
-                    payload = await asyncio.wait_for(queue.get(), timeout=keepalive)
-                except asyncio.TimeoutError:
-                    yield ":keepalive\n\n"
-                    continue
-                event_kind = payload.get("kind") or "event"
-                yield f"event: {event_kind}\ndata: {json.dumps(payload)}\n\n"
-
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+# Removed in Phase 5 of the kernel-broker migration. State service now
+# mirrors all events onto the kernel subscription broker, so subscribers
+# (browser + agent) use the generic /api/events/spaces/{space_id}/stream
+# channel instead. Spaces:
+#   - remote_claude.machine:{machine_id}  - command lifecycle, session list,
+#                                            machine status
+#   - remote_claude.session:{session_id}  - per-session stream-json events
 
 
 # ---- Agent endpoints ----------------------------------------------------

@@ -102,25 +102,18 @@ class RemoteClaudeStateService:
     """
 
     def __init__(self, *, kernel_subscription_broker: Any | None = None) -> None:
-        # session_id → list of asyncio.Queue. Each subscriber is a single
-        # SSE stream waiting for events on that session.
-        # NOTE: behavior-local pub/sub kept for the legacy
-        # /api/remote-claude/.../live endpoints during the kernel-broker
-        # migration. New code should subscribe via
-        # /api/events/spaces/{space_id}/stream instead — those listeners are
-        # served by `kernel_subscription_broker` below.
+        # _machine_subs is still used internally by /sessions/{sid}/transcript
+        # to wait for the agent's session.transcript command to complete.
+        # _session_subs is unused (the legacy /sessions/{sid}/live endpoint
+        # was removed in Phase 5) but kept as an empty dict to preserve the
+        # call-shape of _publish_session for any future internal consumer.
         self._session_subs: dict[str, list[Any]] = defaultdict(list)
         self._machine_subs: dict[str, list[Any]] = defaultdict(list)
-        # Per-session ring buffer of recent events for the legacy SSE pipe.
-        # Kernel broker has its own deque (default 1024 events / space), so
-        # subscribers on the kernel channel get cursor-based replay for free
-        # and don't need this buffer.
-        self._session_buffer: dict[str, list[tuple[float, dict[str, Any]]]] = defaultdict(list)
-        self._SESSION_BUFFER_MAX = 200
-        self._SESSION_BUFFER_TTL_S = 120.0
-        # Optional kernel broker. When wired (main.py passes it), every event
-        # is mirrored onto the generic /api/events/spaces/.../stream channel
-        # so the codex/chat/ops behaviors all share the same transport.
+        # Kernel broker. Every event is mirrored onto the generic
+        # /api/events/spaces/.../stream channel so the codex/chat/ops
+        # behaviors all share the same transport. Broker has its own
+        # 1024-event backlog per space + cursor-based replay, so we no
+        # longer need a behavior-local ring buffer.
         self._kernel_subscription_broker = kernel_subscription_broker
 
     # -------- Machines --------------------------------------------------
@@ -379,38 +372,21 @@ class RemoteClaudeStateService:
 
     # -------- Pub/sub for SSE -----------------------------------------
 
-    def subscribe_session(self, machine_id: str, session_id: str):
-        key = f"{machine_id}|{session_id}"
-        # Snapshot any buffered events so the new subscriber's queue gets
-        # them before any future publish. This bridges the race between
-        # the agent forwarding stream-json events and the browser opening
-        # its live SSE.
-        backlog = [evt for (_ts, evt) in self._session_buffer.get(key, [])]
-        return self._SubscriptionContext(self._session_subs, key, backlog=backlog)
-
     def subscribe_machine(self, machine_id: str):
+        # Internal-only: used by /sessions/{sid}/transcript to await the
+        # agent's session.transcript command result. Not exposed via SSE
+        # anymore (see Phase 5 of the kernel-broker migration).
         return self._SubscriptionContext(self._machine_subs, machine_id)
 
     def _publish_session(self, machine_id: str, session_id: str, event: dict[str, Any]) -> None:
         key = f"{machine_id}|{session_id}"
-        # Append to the per-session ring buffer so a late subscriber on the
-        # legacy SSE can replay. Skip command lifecycle events (those flow
-        # to the machine subscriber separately and don't need it).
-        if event.get("kind") != "command" and session_id:
-            now_ts = time.time()
-            buf = self._session_buffer[key]
-            cutoff = now_ts - self._SESSION_BUFFER_TTL_S
-            while buf and buf[0][0] < cutoff:
-                buf.pop(0)
-            buf.append((now_ts, event))
-            if len(buf) > self._SESSION_BUFFER_MAX:
-                del buf[: len(buf) - self._SESSION_BUFFER_MAX]
         for queue in list(self._session_subs.get(key, ())):
             try: queue.put_nowait(event)
             except Exception: pass
-        # Mirror command lifecycle events to machine-level legacy subscribers.
-        # Pass _suppress_mirror so we don't double-publish to the broker --
-        # the kernel mirror happens once, here, with the right space.
+        # Mirror command lifecycle events to internal _machine_subs (used by
+        # the /sessions/{sid}/transcript endpoint to await the agent's
+        # session.transcript command). Suppress the broker re-mirror -- the
+        # kernel publish happens once, here, with the right space.
         if event.get("kind") == "command":
             self._publish_machine(machine_id, event, _suppress_mirror=True)
         # Kernel broker mirror: command -> machine space; stream-json
@@ -492,20 +468,14 @@ class RemoteClaudeStateService:
         self._publish_session(machine_id, session_id, event)
 
     class _SubscriptionContext:
-        def __init__(self, registry: dict, key: str, *, backlog: list | None = None) -> None:
+        def __init__(self, registry: dict, key: str) -> None:
             self._registry = registry
             self._key = key
             self._queue = None
-            self._backlog = list(backlog or ())
 
         async def __aenter__(self):
             import asyncio
             self._queue = asyncio.Queue()
-            # Pre-load the queue with the backlog so the SSE handler delivers
-            # past events before it starts waiting for new ones.
-            for evt in self._backlog:
-                try: self._queue.put_nowait(evt)
-                except Exception: pass
             self._registry[self._key].append(self._queue)
             return self._queue
 
