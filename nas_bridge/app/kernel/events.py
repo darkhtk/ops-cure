@@ -117,6 +117,40 @@ class EventService:
         return None
 
 
+def make_message_envelope(*, space_id: str, message) -> EventEnvelope:
+    """Build an ``EventEnvelope`` from any chat-style message row that
+    has ``id``, ``event_kind``, ``actor_name``, ``content``, and
+    ``created_at`` attributes.
+
+    Used by chat and ops behaviors to publish persisted message rows
+    onto the kernel events stream. Centralizing the construction keeps
+    cursor-encoding and field mapping consistent across every caller —
+    a previous PR review flagged the inline copy-paste as a smell."""
+    return EventEnvelope(
+        cursor=encode_event_cursor(
+            created_at=message.created_at,
+            event_id=message.id,
+        ),
+        space_id=space_id,
+        event=EventSummary(
+            id=message.id,
+            kind=message.event_kind,
+            actor_name=message.actor_name,
+            content=message.content,
+            created_at=message.created_at,
+        ),
+    )
+
+
+def publish_envelope(broker, envelope: EventEnvelope | None) -> None:
+    """Idempotent publish helper: noop when broker or envelope is None.
+    Lets every caller use the same try-publish-without-checking shape
+    instead of repeating the two-line guard."""
+    if broker is None or envelope is None:
+        return
+    broker.publish(space_id=envelope.space_id, item=envelope)
+
+
 def paginate_event_envelopes(
     *,
     space_id: str,

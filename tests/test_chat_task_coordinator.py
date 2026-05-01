@@ -296,6 +296,73 @@ def test_open_task_without_objective_rejected(tmp_path, monkeypatch):
         )
 
 
+def test_get_conversation_filters_speech_by_kind(tmp_path, monkeypatch):
+    """get_conversation(kinds=[...]) returns only matching event_kind
+    rows; PR9 ergonomics. Useful for clients that want, e.g., only
+    evidence rows or only lifecycle events without chatter."""
+    modules = _bootstrap_app(tmp_path, monkeypatch)
+    schemas = modules["conversation_schemas_module"]
+    _, chat_service, conversation_service, _, coordinator = _build_full_stack(modules)
+
+    thread = _open_thread(chat_service)
+    opened = conversation_service.open_conversation(
+        discord_thread_id=thread.discord_thread_id,
+        request=schemas.ConversationOpenRequest(
+            kind="task",
+            title="test",
+            opener_actor="alice",
+            objective="run something",
+        ),
+    )
+    claimed = coordinator.claim(
+        conversation_id=opened.id,
+        request=schemas.ChatTaskClaimRequest(actor_name="codex-pca", lease_seconds=120),
+    )
+    lease_token = claimed.task["current_assignment"]["lease_token"]
+    coordinator.heartbeat(
+        conversation_id=opened.id,
+        request=schemas.ChatTaskHeartbeatRequest(
+            actor_name="codex-pca", lease_token=lease_token, phase="executing",
+        ),
+    )
+    coordinator.add_evidence(
+        conversation_id=opened.id,
+        request=schemas.ChatTaskEvidenceRequest(
+            actor_name="codex-pca", kind="file_write", summary="patched",
+        ),
+    )
+    coordinator.complete(
+        conversation_id=opened.id,
+        request=schemas.ChatTaskCompleteRequest(
+            actor_name="codex-pca", lease_token=lease_token, summary="ok",
+        ),
+    )
+
+    detail_all = conversation_service.get_conversation(conversation_id=opened.id)
+    kinds_all = {row.kind for row in detail_all.recent_speech}
+    # The kind is stripped of the chat.speech. prefix; lifecycle events
+    # keep their full event_kind. Verify several event types are present.
+    assert any("opened" in k or "closed" in k for k in kinds_all) or len(kinds_all) >= 3
+
+    detail_evidence_only = conversation_service.get_conversation(
+        conversation_id=opened.id,
+        kinds=["chat.task.evidence"],
+    )
+    assert len(detail_evidence_only.recent_speech) == 1
+    assert detail_evidence_only.recent_speech[0].kind == "chat.task.evidence"
+
+    detail_lifecycle = conversation_service.get_conversation(
+        conversation_id=opened.id,
+        kinds=["chat.conversation.opened", "chat.conversation.closed"],
+    )
+    lifecycle_kinds = [row.kind for row in detail_lifecycle.recent_speech]
+    assert "chat.conversation.opened" in lifecycle_kinds
+    assert "chat.conversation.closed" in lifecycle_kinds
+    # heartbeat / evidence rows should be filtered out
+    assert "chat.task.heartbeat" not in lifecycle_kinds
+    assert "chat.task.evidence" not in lifecycle_kinds
+
+
 def test_open_task_without_remote_task_service_rejected(tmp_path, monkeypatch):
     modules = _bootstrap_app(tmp_path, monkeypatch)
     schemas = modules["conversation_schemas_module"]

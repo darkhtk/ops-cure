@@ -28,7 +28,11 @@ from typing import Any
 
 from sqlalchemy import select
 
-from ...kernel.events import EventEnvelope, EventSummary, encode_event_cursor
+from ...kernel.events import (
+    EventEnvelope,
+    make_message_envelope,
+    publish_envelope,
+)
 from ...kernel.storage import session_scope
 from ...schemas import (
     RemoteTaskClaimRequest,
@@ -306,23 +310,12 @@ class ChatTaskCoordinator:
             )
             db.add(event_message)
             db.flush()
-            envelope = EventEnvelope(
-                cursor=encode_event_cursor(
-                    created_at=event_message.created_at,
-                    event_id=event_message.id,
-                ),
+            envelope = make_message_envelope(
                 space_id=row.thread_id,
-                event=EventSummary(
-                    id=event_message.id,
-                    kind=event_kind,
-                    actor_name=actor_name,
-                    content=event_message.content,
-                    created_at=event_message.created_at,
-                ),
+                message=event_message,
             )
 
-        if envelope is not None and self._broker is not None:
-            self._broker.publish(space_id=envelope.space_id, item=envelope)
+        publish_envelope(self._broker, envelope)
 
     def _build_response(
         self,

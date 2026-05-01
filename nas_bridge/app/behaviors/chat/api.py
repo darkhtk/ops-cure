@@ -171,12 +171,14 @@ async def get_conversation(
     conversation_id: str,
     request: Request,
     recent: int = Query(default=30, ge=1, le=200),
+    kinds: list[str] | None = Query(default=None),
 ) -> ConversationDetailResponse:
     services = request.app.state.services
     try:
         return services.chat_conversation_service.get_conversation(
             conversation_id=conversation_id,
             recent=recent,
+            kinds=kinds,
         )
     except ChatConversationNotFoundError:
         raise HTTPException(status_code=404, detail="Conversation not found.")

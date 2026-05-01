@@ -29,7 +29,11 @@ from typing import Any
 
 from sqlalchemy import func, or_, select, update
 
-from ...kernel.events import EventEnvelope, EventSummary, encode_event_cursor
+from ...kernel.events import (
+    EventEnvelope,
+    make_message_envelope,
+    publish_envelope,
+)
 from ...kernel.storage import session_scope
 from ...kernel.operation_service import KernelOperationService as RemoteTaskService
 from ...schemas import RemoteTaskCreateRequest
@@ -689,20 +693,28 @@ class ChatConversationService:
         *,
         conversation_id: str,
         recent: int = 30,
+        kinds: list[str] | None = None,
     ) -> ConversationDetailResponse:
+        """Return the conversation summary plus the last ``recent`` events.
+
+        ``kinds`` filters the recent events to only ``event_kind`` values
+        in the list (case-sensitive exact match). Useful for clients
+        that want, e.g., only ``chat.task.evidence`` rows or only
+        ``chat.speech.*`` without lifecycle noise.
+        """
         with session_scope() as db:
             row = db.get(ChatConversationModel, conversation_id)
             if row is None:
                 raise ChatConversationNotFoundError(conversation_id)
 
-            messages = list(
-                db.scalars(
-                    select(ChatMessageModel)
-                    .where(ChatMessageModel.conversation_id == row.id)
-                    .order_by(ChatMessageModel.created_at.desc())
-                    .limit(recent),
-                ),
+            stmt = (
+                select(ChatMessageModel)
+                .where(ChatMessageModel.conversation_id == row.id)
             )
+            if kinds:
+                stmt = stmt.where(ChatMessageModel.event_kind.in_(kinds))
+            stmt = stmt.order_by(ChatMessageModel.created_at.desc()).limit(recent)
+            messages = list(db.scalars(stmt))
             messages.reverse()
             return ConversationDetailResponse(
                 conversation=self._summary(row),
@@ -777,22 +789,7 @@ class ChatConversationService:
 
     @staticmethod
     def _envelope_for(thread_id: str, message: ChatMessageModel) -> EventEnvelope:
-        return EventEnvelope(
-            cursor=encode_event_cursor(
-                created_at=message.created_at,
-                event_id=message.id,
-            ),
-            space_id=thread_id,
-            event=EventSummary(
-                id=message.id,
-                kind=message.event_kind,
-                actor_name=message.actor_name,
-                content=message.content,
-                created_at=message.created_at,
-            ),
-        )
+        return make_message_envelope(space_id=thread_id, message=message)
 
     def _publish(self, envelope: EventEnvelope | None) -> None:
-        if envelope is None or self._broker is None:
-            return
-        self._broker.publish(space_id=envelope.space_id, item=envelope)
+        publish_envelope(self._broker, envelope)

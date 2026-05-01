@@ -6,7 +6,11 @@ from datetime import datetime, timezone
 
 from sqlalchemy import select
 
-from ...kernel.events import EventEnvelope, EventSummary, encode_event_cursor
+from ...kernel.events import (
+    EventEnvelope,
+    make_message_envelope,
+    publish_envelope,
+)
 from ...kernel.storage import session_scope
 from ...transcript_service import sanitize_text
 from ...transports.discord.threads import ThreadManager
@@ -256,24 +260,13 @@ class ChatBehaviorService:
             state.last_seen_at = now
             state.last_read_message_id = message.id
             state.last_read_message_at = message.created_at
-            envelope = EventEnvelope(
-                cursor=encode_event_cursor(created_at=message.created_at, event_id=message.id),
-                space_id=row.id,
-                event=EventSummary(
-                    id=message.id,
-                    kind=message.event_kind,
-                    actor_name=message.actor_name,
-                    content=message.content,
-                    created_at=message.created_at,
-                ),
-            )
+            envelope = make_message_envelope(space_id=row.id, message=message)
             response = ChatMessageSubmitResponse(
                 thread=self._thread_summary(row=row),
                 participant=self._participant_summary(participant=participant, state=state),
                 message=self._message_summary(message=message),
             )
-        if envelope is not None and self.subscription_broker is not None:
-            self.subscription_broker.publish(space_id=envelope.space_id, item=envelope)
+        publish_envelope(self.subscription_broker, envelope)
         return response
 
     async def submit_participant_message_and_notify(
