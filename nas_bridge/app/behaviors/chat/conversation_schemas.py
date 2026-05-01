@@ -251,6 +251,48 @@ class ChatTaskStateResponse(BaseModel):
     task: dict[str, Any]
 
 
+# ---- approval / interrupt / note (PR14) -----------------------------------
+
+
+class ChatTaskInterruptRequest(BaseModel):
+    actor_name: str = Field(min_length=1)
+    lease_token: str = Field(min_length=1)
+    note: str | None = None
+
+
+class ChatTaskApprovalRequest(BaseModel):
+    actor_name: str = Field(min_length=1)
+    lease_token: str = Field(min_length=1)
+    reason: str = Field(min_length=1)
+    note: str | None = None
+
+
+class ChatTaskApprovalResolveRequest(BaseModel):
+    resolved_by: str = Field(min_length=1)
+    resolution: str = Field(min_length=1)
+    note: str | None = None
+
+    @field_validator("resolution")
+    @classmethod
+    def _normalize_resolution(cls, value: str) -> str:
+        text = value.strip().lower()
+        if text not in {"approved", "denied"}:
+            raise ValueError("resolution must be 'approved' or 'denied'")
+        return text
+
+
+class ChatTaskNoteRequest(BaseModel):
+    actor_name: str = Field(min_length=1)
+    kind: str = "note"
+    content: str = Field(min_length=1)
+
+
+class ChatTaskNoteResponse(BaseModel):
+    """Notes are coordination-only; they do not change task state."""
+    conversation: ConversationSummary
+    note: dict[str, Any]
+
+
 # ----- handoff & idle-sweep --------------------------------------------------
 
 

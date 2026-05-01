@@ -5,11 +5,16 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from ...auth import require_bridge_token
 from .conversation_schemas import (
     ChatRoomHealthResponse,
+    ChatTaskApprovalRequest,
+    ChatTaskApprovalResolveRequest,
     ChatTaskClaimRequest,
     ChatTaskCompleteRequest,
     ChatTaskEvidenceRequest,
     ChatTaskFailRequest,
     ChatTaskHeartbeatRequest,
+    ChatTaskInterruptRequest,
+    ChatTaskNoteRequest,
+    ChatTaskNoteResponse,
     ChatTaskStateResponse,
     ConversationCloseRequest,
     ConversationDetailResponse,
@@ -401,6 +406,86 @@ async def fail_task_conversation(
         return services.chat_task_coordinator.fail(
             conversation_id=conversation_id,
             request=payload,
+        )
+    except ChatTaskBindingError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
+@router.post(
+    "/conversations/{conversation_id}/task/interrupt",
+    response_model=ChatTaskStateResponse,
+)
+async def interrupt_task_conversation(
+    conversation_id: str,
+    payload: ChatTaskInterruptRequest,
+    request: Request,
+) -> ChatTaskStateResponse:
+    services = request.app.state.services
+    try:
+        return services.chat_task_coordinator.interrupt(
+            conversation_id=conversation_id, request=payload,
+        )
+    except ChatTaskBindingError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
+@router.post(
+    "/conversations/{conversation_id}/task/approval",
+    response_model=ChatTaskStateResponse,
+)
+async def request_task_approval(
+    conversation_id: str,
+    payload: ChatTaskApprovalRequest,
+    request: Request,
+) -> ChatTaskStateResponse:
+    services = request.app.state.services
+    try:
+        return services.chat_task_coordinator.request_approval(
+            conversation_id=conversation_id, request=payload,
+        )
+    except ChatTaskBindingError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
+@router.post(
+    "/conversations/{conversation_id}/task/approval/resolve",
+    response_model=ChatTaskStateResponse,
+)
+async def resolve_task_approval(
+    conversation_id: str,
+    payload: ChatTaskApprovalResolveRequest,
+    request: Request,
+) -> ChatTaskStateResponse:
+    services = request.app.state.services
+    try:
+        return services.chat_task_coordinator.resolve_approval(
+            conversation_id=conversation_id, request=payload,
+        )
+    except ChatTaskBindingError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
+@router.post(
+    "/conversations/{conversation_id}/task/note",
+    response_model=ChatTaskNoteResponse,
+)
+async def add_task_note(
+    conversation_id: str,
+    payload: ChatTaskNoteRequest,
+    request: Request,
+) -> ChatTaskNoteResponse:
+    services = request.app.state.services
+    try:
+        return services.chat_task_coordinator.add_note(
+            conversation_id=conversation_id, request=payload,
         )
     except ChatTaskBindingError as exc:
         raise HTTPException(status_code=404, detail=str(exc))

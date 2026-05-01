@@ -35,20 +35,29 @@ from ...kernel.events import (
 )
 from ...kernel.storage import session_scope
 from ...schemas import (
+    RemoteTaskApprovalRequest,
+    RemoteTaskApprovalResolveRequest,
     RemoteTaskClaimRequest,
     RemoteTaskCompleteRequest,
     RemoteTaskEvidenceRequest,
     RemoteTaskFailRequest,
     RemoteTaskHeartbeatRequest,
+    RemoteTaskInterruptRequest,
+    RemoteTaskNoteRequest,
     RemoteTaskSummaryResponse,
 )
 from ...services.remote_task_service import RemoteTaskService
 from .conversation_schemas import (
+    ChatTaskApprovalRequest,
+    ChatTaskApprovalResolveRequest,
     ChatTaskClaimRequest,
     ChatTaskCompleteRequest,
     ChatTaskEvidenceRequest,
     ChatTaskFailRequest,
     ChatTaskHeartbeatRequest,
+    ChatTaskInterruptRequest,
+    ChatTaskNoteRequest,
+    ChatTaskNoteResponse,
     ChatTaskStateResponse,
     ConversationSummary,
 )
@@ -66,6 +75,10 @@ EVENT_TASK_HEARTBEAT = "chat.task.heartbeat"
 EVENT_TASK_EVIDENCE = "chat.task.evidence"
 EVENT_TASK_COMPLETED = "chat.task.completed"
 EVENT_TASK_FAILED = "chat.task.failed"
+EVENT_TASK_INTERRUPTED = "chat.task.interrupted"
+EVENT_TASK_APPROVAL_REQUESTED = "chat.task.approval_requested"
+EVENT_TASK_APPROVAL_RESOLVED = "chat.task.approval_resolved"
+EVENT_TASK_NOTE = "chat.task.note"
 
 
 def _utcnow() -> datetime:
@@ -300,6 +313,158 @@ class ChatTaskCoordinator:
             bypass_task_guard=True,
         )
         return self._build_response(conversation_id=conversation_id, task=task)
+
+    # -------- approval / interrupt / note (PR14) ---------------------------
+
+    def request_approval(
+        self,
+        *,
+        conversation_id: str,
+        request: ChatTaskApprovalRequest,
+    ) -> ChatTaskStateResponse:
+        """Owner asks for human approval before continuing. Task state
+        moves to ``blocked_approval`` until ``resolve_approval`` is
+        called. Conversation stays open (the bound task is still
+        active; just gated)."""
+        task_id = self._require_bound_task(conversation_id)
+        task = self._remote.request_approval(
+            task_id,
+            RemoteTaskApprovalRequest(
+                actor_id=request.actor_name,
+                lease_token=request.lease_token,
+                reason=request.reason,
+                note=request.note,
+            ),
+        )
+        self._update_owner_and_emit(
+            conversation_id=conversation_id,
+            actor_name=request.actor_name,
+            event_kind=EVENT_TASK_APPROVAL_REQUESTED,
+            payload={
+                "taskId": task.id,
+                "status": task.status,
+                "reason": request.reason,
+                "note": request.note,
+            },
+        )
+        return self._build_response(conversation_id=conversation_id, task=task)
+
+    def resolve_approval(
+        self,
+        *,
+        conversation_id: str,
+        request: ChatTaskApprovalResolveRequest,
+    ) -> ChatTaskStateResponse:
+        """Resolve a pending approval. resolution must be
+        'approved' or 'denied'. On approved, task returns to
+        executing state; on denied, the conversation is auto-closed
+        with resolution=cancelled (the task can no longer proceed)."""
+        task_id = self._require_bound_task(conversation_id)
+        task = self._remote.resolve_approval(
+            task_id,
+            RemoteTaskApprovalResolveRequest(
+                resolved_by=request.resolved_by,
+                resolution=request.resolution,
+                note=request.note,
+            ),
+        )
+        self._update_owner_and_emit(
+            conversation_id=conversation_id,
+            actor_name=request.resolved_by,
+            event_kind=EVENT_TASK_APPROVAL_RESOLVED,
+            payload={
+                "taskId": task.id,
+                "status": task.status,
+                "resolution": request.resolution,
+                "note": request.note,
+            },
+        )
+        # On 'denied', auto-close the bound conversation as cancelled.
+        if request.resolution == "denied":
+            self._conversations.close_conversation(
+                conversation_id=conversation_id,
+                closed_by=request.resolved_by,
+                resolution="cancelled",
+                summary=f"approval denied: {request.note or '(no note)'}",
+                bypass_task_guard=True,
+            )
+        return self._build_response(conversation_id=conversation_id, task=task)
+
+    def interrupt(
+        self,
+        *,
+        conversation_id: str,
+        request: ChatTaskInterruptRequest,
+    ) -> ChatTaskStateResponse:
+        """Owner explicitly interrupts a running task without failing
+        it. The task state moves to ``interrupted``; the lease is
+        kept so the same actor can resume by claiming again, or
+        another actor can take over after lease expiry. Conversation
+        stays open."""
+        task_id = self._require_bound_task(conversation_id)
+        task = self._remote.interrupt_task(
+            task_id,
+            RemoteTaskInterruptRequest(
+                actor_id=request.actor_name,
+                lease_token=request.lease_token,
+                note=request.note,
+            ),
+        )
+        self._update_owner_and_emit(
+            conversation_id=conversation_id,
+            actor_name=request.actor_name,
+            event_kind=EVENT_TASK_INTERRUPTED,
+            payload={
+                "taskId": task.id,
+                "status": task.status,
+                "note": request.note,
+            },
+        )
+        return self._build_response(conversation_id=conversation_id, task=task)
+
+    def add_note(
+        self,
+        *,
+        conversation_id: str,
+        request: ChatTaskNoteRequest,
+    ) -> ChatTaskNoteResponse:
+        """Add a coordination note attached to the bound task. Notes
+        are observation-only -- they don't change task state. Useful
+        for cross-checks ('I reviewed the PR and...'), questions
+        ('@bob can you confirm the migration impact?'), or
+        handoff context that doesn't fit a speech act."""
+        task_id = self._require_bound_task(conversation_id)
+        note = self._remote.add_note(
+            task_id,
+            RemoteTaskNoteRequest(
+                actor_id=request.actor_name,
+                kind=request.kind,
+                content=request.content,
+            ),
+        )
+        self._update_owner_and_emit(
+            conversation_id=conversation_id,
+            actor_name=request.actor_name,
+            event_kind=EVENT_TASK_NOTE,
+            payload={
+                "taskId": task_id,
+                "noteKind": request.kind,
+                "content": request.content,
+            },
+        )
+        detail = self._conversations.get_conversation(
+            conversation_id=conversation_id, recent=1,
+        )
+        return ChatTaskNoteResponse(
+            conversation=detail.conversation,
+            note={
+                "id": note.id,
+                "actorId": note.actor_id,
+                "kind": note.kind,
+                "content": note.content,
+                "createdAt": note.created_at.isoformat(),
+            },
+        )
 
     # -------- internals -----------------------------------------------------
 
