@@ -30,6 +30,9 @@ def init_db() -> None:
     from . import models  # noqa: F401
     from .behaviors.chat import models as _chat_models  # noqa: F401
     from .behaviors.ops import models as _ops_models  # noqa: F401
+    # Protocol v2 schema (F1). Tables are created alongside v1 and
+    # remain empty until F3 dual-write is wired in.
+    from .kernel.v2 import models as _v2_models  # noqa: F401
 
     settings.sqlite_path.parent.mkdir(parents=True, exist_ok=True)
     Base.metadata.create_all(bind=engine)
