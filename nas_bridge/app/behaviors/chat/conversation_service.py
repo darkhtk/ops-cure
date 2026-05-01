@@ -31,8 +31,8 @@ from sqlalchemy import func, or_, select, update
 
 from ...kernel.events import EventEnvelope, EventSummary, encode_event_cursor
 from ...kernel.storage import session_scope
+from ...kernel.operation_service import KernelOperationService as RemoteTaskService
 from ...schemas import RemoteTaskCreateRequest
-from ...services.remote_task_service import RemoteTaskService
 from ...transcript_service import sanitize_text
 from .conversation_schemas import (
     ConversationDetailResponse,

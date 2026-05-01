@@ -102,8 +102,24 @@ This is the long-term abstraction behind product-level `RemoteTask`.
 
 Status:
 
-- a thin schema-only draft can exist in the kernel as a future-compatible shape
-- persistence and APIs should remain product-level until multiple behaviors need the same contract
+- ✅ **promoted (PR8)**: `kernel/operations.py` now defines the
+  SQLAlchemy `OperationModel` family (5 child tables for
+  Assignment / Heartbeat / Evidence / Approval / Note). The
+  product-level `RemoteTask*` names continue to work as Python
+  aliases in `app.models` so existing call sites and tests are
+  untouched. Underlying tables and column shapes are unchanged.
+- ✅ `kernel/operation_service.py` exposes `KernelOperationService`
+  as the canonical kernel-vocabulary entry point. The implementation
+  body is still in `app/services/remote_task_service.py`; a follow-up
+  PR can move it once call sites have migrated.
+- 🔜 next promotion step: collapse the `(machine_id, thread_id)`
+  scope pair into a single `space_id` column to remove sentinels
+  like `machine_id="chat"`. Deferred because it requires a DB
+  column rename and coordinated caller changes.
+- 🔜 schema unification: the Pydantic shape sketches in
+  `kernel/operations.py` (`OperationSummary` and friends) are still
+  decoupled from the wire. Aligning them with
+  `RemoteTaskSummaryResponse` is a separate API-ergonomics PR.
 
 ### Why
 
