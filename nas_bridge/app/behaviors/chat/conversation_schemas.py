@@ -179,6 +179,13 @@ class SpeechActSubmitRequest(BaseModel):
     # to keep that consistent (cross-conversation replies could arise
     # from cross-references like "see #other-conv message-X").
     replies_to_speech_id: str | None = None
+    # F6 (v2-only): when set, the speech is whispered to these actors
+    # only. The v1 ChatMessageModel stores no privacy bit -- it always
+    # records the message. The v2 OperationEvent.private_to_actor_ids
+    # is what enforces redaction. v2 readers MUST honor this list;
+    # v1 readers (chat API GET /messages) currently do not (will be
+    # closed in F7 reader transition).
+    private_to_actors: list[str] = Field(default_factory=list)
 
     @field_validator("addressed_to")
     @classmethod

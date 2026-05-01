@@ -185,10 +185,16 @@ def _mirror_v1_message_to_v2(
     msg: "ChatMessageModel",
     conversation_row: "ChatConversationModel",
     operation_mirror: OperationMirror,
+    *,
+    private_to_actors: list[str] | None = None,
 ) -> None:
     """F4: Resolve replies_to + addressed_to_many from v1 forms and call
     OperationMirror.mirror_message. Stamps v2_event_id back on the v1
     message row so downstream consumers can join across protocols.
+
+    F6: Optional ``private_to_actors`` (v2-only field) gets passed
+    through. v1 has no equivalent column; the privacy bit lives only
+    on the v2 OperationEvent.
 
     Module-level so ChatTaskCoordinator and other services that own a
     ChatMessageModel insert can share the dual-write with the same
@@ -216,6 +222,7 @@ def _mirror_v1_message_to_v2(
         addressed_to=msg.addressed_to,
         addressed_to_many=extras,
         replies_to_v2_event_id=parent_v2,
+        private_to_actors=private_to_actors,
     )
 
 
@@ -609,7 +616,11 @@ class ChatConversationService:
             )
             db.add(message)
             db.flush()
-            _mirror_v1_message_to_v2(db, message, row, self._operation_mirror)
+            _mirror_v1_message_to_v2(
+                db, message, row, self._operation_mirror,
+                private_to_actors=list(request.private_to_actors)
+                if getattr(request, "private_to_actors", None) else None,
+            )
 
             row.last_speech_at = now
             row.speech_count = (row.speech_count or 0) + 1

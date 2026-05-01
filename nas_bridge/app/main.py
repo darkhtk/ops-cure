@@ -8,7 +8,7 @@ import asyncio
 
 from fastapi import FastAPI
 
-from .api import actors, behaviors, events, health, kernel_approvals, kernel_scratch, kernel_tasks, presence, remote_tasks, sessions, spaces, verification, workers
+from .api import actors, behaviors, events, health, kernel_approvals, kernel_scratch, kernel_tasks, presence, remote_tasks, sessions, spaces, v2_inbox, verification, workers
 from .behaviors.catalog import BehaviorCatalogService
 from .behaviors.chat import api as chat_api
 from .behaviors.remote_codex import api as remote_codex_api
@@ -314,4 +314,5 @@ app.include_router(chat_api.router)
 app.include_router(sessions.router)
 app.include_router(spaces.router)
 app.include_router(verification.router)
+app.include_router(v2_inbox.router)
 app.include_router(workers.router)

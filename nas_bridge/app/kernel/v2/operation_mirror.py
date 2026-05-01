@@ -113,6 +113,33 @@ class OperationMirror:
         for handle in addressed_handles:
             row = self._actors.ensure_actor_by_handle(db, handle=handle)
             addressed_actor_ids.append(row.id)
+        # F5: Anyone addressed in an event becomes a participant on the
+        # operation (role=addressed). Without this, an actor first
+        # addressed mid-conversation never shows up in the Inbox.
+        existing_participants = self._repo.list_participants(
+            db, operation_id=v2_operation_id,
+        )
+        existing_actor_ids = {p.actor_id for p in existing_participants}
+        for actor_id in addressed_actor_ids:
+            if actor_id not in existing_actor_ids:
+                self._repo.add_participant(
+                    db,
+                    operation_id=v2_operation_id,
+                    actor_id=actor_id,
+                    role="addressed",
+                )
+                existing_actor_ids.add(actor_id)
+        # The speaker themselves should also be a participant. They
+        # might have been the opener / owner / addressed-from-open
+        # already, but for free-form messages and late joiners this
+        # ensures they show up too.
+        if actor.id not in existing_actor_ids:
+            self._repo.add_participant(
+                db,
+                operation_id=v2_operation_id,
+                actor_id=actor.id,
+                role="speaker",
+            )
         private_actor_ids: list[str] | None = None
         if private_to_actors:
             private_actor_ids = []
