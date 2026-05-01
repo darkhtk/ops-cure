@@ -97,6 +97,7 @@ class ChatTaskCoordinator:
         request: ChatTaskClaimRequest,
     ) -> ChatTaskStateResponse:
         task_id = self._require_bound_task(conversation_id)
+        self._conversations.metrics.record_task_claimed()
         task = self._remote.claim_task(
             task_id,
             RemoteTaskClaimRequest(
@@ -127,6 +128,7 @@ class ChatTaskCoordinator:
         request: ChatTaskHeartbeatRequest,
     ) -> ChatTaskStateResponse:
         task_id = self._require_bound_task(conversation_id)
+        self._conversations.metrics.record_task_heartbeat()
         task = self._remote.heartbeat_task(
             task_id,
             RemoteTaskHeartbeatRequest(
@@ -167,6 +169,7 @@ class ChatTaskCoordinator:
         request: ChatTaskEvidenceRequest,
     ) -> ChatTaskStateResponse:
         task_id = self._require_bound_task(conversation_id)
+        self._conversations.metrics.record_task_evidence()
         task = self._remote.add_evidence(
             task_id,
             RemoteTaskEvidenceRequest(
@@ -196,6 +199,7 @@ class ChatTaskCoordinator:
         request: ChatTaskCompleteRequest,
     ) -> ChatTaskStateResponse:
         task_id = self._require_bound_task(conversation_id)
+        self._conversations.metrics.record_task_completed()
         task = self._remote.complete_task(
             task_id,
             RemoteTaskCompleteRequest(
@@ -231,6 +235,7 @@ class ChatTaskCoordinator:
         request: ChatTaskFailRequest,
     ) -> ChatTaskStateResponse:
         task_id = self._require_bound_task(conversation_id)
+        self._conversations.metrics.record_task_failed()
         task = self._remote.fail_task(
             task_id,
             RemoteTaskFailRequest(

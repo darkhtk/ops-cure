@@ -248,3 +248,17 @@ class IdleSweepResponse(BaseModel):
     thread_id: str
     idle_threshold_seconds: int
     flagged: list[ConversationSummary] = Field(default_factory=list)
+
+
+class ChatRoomHealthResponse(BaseModel):
+    """Per-thread health snapshot. ``open_conversations`` and
+    ``idle_candidates`` are derived live from the DB; ``metrics`` is
+    the global in-memory counter snapshot (covers all threads on
+    this bridge instance, not just the requested one)."""
+
+    thread_id: str
+    open_conversations: int
+    idle_candidates: int
+    expected_speakers: list[str] = Field(default_factory=list)
+    bound_active_tasks: int
+    metrics: dict[str, Any] = Field(default_factory=dict)

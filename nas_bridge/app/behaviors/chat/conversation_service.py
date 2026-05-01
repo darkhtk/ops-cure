@@ -47,6 +47,7 @@ from .conversation_schemas import (
     SpeechActSummary,
     is_resolution_allowed,
 )
+from .metrics import ChatRoomMetrics
 from .models import (
     CONVERSATION_KIND_GENERAL,
     CONVERSATION_KIND_TASK,
@@ -158,9 +159,15 @@ class ChatConversationService:
         *,
         subscription_broker: Any | None = None,
         remote_task_service: RemoteTaskService | None = None,
+        metrics: ChatRoomMetrics | None = None,
     ) -> None:
         self._broker = subscription_broker
         self._remote_task_service = remote_task_service
+        self._metrics = metrics or ChatRoomMetrics()
+
+    @property
+    def metrics(self) -> ChatRoomMetrics:
+        return self._metrics
 
     # -------- thread / general bootstrap ------------------------------------
 
@@ -297,6 +304,7 @@ class ChatConversationService:
             envelope = self._envelope_for(thread_row.id, event_message)
             summary = self._summary(row)
 
+        self._metrics.record_conversation_opened()
         self._publish(envelope)
         return summary
 
@@ -384,6 +392,7 @@ class ChatConversationService:
             envelope = self._envelope_for(row.thread_id, event_message)
             result = self._summary(row)
 
+        self._metrics.record_conversation_closed(resolution=resolution)
         self._publish(envelope)
         return result
 
@@ -444,6 +453,7 @@ class ChatConversationService:
             envelope = self._envelope_for(row.thread_id, message)
             summary = self._speech_summary(message)
 
+        self._metrics.record_speech(kind=request.kind)
         self._publish(envelope)
         return summary
 
@@ -513,6 +523,7 @@ class ChatConversationService:
             envelope = self._envelope_for(row.thread_id, event_message)
             result = self._summary(row)
 
+        self._metrics.record_handoff()
         self._publish(envelope)
         return result
 
@@ -616,6 +627,7 @@ class ChatConversationService:
                     if row.idle_warning_emitted_at is None:
                         row.idle_warning_emitted_at = now
                     row.idle_warning_count = next_tier
+                    self._metrics.record_idle_warning(tier=next_tier)
 
                 row.updated_at = now
 
@@ -650,6 +662,73 @@ class ChatConversationService:
                     flagged.append(self._summary(refreshed))
 
         return flagged
+
+    # -------- health --------------------------------------------------------
+
+    def get_room_health(
+        self,
+        *,
+        discord_thread_id: str,
+        idle_threshold_seconds: int = 30 * 60,
+    ) -> dict[str, Any]:
+        """Live per-thread health snapshot used by the operator-facing
+        ``GET /api/chat/threads/{tid}/health`` endpoint.
+
+        Returns counts derived from the DB at call time plus a
+        snapshot of the global in-memory metrics. ``idle_candidates``
+        is the number of open non-general conversations whose last
+        activity is past the ``idle_threshold_seconds`` mark and have
+        not yet been warned at that tier."""
+        now = _utcnow()
+        cutoff = max(0, int(idle_threshold_seconds))
+
+        with session_scope() as db:
+            thread_row = self._get_thread_row_by_discord(db, discord_thread_id)
+            if thread_row is None:
+                raise ChatThreadNotFoundError(discord_thread_id)
+
+            open_rows = list(
+                db.scalars(
+                    select(ChatConversationModel)
+                    .where(ChatConversationModel.thread_id == thread_row.id)
+                    .where(ChatConversationModel.state == CONVERSATION_STATE_OPEN)
+                )
+            )
+            non_general = [row for row in open_rows if not row.is_general]
+            expected_speakers = sorted({
+                row.expected_speaker
+                for row in non_general
+                if row.expected_speaker
+            })
+            idle_candidates = 0
+            for row in non_general:
+                last = row.last_speech_at or row.created_at
+                if last is None:
+                    continue
+                last_aware = (
+                    last if last.tzinfo is not None
+                    else last.replace(tzinfo=timezone.utc)
+                )
+                age = (now - last_aware).total_seconds()
+                # Already-warned conversations don't count as candidates
+                # for the SAME tier; an idle_candidate is one whose age
+                # exceeds the threshold AND idle_warning_count is below
+                # the corresponding tier (level=1 here).
+                if age >= cutoff and (row.idle_warning_count or 0) < 1:
+                    idle_candidates += 1
+            bound_active = sum(
+                1 for row in non_general
+                if row.kind == "task" and row.bound_task_id is not None
+            )
+
+        return {
+            "thread_id": discord_thread_id,
+            "open_conversations": len(open_rows),
+            "idle_candidates": idle_candidates,
+            "expected_speakers": expected_speakers,
+            "bound_active_tasks": bound_active,
+            "metrics": self._metrics.snapshot(),
+        }
 
     # -------- listing / detail ----------------------------------------------
 

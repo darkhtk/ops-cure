@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from ...auth import require_bridge_token
 from .conversation_schemas import (
+    ChatRoomHealthResponse,
     ChatTaskClaimRequest,
     ChatTaskCompleteRequest,
     ChatTaskEvidenceRequest,
@@ -253,6 +254,26 @@ async def handoff_conversation(
         raise HTTPException(status_code=404, detail="Conversation not found.")
     except ChatConversationStateError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
+
+
+@router.get(
+    "/threads/{thread_id}/health",
+    response_model=ChatRoomHealthResponse,
+)
+async def get_room_health(
+    thread_id: str,
+    request: Request,
+    idle_threshold_seconds: int = Query(default=30 * 60, ge=60, le=86_400),
+) -> ChatRoomHealthResponse:
+    services = request.app.state.services
+    try:
+        snapshot = services.chat_conversation_service.get_room_health(
+            discord_thread_id=thread_id,
+            idle_threshold_seconds=idle_threshold_seconds,
+        )
+    except ChatThreadNotFoundError:
+        raise HTTPException(status_code=404, detail="Chat thread not found.")
+    return ChatRoomHealthResponse(**snapshot)
 
 
 @router.post(
