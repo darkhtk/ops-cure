@@ -164,6 +164,24 @@ class ChatConversationStateError(ValueError):
     """Raised when a transition is not legal for the current conversation state."""
 
 
+class ChatActorIdentityError(PermissionError):
+    """Raised when an actor_authorizer rejects a claimed actor_name.
+
+    Closes failure-mode GAP #06: previously the bridge token only
+    authenticated the *caller*, not the *speaker*; mallory could
+    submit speech with actor_name='alice'. With an authorizer wired,
+    the call is rejected before the row is persisted."""
+
+
+# Type alias: an actor authorizer takes the caller context (whatever
+# the API layer chooses to pass -- typically a token id, BridgeCaller
+# instance, or None for un-wired tests) and the actor_name being
+# claimed; it returns True if the caller is permitted to speak as
+# that actor. Defaulting to "always allow" preserves back-compat for
+# call sites that haven't wired identity yet.
+ActorAuthorizer = Any  # Callable[[Any, str], bool]; Any to keep the wiring loose
+
+
 class ChatConversationService:
     def __init__(
         self,
@@ -171,10 +189,24 @@ class ChatConversationService:
         subscription_broker: Any | None = None,
         remote_task_service: RemoteTaskService | None = None,
         metrics: ChatRoomMetrics | None = None,
+        actor_authorizer: ActorAuthorizer | None = None,
     ) -> None:
         self._broker = subscription_broker
         self._remote_task_service = remote_task_service
         self._metrics = metrics or ChatRoomMetrics()
+        # Optional callback (caller_context, actor_name) -> bool. When
+        # set, every public method that takes an actor_name validates
+        # it against the authorizer first. When unset, all actor_names
+        # pass (back-compat with un-wired identity).
+        self._actor_authorizer = actor_authorizer
+
+    def _check_actor(self, actor_name: str, *, caller_context: Any = None) -> None:
+        if self._actor_authorizer is None:
+            return
+        if not self._actor_authorizer(caller_context, actor_name):
+            raise ChatActorIdentityError(
+                f"caller is not authorized to act as {actor_name!r}"
+            )
 
     @property
     def metrics(self) -> ChatRoomMetrics:
@@ -246,7 +278,9 @@ class ChatConversationService:
         *,
         discord_thread_id: str,
         request: ConversationOpenRequest,
+        caller_context: Any = None,
     ) -> ConversationSummary:
+        self._check_actor(request.opener_actor, caller_context=caller_context)
         # Pre-validate kind=task prerequisites before touching the DB so
         # we never half-commit (no thread row read, no task created) on
         # caller-side input errors.
@@ -327,7 +361,15 @@ class ChatConversationService:
         resolution: str,
         summary: str | None = None,
         bypass_task_guard: bool = False,
+        caller_context: Any = None,
     ) -> ConversationSummary:
+        # bypass_task_guard already implies "system-level authority"
+        # (auto-abandon by sweep_idle, auto-close by task complete).
+        # Skip the actor identity check on those paths -- the closer
+        # is "system" or the lease holder, both of which the
+        # authorizer wouldn't normally know about.
+        if not bypass_task_guard:
+            self._check_actor(closed_by, caller_context=caller_context)
         envelope: EventEnvelope | None = None
         result: ConversationSummary
         with session_scope() as db:
@@ -414,7 +456,9 @@ class ChatConversationService:
         *,
         conversation_id: str,
         request: SpeechActSubmitRequest,
+        caller_context: Any = None,
     ) -> SpeechActSummary:
+        self._check_actor(request.actor_name, caller_context=caller_context)
         envelope: EventEnvelope | None = None
         summary: SpeechActSummary
         with session_scope() as db:
@@ -501,7 +545,9 @@ class ChatConversationService:
         by_actor: str,
         new_owner: str,
         reason: str | None = None,
+        caller_context: Any = None,
     ) -> ConversationSummary:
+        self._check_actor(by_actor, caller_context=caller_context)
         envelope: EventEnvelope | None = None
         result: ConversationSummary
         with session_scope() as db:

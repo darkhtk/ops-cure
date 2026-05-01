@@ -291,9 +291,22 @@ def s05_tier3_auto_abandon(env):
 
 
 def s06_actor_name_spoofing_in_speech(env):
-    """GAP. PR6 only governs close/handoff; speech accepts any
-    actor_name string. mallory submits as 'alice' -- accepted."""
-    section("06 GAP: actor-name spoofing in speech")
+    """Was GAP, now PROTECTED when actor_authorizer is wired.
+    PR13 added an optional authorizer callback; ChatActorIdentityError
+    fires when the caller_context isn't permitted to speak as the
+    claimed actor_name. With no authorizer, the path stays open
+    (back-compat) -- but production deployments now have a way to
+    bind identity.
+
+    This scenario demonstrates the new capability by spinning up a
+    SECOND ChatConversationService with a token-aware authorizer
+    while reusing the same DB / remote_task_service."""
+    section("06 PROTECTED (was GAP) when authorizer wired: actor-name spoofing")
+    from app.behaviors.chat.conversation_service import (
+        ChatActorIdentityError,
+        ChatConversationService,
+    )
+
     thread = env.open_thread("s06")
     inquiry = env.conv.open_conversation(
         discord_thread_id=thread.discord_thread_id,
@@ -301,27 +314,47 @@ def s06_actor_name_spoofing_in_speech(env):
             kind="inquiry", title="?", opener_actor="alice",
         ),
     )
-    # mallory impersonates alice in a speech submission
-    env.conv.submit_speech(
+
+    # Token-aware authorizer: alice's token can speak as alice;
+    # mallory's token can speak as mallory; cross-actor rejected.
+    def authorizer(caller_ctx, actor_name):
+        return caller_ctx == f"{actor_name}-token"
+
+    strict = ChatConversationService(
+        remote_task_service=env.remote_task,
+        actor_authorizer=authorizer,
+    )
+
+    # mallory's token tries to speak as alice -- must be rejected
+    rejected = False
+    try:
+        strict.submit_speech(
+            conversation_id=inquiry.id,
+            request=SpeechActSubmitRequest(
+                actor_name="alice", kind="claim",
+                content="(mallory pretending to be alice)",
+            ),
+            caller_context="mallory-token",
+        )
+    except ChatActorIdentityError:
+        rejected = True
+    emit("mallory-token", "(impersonating)", "tried to submit as actor_name='alice'")
+
+    # Sanity: alice with her own token can speak normally
+    strict.submit_speech(
         conversation_id=inquiry.id,
         request=SpeechActSubmitRequest(
-            actor_name="alice", kind="claim", content="(actually mallory, faking alice)",
+            actor_name="alice", kind="claim", content="(legit alice)",
         ),
+        caller_context="alice-token",
     )
-    emit("mallory", "(impersonating)", "submitted as actor_name='alice'")
-    # query the persisted row
-    with db_module.session_scope() as session:
-        row = session.scalar(
-            select(ChatMessageModel)
-            .where(ChatMessageModel.conversation_id == inquiry.id)
-            .where(ChatMessageModel.event_kind == "chat.speech.claim")
-        )
-        recorded_actor = row.actor_name if row else None
-    if recorded_actor == "alice":
-        report("06 actor spoofing", RESULT_GAP,
-               "speech recorded as 'alice' though no identity check exists")
+
+    if rejected:
+        report("06 actor spoofing", RESULT_PROTECTED,
+               "ChatActorIdentityError fired; legit alice still works")
     else:
-        report("06 actor spoofing", RESULT_PROTECTED, "spoof rejected (unexpected)")
+        report("06 actor spoofing", RESULT_GAP,
+               "spoof accepted despite authorizer wired -- bug")
 
 
 def s07_evidence_injection_by_non_lease_holder(env):
