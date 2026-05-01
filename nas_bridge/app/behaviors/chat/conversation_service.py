@@ -93,13 +93,9 @@ EVENT_CONVERSATION_HANDOFF = "chat.conversation.handoff"
 EVENT_CONVERSATION_OVER_SPEECH = "chat.conversation.over_speech"
 
 
-# Threshold at which a non-expected_speaker's chatter trips a
-# convergence-pressure warning. Closes failure-mode GAP #10:
-# previously idle escalation only fired on silence; a conversation
-# where AIs ping-pong without resolving never escalated. Now an
-# explicit ``chat.conversation.over_speech`` event fires the first
-# time ``unaddressed_speech_count`` reaches the threshold so an
-# operator (or a future auto-handler) sees the noise.
+# Default threshold at which a non-expected_speaker's chatter trips a
+# convergence-pressure warning. Now overridable via ChatPolicyConfig
+# (PR19); the constant remains as the global default for back-compat.
 OVER_SPEECH_THRESHOLD = 5
 
 
@@ -111,6 +107,35 @@ OVER_SPEECH_THRESHOLD = 5
 TIER_1_MULTIPLIER = 1
 TIER_2_MULTIPLIER = 4
 TIER_3_MULTIPLIER = 48
+
+
+class ChatPolicyConfig:
+    """Configurable thresholds for idle escalation + over-speech
+    convergence pressure. Default values preserve the
+    PR7 / PR-hardening shipping behavior (back-compat). Pass a custom
+    instance to ChatConversationService when a deployment / room
+    needs different cadence (e.g. incident rooms with 5-min tier-1).
+    """
+
+    def __init__(
+        self,
+        *,
+        tier_1_multiplier: int = TIER_1_MULTIPLIER,
+        tier_2_multiplier: int = TIER_2_MULTIPLIER,
+        tier_3_multiplier: int = TIER_3_MULTIPLIER,
+        over_speech_threshold: int = 5,
+    ) -> None:
+        if not (tier_1_multiplier <= tier_2_multiplier <= tier_3_multiplier):
+            raise ValueError(
+                f"tier multipliers must be monotonically non-decreasing; got "
+                f"{tier_1_multiplier} / {tier_2_multiplier} / {tier_3_multiplier}",
+            )
+        if over_speech_threshold < 1:
+            raise ValueError("over_speech_threshold must be >= 1")
+        self.tier_1_multiplier = tier_1_multiplier
+        self.tier_2_multiplier = tier_2_multiplier
+        self.tier_3_multiplier = tier_3_multiplier
+        self.over_speech_threshold = over_speech_threshold
 
 
 def _utcnow() -> datetime:
@@ -190,6 +215,7 @@ class ChatConversationService:
         remote_task_service: RemoteTaskService | None = None,
         metrics: ChatRoomMetrics | None = None,
         actor_authorizer: ActorAuthorizer | None = None,
+        policy: "ChatPolicyConfig | None" = None,
     ) -> None:
         self._broker = subscription_broker
         self._remote_task_service = remote_task_service
@@ -199,6 +225,7 @@ class ChatConversationService:
         # it against the authorizer first. When unset, all actor_names
         # pass (back-compat with un-wired identity).
         self._actor_authorizer = actor_authorizer
+        self._policy = policy or ChatPolicyConfig()
 
     def _check_actor(self, actor_name: str, *, caller_context: Any = None) -> None:
         if self._actor_authorizer is None:
@@ -505,7 +532,7 @@ class ChatConversationService:
                 # someone other than the expected speaker chimed in
                 # without addressing anyone -- bump the noise gauge.
                 row.unaddressed_speech_count = (row.unaddressed_speech_count or 0) + 1
-                if row.unaddressed_speech_count == OVER_SPEECH_THRESHOLD:
+                if row.unaddressed_speech_count == self._policy.over_speech_threshold:
                     # Convergence-pressure trip: emit a one-shot
                     # system event so an observer (or auto-handler)
                     # sees the noise. Closes failure-mode GAP #10.
@@ -513,7 +540,7 @@ class ChatConversationService:
                         "conversationId": row.id,
                         "expectedSpeaker": row.expected_speaker,
                         "unaddressedSpeechCount": row.unaddressed_speech_count,
-                        "threshold": OVER_SPEECH_THRESHOLD,
+                        "threshold": self._policy.over_speech_threshold,
                     }
                     over_msg = ChatMessageModel(
                         thread_id=row.thread_id,
@@ -641,9 +668,9 @@ class ChatConversationService:
         now = _utcnow()
 
         tier_thresholds = (
-            TIER_1_MULTIPLIER * threshold,
-            TIER_2_MULTIPLIER * threshold,
-            TIER_3_MULTIPLIER * threshold,
+            self._policy.tier_1_multiplier * threshold,
+            self._policy.tier_2_multiplier * threshold,
+            self._policy.tier_3_multiplier * threshold,
         )
 
         with session_scope() as db:
