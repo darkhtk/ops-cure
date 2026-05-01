@@ -24,7 +24,7 @@ Design notes:
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timezone  # noqa: F401  -- used in sweep timing math
 from typing import Any
 
 from sqlalchemy import select, update
@@ -82,6 +82,8 @@ GENERAL_INTENT = "Casual chat and unstructured updates."
 EVENT_CONVERSATION_OPENED = "chat.conversation.opened"
 EVENT_CONVERSATION_CLOSED = "chat.conversation.closed"
 EVENT_CONVERSATION_ADDRESSED = "chat.conversation.addressed"
+EVENT_CONVERSATION_IDLE_WARNING = "chat.conversation.idle_warning"
+EVENT_CONVERSATION_HANDOFF = "chat.conversation.handoff"
 
 
 def _utcnow() -> datetime:
@@ -351,6 +353,138 @@ class ChatConversationService:
         self._publish(envelope)
         return summary
 
+    # -------- handoff -------------------------------------------------------
+
+    def transfer_owner(
+        self,
+        *,
+        conversation_id: str,
+        by_actor: str,
+        new_owner: str,
+        reason: str | None = None,
+    ) -> ConversationSummary:
+        envelope: EventEnvelope | None = None
+        result: ConversationSummary
+        with session_scope() as db:
+            row = db.get(ChatConversationModel, conversation_id)
+            if row is None:
+                raise ChatConversationNotFoundError(conversation_id)
+            if row.is_general:
+                raise ChatConversationStateError(
+                    "general conversation has no owner to transfer",
+                )
+            if row.state == CONVERSATION_STATE_CLOSED:
+                raise ChatConversationStateError("conversation is already closed")
+            if row.bound_task_id:
+                raise ChatConversationStateError(
+                    "task-bound conversation owner is governed by the lease; "
+                    "release/claim the task instead",
+                )
+
+            previous_owner = row.owner_actor
+            row.owner_actor = new_owner
+            row.expected_speaker = new_owner
+            now = _utcnow()
+            row.updated_at = now
+
+            payload = {
+                "conversationId": row.id,
+                "previousOwner": previous_owner,
+                "newOwner": new_owner,
+                "byActor": by_actor,
+                "reason": reason,
+            }
+            event_message = ChatMessageModel(
+                thread_id=row.thread_id,
+                conversation_id=row.id,
+                actor_name=by_actor,
+                event_kind=EVENT_CONVERSATION_HANDOFF,
+                addressed_to=new_owner,
+                content=json.dumps(payload, ensure_ascii=False),
+            )
+            db.add(event_message)
+            db.flush()
+            envelope = self._envelope_for(row.thread_id, event_message)
+            result = self._summary(row)
+
+        self._publish(envelope)
+        return result
+
+    # -------- idle sweep ----------------------------------------------------
+
+    def sweep_idle_conversations(
+        self,
+        *,
+        discord_thread_id: str,
+        idle_threshold_seconds: int,
+    ) -> list[ConversationSummary]:
+        """Find ``open`` non-general conversations whose ``last_speech_at`` (or
+        ``created_at`` when nothing was said yet) is older than
+        ``idle_threshold_seconds`` and have not yet emitted an idle
+        warning. Stamp each with ``idle_warning_emitted_at`` and emit
+        one ``chat.conversation.idle_warning`` event per match."""
+
+        threshold = max(0, int(idle_threshold_seconds))
+        flagged: list[ConversationSummary] = []
+        envelopes: list[EventEnvelope] = []
+        now = _utcnow()
+        cutoff_seconds = threshold
+
+        with session_scope() as db:
+            thread_row = self._get_thread_row_by_discord(db, discord_thread_id)
+            if thread_row is None:
+                raise ChatThreadNotFoundError(discord_thread_id)
+
+            stmt = (
+                select(ChatConversationModel)
+                .where(ChatConversationModel.thread_id == thread_row.id)
+                .where(ChatConversationModel.state == CONVERSATION_STATE_OPEN)
+                .where(ChatConversationModel.is_general.is_(False))
+                .where(ChatConversationModel.idle_warning_emitted_at.is_(None))
+            )
+            for row in db.scalars(stmt):
+                last_active = row.last_speech_at or row.created_at
+                if last_active is None:
+                    continue
+                last_active_aware = (
+                    last_active
+                    if last_active.tzinfo is not None
+                    else last_active.replace(tzinfo=timezone.utc)
+                )
+                age_seconds = (now - last_active_aware).total_seconds()
+                if age_seconds < cutoff_seconds:
+                    continue
+
+                row.idle_warning_emitted_at = now
+                row.updated_at = now
+
+                payload = {
+                    "conversationId": row.id,
+                    "kind": row.kind,
+                    "title": row.title,
+                    "expectedSpeaker": row.expected_speaker,
+                    "ownerActor": row.owner_actor,
+                    "lastSpeechAt": last_active_aware.isoformat(),
+                    "ageSeconds": int(age_seconds),
+                    "idleThresholdSeconds": threshold,
+                }
+                event_message = ChatMessageModel(
+                    thread_id=row.thread_id,
+                    conversation_id=row.id,
+                    actor_name="system",
+                    event_kind=EVENT_CONVERSATION_IDLE_WARNING,
+                    addressed_to=row.expected_speaker,
+                    content=json.dumps(payload, ensure_ascii=False),
+                )
+                db.add(event_message)
+                db.flush()
+                envelopes.append(self._envelope_for(row.thread_id, event_message))
+                flagged.append(self._summary(row))
+
+        for envelope in envelopes:
+            self._publish(envelope)
+        return flagged
+
     # -------- listing / detail ----------------------------------------------
 
     def list_conversations(
@@ -472,6 +606,7 @@ class ChatConversationService:
             is_general=bool(row.is_general),
             last_speech_at=row.last_speech_at,
             speech_count=row.speech_count or 0,
+            idle_warning_emitted_at=row.idle_warning_emitted_at,
             created_at=row.created_at,
             closed_at=row.closed_at,
         )

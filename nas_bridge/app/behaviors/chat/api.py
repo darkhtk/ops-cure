@@ -12,9 +12,11 @@ from .conversation_schemas import (
     ChatTaskStateResponse,
     ConversationCloseRequest,
     ConversationDetailResponse,
+    ConversationHandoffRequest,
     ConversationListResponse,
     ConversationOpenRequest,
     ConversationSummary,
+    IdleSweepResponse,
     SpeechActSubmitRequest,
     SpeechActSummary,
 )
@@ -223,6 +225,56 @@ async def close_conversation(
         raise HTTPException(status_code=404, detail="Conversation not found.")
     except ChatConversationStateError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
+
+
+# ---- handoff & idle sweep --------------------------------------------------
+
+
+@router.post(
+    "/conversations/{conversation_id}/handoff",
+    response_model=ConversationSummary,
+)
+async def handoff_conversation(
+    conversation_id: str,
+    payload: ConversationHandoffRequest,
+    request: Request,
+) -> ConversationSummary:
+    services = request.app.state.services
+    try:
+        return services.chat_conversation_service.transfer_owner(
+            conversation_id=conversation_id,
+            by_actor=payload.by_actor,
+            new_owner=payload.new_owner,
+            reason=payload.reason,
+        )
+    except ChatConversationNotFoundError:
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+    except ChatConversationStateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
+@router.post(
+    "/threads/{thread_id}/sweep-idle",
+    response_model=IdleSweepResponse,
+)
+async def sweep_idle_conversations(
+    thread_id: str,
+    request: Request,
+    idle_threshold_seconds: int = Query(default=1800, ge=0, le=86_400),
+) -> IdleSweepResponse:
+    services = request.app.state.services
+    try:
+        flagged = services.chat_conversation_service.sweep_idle_conversations(
+            discord_thread_id=thread_id,
+            idle_threshold_seconds=idle_threshold_seconds,
+        )
+    except ChatThreadNotFoundError:
+        raise HTTPException(status_code=404, detail="Chat thread not found.")
+    return IdleSweepResponse(
+        thread_id=thread_id,
+        idle_threshold_seconds=idle_threshold_seconds,
+        flagged=flagged,
+    )
 
 
 # ---- task lifecycle (kind=task only) ---------------------------------------

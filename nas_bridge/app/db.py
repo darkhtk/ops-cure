@@ -172,6 +172,15 @@ def _named_migrations(connection) -> tuple[NamedMigration, ...]:
                 ],
             ),
         ),
+        NamedMigration(
+            name="20260501_chat_conversation_idle_warning",
+            statements=missing_columns(
+                "chat_conversations",
+                [
+                    ("idle_warning_emitted_at", "DATETIME"),
+                ],
+            ),
+        ),
     )
 
 

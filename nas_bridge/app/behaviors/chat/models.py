@@ -116,6 +116,10 @@ class ChatConversationModel(Base):
         nullable=True,
     )
     speech_count: Mapped[int] = mapped_column(Integer(), default=0)
+    idle_warning_emitted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

@@ -74,6 +74,7 @@ class ConversationSummary(BaseModel):
     is_general: bool
     last_speech_at: datetime | None = None
     speech_count: int
+    idle_warning_emitted_at: datetime | None = None
     created_at: datetime
     closed_at: datetime | None = None
 
@@ -205,3 +206,26 @@ class ChatTaskStateResponse(BaseModel):
 
     conversation: ConversationSummary
     task: dict[str, Any]
+
+
+# ----- handoff & idle-sweep --------------------------------------------------
+
+
+class ConversationHandoffRequest(BaseModel):
+    by_actor: str = Field(min_length=1)
+    new_owner: str = Field(min_length=1)
+    reason: str | None = None
+
+    @field_validator("by_actor", "new_owner", "reason")
+    @classmethod
+    def _strip_handoff(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        text = value.strip()
+        return text or None
+
+
+class IdleSweepResponse(BaseModel):
+    thread_id: str
+    idle_threshold_seconds: int
+    flagged: list[ConversationSummary] = Field(default_factory=list)
