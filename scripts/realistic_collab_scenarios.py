@@ -248,11 +248,12 @@ class Actor:
         sum_str = f'  "{summary}"' if summary else ""
         emit(self.name, "task.heartbeat", f"phase={phase}{bit_str}{sum_str}", short(conv_id))
 
-    def evidence(self, conv_id, *, kind, summary, payload=None):
+    def evidence(self, conv_id, *, lease_token, kind, summary, payload=None):
         self.coord.add_evidence(
             conversation_id=conv_id,
             request=ChatTaskEvidenceRequest(
-                actor_name=self.name, kind=kind, summary=summary, payload=payload or {},
+                actor_name=self.name, lease_token=lease_token,
+                kind=kind, summary=summary, payload=payload or {},
             ),
         )
         emit(self.name, "task.evidence", f'{kind}: "{summary}"', short(conv_id))
@@ -373,13 +374,13 @@ def scenario_01_prod_bug_to_hotfix(env, _t=None):
     lease = claude.claim(fix.id, lease_seconds=300)
     claude.heartbeat(fix.id, lease_token=lease, phase="executing",
                      summary="cherry-picking revert", commands_run_count=1)
-    claude.evidence(fix.id, kind="command_execution",
+    claude.evidence(fix.id, lease_token=lease, kind="command_execution",
                     summary="git revert -n 1a2b3c4 -> revert-pr-245.patch (clean)",
                     payload={"exit_code": 0})
-    claude.evidence(fix.id, kind="command_execution",
+    claude.evidence(fix.id, lease_token=lease, kind="command_execution",
                     summary="kubectl rollout restart deployment/auth -n prod",
                     payload={"replicas": "3/3 ready"})
-    claude.evidence(fix.id, kind="test_result",
+    claude.evidence(fix.id, lease_token=lease, kind="test_result",
                     summary="curl /api/auth/login -- 200 OK x 10/10",
                     payload={"passing": 10, "failing": 0})
     claude.complete(fix.id, lease_token=lease,
@@ -410,7 +411,7 @@ def scenario_02_build_test_deploy_pipeline(env, _t=None):
     bl = codex.claim(build.id, lease_seconds=600)
     codex.heartbeat(build.id, lease_token=bl, phase="executing",
                     summary="pip wheel + docker build", commands_run_count=2)
-    codex.evidence(build.id, kind="command_execution",
+    codex.evidence(build.id, lease_token=bl, kind="command_execution",
                    summary="docker build -t opscure:v3.4.0 . (12.4s, 412MB)",
                    payload={"image_id": "sha256:7c1a..."})
     codex.complete(build.id, lease_token=bl,
@@ -424,7 +425,7 @@ def scenario_02_build_test_deploy_pipeline(env, _t=None):
     sl = claude.claim(smoke.id, lease_seconds=600)
     claude.heartbeat(smoke.id, lease_token=sl, phase="executing",
                      summary="running pytest -m integration", tests_run_count=84)
-    claude.evidence(smoke.id, kind="test_result",
+    claude.evidence(smoke.id, lease_token=sl, kind="test_result",
                     summary="84 passed, 0 failed in 91.3s",
                     payload={"passing": 84, "failing": 0, "duration_s": 91.3})
     claude.complete(smoke.id, lease_token=sl, summary="all 84 integration tests green")
@@ -459,10 +460,10 @@ def scenario_03_code_review_with_objection(env, _t=None):
         objective="convert session_service.py to async + add pytest-asyncio markers",
     )
     rl = claude.claim(refactor.id, lease_seconds=600)
-    claude.evidence(refactor.id, kind="file_write",
+    claude.evidence(refactor.id, lease_token=rl, kind="file_write",
                     summary="rewrote session_service.py (412 -> 387 lines)",
                     payload={"files": ["nas_bridge/app/session_service.py"]})
-    claude.evidence(refactor.id, kind="test_result",
+    claude.evidence(refactor.id, lease_token=rl, kind="test_result",
                     summary="22 session tests passing",
                     payload={"passing": 22})
     claude.complete(refactor.id, lease_token=rl, summary="branch ready: refactor/session-async")
@@ -483,10 +484,10 @@ def scenario_03_code_review_with_objection(env, _t=None):
         parent_id=review.id,
     )
     fl = claude.claim(fixup.id, lease_seconds=180)
-    claude.evidence(fixup.id, kind="file_write",
+    claude.evidence(fixup.id, lease_token=fl, kind="file_write",
                     summary="added selectinload + benchmark test asserting <=2 queries",
                     payload={"files": ["nas_bridge/app/session_service.py", "tests/test_session_query_count.py"]})
-    claude.evidence(fixup.id, kind="test_result",
+    claude.evidence(fixup.id, lease_token=fl, kind="test_result",
                     summary="benchmark: 2 queries for 50 sessions (was 51)",
                     payload={"queries": 2})
     claude.complete(fixup.id, lease_token=fl, summary="N+1 eliminated, push as PR #302 v2")
@@ -522,13 +523,13 @@ def scenario_04_hot_incident_response(env, _t=None):
         objective="check pod status, recent deploys, db connections",
     )
     il = claude.claim(investigate.id, lease_seconds=300)
-    claude.evidence(investigate.id, kind="command_execution",
+    claude.evidence(investigate.id, lease_token=il, kind="command_execution",
                     summary="kubectl get pods -n prod -- 4/8 auth pods CrashLoopBackOff",
                     payload={"crashing_pods": 4})
-    claude.evidence(investigate.id, kind="file_read",
+    claude.evidence(investigate.id, lease_token=il, kind="file_read",
                     summary="auth pod logs: 'too many connections' from db -- pool exhausted",
                     payload={"file": "/var/log/auth.log"})
-    claude.evidence(investigate.id, kind="command_execution",
+    claude.evidence(investigate.id, lease_token=il, kind="command_execution",
                     summary="git log origin/main..HEAD~5 -- PR #245 increased pool_size from 20 to 200 (typo)",
                     payload={"culprit_pr": 245})
     claude.complete(investigate.id, lease_token=il,
@@ -540,10 +541,10 @@ def scenario_04_hot_incident_response(env, _t=None):
         parent_id=investigate.id,
     )
     rl = codex.claim(rollback.id, lease_seconds=300)
-    codex.evidence(rollback.id, kind="command_execution",
+    codex.evidence(rollback.id, lease_token=rl, kind="command_execution",
                    summary="git revert PR #245 + kubectl set image deployment/auth opscure:v3.3.7",
                    payload={"reverted_to": "v3.3.7"})
-    codex.evidence(rollback.id, kind="test_result",
+    codex.evidence(rollback.id, lease_token=rl, kind="test_result",
                    summary="curl /api/health -- 200 OK; pods 8/8 ready in 47s",
                    payload={"recovery_seconds": 47})
     codex.complete(rollback.id, lease_token=rl, summary="prod healthy at 14:32 UTC; total downtime ~7min")
@@ -606,7 +607,7 @@ def scenario_05_knowledge_sharing_to_docs(env, _t=None):
         parent_id=docs.id,
     )
     dl = claude.claim(docs_task.id, lease_seconds=900)
-    claude.evidence(docs_task.id, kind="file_write",
+    claude.evidence(docs_task.id, lease_token=dl, kind="file_write",
                     summary="added 'Lease Lifecycle' section (47 lines) to docs/architecture.md")
     claude.complete(docs_task.id, lease_token=dl, summary="merged as PR #314")
     alice.close(docs.id, "accepted", "docs landing PR #314, thanks claude")
@@ -644,9 +645,9 @@ def scenario_06_three_concurrent_tasks(env, _t=None):
                 addressed_to="claude-pca")
     claude.close(coord.id, "answered", "good, going parallel")
 
-    claude.evidence(task_a.id, kind="file_write", summary="created services/policy_service.py")
-    codex.evidence(task_b.id, kind="file_write", summary="api/health.py with /healthz + /readyz")
-    alice.evidence(task_c.id, kind="file_write", summary="docs/release-notes-v3.4.0.md")
+    claude.evidence(task_a.id, lease_token=al, kind="file_write", summary="created services/policy_service.py")
+    codex.evidence(task_b.id, lease_token=bl, kind="file_write", summary="api/health.py with /healthz + /readyz")
+    alice.evidence(task_c.id, lease_token=cl, kind="file_write", summary="docs/release-notes-v3.4.0.md")
 
     claude.complete(task_a.id, lease_token=al, summary="PolicyService extracted, all tests pass")
     codex.complete(task_b.id, lease_token=bl, summary="endpoints live; k8s probes wired")
@@ -674,22 +675,22 @@ def scenario_07_lease_takeover_mid_task(env, _t=None):
     cl = claude.claim(migrate.id, lease_seconds=30)
     claude.heartbeat(migrate.id, lease_token=cl, phase="executing",
                      summary="ALTER TABLE done; starting backfill", commands_run_count=1)
-    claude.evidence(migrate.id, kind="command_execution",
+    claude.evidence(migrate.id, lease_token=cl, kind="command_execution",
                     summary="ALTER TABLE users ALTER COLUMN last_active_at TYPE bigint -- 0.4s")
 
     emit("system", "(simulated)", "claude-pca host loses power mid-backfill", short(migrate.id))
     expire_lease(migrate.bound_task_id)
 
     bl = codex.claim(migrate.id, lease_seconds=600)
-    codex.evidence(migrate.id, kind="command_execution",
+    codex.evidence(migrate.id, lease_token=bl, kind="command_execution",
                    summary="resume backfill from last checkpoint (id > 142_000_000)",
                    payload={"resume_id": 142_000_000})
     codex.heartbeat(migrate.id, lease_token=bl, phase="executing",
                     summary="backfilling 38M rows", commands_run_count=1)
-    codex.evidence(migrate.id, kind="command_execution",
+    codex.evidence(migrate.id, lease_token=bl, kind="command_execution",
                    summary="UPDATE users SET last_active_at = last_active_at * 1000 WHERE id > 142M -- done",
                    payload={"rows_updated": 38_000_000})
-    codex.evidence(migrate.id, kind="test_result",
+    codex.evidence(migrate.id, lease_token=bl, kind="test_result",
                    summary="row count + max(last_active_at) sanity checks pass")
     codex.complete(migrate.id, lease_token=bl,
                    summary="migration complete; took 22min total across 2 workers")

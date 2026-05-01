@@ -174,6 +174,7 @@ def test_task_lifecycle_claim_heartbeat_evidence_complete(tmp_path, monkeypatch)
         conversation_id=opened.id,
         request=schemas.ChatTaskEvidenceRequest(
             actor_name="codex-homedev",
+            lease_token=lease_token,
             kind="file_write",
             summary="patched optimistic bubble code path",
             payload={"files": ["public/app.js"]},
@@ -328,7 +329,8 @@ def test_get_conversation_filters_speech_by_kind(tmp_path, monkeypatch):
     coordinator.add_evidence(
         conversation_id=opened.id,
         request=schemas.ChatTaskEvidenceRequest(
-            actor_name="codex-pca", kind="file_write", summary="patched",
+            actor_name="codex-pca", lease_token=lease_token,
+            kind="file_write", summary="patched",
         ),
     )
     coordinator.complete(

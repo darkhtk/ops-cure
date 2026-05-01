@@ -146,7 +146,8 @@ def test_metrics_count_lifecycle_transitions(tmp_path, monkeypatch):
     coordinator.add_evidence(
         conversation_id=task.id,
         request=schemas.ChatTaskEvidenceRequest(
-            actor_name="codex", kind="file_write", summary="...",
+            actor_name="codex", lease_token=lease,
+            kind="file_write", summary="...",
         ),
     )
     coordinator.complete(

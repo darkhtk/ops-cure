@@ -188,7 +188,8 @@ def test_pr2_task_conversation_binding(tmp_path, monkeypatch):
     env["coordinator"].add_evidence(
         conversation_id=task_conv.id,
         request=schemas.ChatTaskEvidenceRequest(
-            actor_name="codex", kind="file_write", summary="patched",
+            actor_name="codex", lease_token=lease,
+            kind="file_write", summary="patched",
         ),
     )
     completed = env["coordinator"].complete(

@@ -90,6 +90,17 @@ EVENT_CONVERSATION_CLOSED = "chat.conversation.closed"
 EVENT_CONVERSATION_ADDRESSED = "chat.conversation.addressed"
 EVENT_CONVERSATION_IDLE_WARNING = "chat.conversation.idle_warning"
 EVENT_CONVERSATION_HANDOFF = "chat.conversation.handoff"
+EVENT_CONVERSATION_OVER_SPEECH = "chat.conversation.over_speech"
+
+
+# Threshold at which a non-expected_speaker's chatter trips a
+# convergence-pressure warning. Closes failure-mode GAP #10:
+# previously idle escalation only fired on silence; a conversation
+# where AIs ping-pong without resolving never escalated. Now an
+# explicit ``chat.conversation.over_speech`` event fires the first
+# time ``unaddressed_speech_count`` reaches the threshold so an
+# operator (or a future auto-handler) sees the noise.
+OVER_SPEECH_THRESHOLD = 5
 
 
 # Idle escalation tier multipliers (over the caller-supplied tier-1
@@ -435,6 +446,7 @@ class ChatConversationService:
             # someone OTHER than the currently-expected_speaker since the
             # last address. Reset to 0 whenever expected_speaker changes
             # (a new address effectively rebases the round).
+            over_speech_envelope: EventEnvelope | None = None
             if request.addressed_to:
                 if request.addressed_to != row.expected_speaker:
                     row.unaddressed_speech_count = 0
@@ -448,6 +460,27 @@ class ChatConversationService:
                 # someone other than the expected speaker chimed in
                 # without addressing anyone -- bump the noise gauge.
                 row.unaddressed_speech_count = (row.unaddressed_speech_count or 0) + 1
+                if row.unaddressed_speech_count == OVER_SPEECH_THRESHOLD:
+                    # Convergence-pressure trip: emit a one-shot
+                    # system event so an observer (or auto-handler)
+                    # sees the noise. Closes failure-mode GAP #10.
+                    over_payload = {
+                        "conversationId": row.id,
+                        "expectedSpeaker": row.expected_speaker,
+                        "unaddressedSpeechCount": row.unaddressed_speech_count,
+                        "threshold": OVER_SPEECH_THRESHOLD,
+                    }
+                    over_msg = ChatMessageModel(
+                        thread_id=row.thread_id,
+                        conversation_id=row.id,
+                        actor_name="system",
+                        event_kind=EVENT_CONVERSATION_OVER_SPEECH,
+                        addressed_to=row.expected_speaker,
+                        content=json.dumps(over_payload, ensure_ascii=False),
+                    )
+                    db.add(over_msg)
+                    db.flush()
+                    over_speech_envelope = self._envelope_for(row.thread_id, over_msg)
             row.updated_at = now
 
             envelope = self._envelope_for(row.thread_id, message)
@@ -455,6 +488,8 @@ class ChatConversationService:
 
         self._metrics.record_speech(kind=request.kind)
         self._publish(envelope)
+        if over_speech_envelope is not None:
+            self._publish(over_speech_envelope)
         return summary
 
     # -------- handoff -------------------------------------------------------

@@ -325,9 +325,12 @@ def s06_actor_name_spoofing_in_speech(env):
 
 
 def s07_evidence_injection_by_non_lease_holder(env):
-    """GAP. ChatTaskCoordinator.add_evidence does not require a
-    lease_token. Any actor can post evidence to any task."""
-    section("07 GAP: evidence injection by non-lease-holder")
+    """Was GAP, now PROTECTED. ChatTaskEvidenceRequest now requires
+    a lease_token at the schema layer + the coordinator validates
+    actor + token against the current assignment. mallory either
+    fails pydantic (no token) or fails the runtime check (wrong
+    token); either way the row is not persisted."""
+    section("07 PROTECTED (was GAP): evidence injection by non-lease-holder")
     thread = env.open_thread("s07")
     task = env.conv.open_conversation(
         discord_thread_id=thread.discord_thread_id,
@@ -340,12 +343,13 @@ def s07_evidence_injection_by_non_lease_holder(env):
         request=ChatTaskClaimRequest(actor_name="codex-pca", lease_seconds=120),
     )
     emit("codex-pca", "task.claimed", "(holds the lease)")
-    # mallory posts evidence without claiming and without a lease
+    # mallory tries with a forged lease_token
     try:
         env.coord.add_evidence(
             conversation_id=task.id,
             request=ChatTaskEvidenceRequest(
-                actor_name="mallory", kind="file_write",
+                actor_name="mallory", lease_token="fake-forged-token",
+                kind="file_write",
                 summary="(planted) deleted /etc/passwd",
             ),
         )
@@ -357,10 +361,11 @@ def s07_evidence_injection_by_non_lease_holder(env):
 
 
 def s08_complete_without_evidence(env):
-    """GAP. Agent contract says "no working claim without evidence",
-    but RemoteTaskService.complete_task accepts a complete with zero
-    heartbeats and zero evidence rows."""
-    section("08 GAP: task complete without any heartbeat or evidence")
+    """Was GAP, now PROTECTED. ChatTaskCoordinator.complete now
+    counts ChatMessageModel rows with event_kind="chat.task.evidence"
+    and rejects with ChatTaskBindingError when zero. Use fail/interrupt
+    instead when the task didn't produce work."""
+    section("08 PROTECTED (was GAP): task complete without any heartbeat or evidence")
     thread = env.open_thread("s08")
     task = env.conv.open_conversation(
         discord_thread_id=thread.discord_thread_id,
@@ -375,33 +380,26 @@ def s08_complete_without_evidence(env):
     )
     lease = response.task["current_assignment"]["lease_token"]
     emit("codex-pca", "task.claimed", "no heartbeat, no evidence -- straight to complete")
-    completed = env.coord.complete(
-        conversation_id=task.id,
-        request=ChatTaskCompleteRequest(
-            actor_name="codex-pca", lease_token=lease, summary="trust me bro",
-        ),
-    )
-    if completed.task["status"] == "completed":
-        # Count evidence rows on this task
-        with db_module.session_scope() as session:
-            ev_count = session.scalar(
-                select(func.count())
-                .select_from(ChatMessageModel)
-                .where(ChatMessageModel.conversation_id == task.id)
-                .where(ChatMessageModel.event_kind == "chat.task.evidence")
-            ) or 0
+    try:
+        env.coord.complete(
+            conversation_id=task.id,
+            request=ChatTaskCompleteRequest(
+                actor_name="codex-pca", lease_token=lease, summary="trust me bro",
+            ),
+        )
         report("08 complete without evidence", RESULT_GAP,
-               f"task accepted complete with {ev_count} evidence rows")
-    else:
-        report("08 complete without evidence", RESULT_PROTECTED, "rejected")
+               "task complete accepted with 0 evidence rows")
+    except Exception as exc:
+        report("08 complete without evidence", RESULT_PROTECTED,
+               f"rejected: {type(exc).__name__}: {str(exc)[:60]}")
 
 
 def s09_evidence_with_arbitrary_kind(env):
-    """GAP. ChatTaskEvidenceRequest.kind has no allow-list. An AI can
-    invent a kind that won't auto-promote task status (only kinds in
-    WORK_EVIDENCE_KINDS do that), but the row still gets persisted as
-    'evidence' and counted in metrics."""
-    section("09 GAP: evidence with arbitrary/fake kind string")
+    """Was GAP, now PROTECTED. ChatTaskEvidenceRequest.kind is now an
+    EvidenceKind Literal with an explicit allow-list; pydantic
+    validates at request construction so 'trust_me_bro' fails before
+    reaching the coordinator."""
+    section("09 PROTECTED (was GAP): evidence with arbitrary/fake kind string")
     thread = env.open_thread("s09")
     task = env.conv.open_conversation(
         discord_thread_id=thread.discord_thread_id,
@@ -409,44 +407,36 @@ def s09_evidence_with_arbitrary_kind(env):
             kind="task", title="t", opener_actor="alice", objective="x",
         ),
     )
-    env.coord.claim(
+    response = env.coord.claim(
         conversation_id=task.id,
         request=ChatTaskClaimRequest(actor_name="codex-pca", lease_seconds=120),
     )
-    env.coord.add_evidence(
-        conversation_id=task.id,
-        request=ChatTaskEvidenceRequest(
-            actor_name="codex-pca",
-            kind="trust_me_bro",  # not a real evidence kind
-            summary="believe me, very impressive work",
-        ),
-    )
-    emit("codex-pca", "task.evidence", "kind='trust_me_bro' (not in WORK_EVIDENCE_KINDS)")
-    with db_module.session_scope() as session:
-        row = session.scalar(
-            select(ChatMessageModel)
-            .where(ChatMessageModel.conversation_id == task.id)
-            .where(ChatMessageModel.event_kind == "chat.task.evidence")
+    lease = response.task["current_assignment"]["lease_token"]
+    try:
+        env.coord.add_evidence(
+            conversation_id=task.id,
+            request=ChatTaskEvidenceRequest(
+                actor_name="codex-pca",
+                lease_token=lease,
+                kind="trust_me_bro",  # not in EvidenceKind Literal
+                summary="believe me, very impressive work",
+            ),
         )
-        accepted = row is not None
-    if accepted:
         report("09 fake evidence kind", RESULT_GAP,
-               "arbitrary kind string accepted; task status not promoted but row persisted")
-    else:
-        report("09 fake evidence kind", RESULT_PROTECTED, "rejected")
+               "arbitrary kind string accepted by ChatTaskEvidenceRequest")
+    except Exception as exc:
+        report("09 fake evidence kind", RESULT_PROTECTED,
+               f"rejected: {type(exc).__name__} (Literal allow-list)")
 
 
 def s10_loop_conversation_never_converges(env):
-    """GAP. Idle escalation only fires on silence; a conversation
-    where AIs ping-pong forever (each turn under tier-1) keeps
-    last_speech_at fresh and never escalates. The
-    unaddressed_speech_count gauge bumps but doesn't gate.
-
-    To keep the gauge climbing, alice (the opener) re-addresses to
-    'codex-pcb' each round so expected_speaker stays set; claude-pca
-    chimes in unaddressed -- that's exactly the off-turn-spam shape
-    the gauge is supposed to flag."""
-    section("10 GAP: loop conversation that never converges (idle won't fire)")
+    """Was GAP, now PROTECTED. submit_speech now emits a
+    chat.conversation.over_speech event the first time
+    unaddressed_speech_count crosses OVER_SPEECH_THRESHOLD (5),
+    giving operators a convergence-pressure signal independent of
+    idle/silence. The conversation stays open -- this is a soft
+    warning, not a hard close."""
+    section("10 PROTECTED (was GAP): loop convergence pressure -> over_speech event")
     thread = env.open_thread("s10")
     inquiry = env.conv.open_conversation(
         discord_thread_id=thread.discord_thread_id,
@@ -455,8 +445,9 @@ def s10_loop_conversation_never_converges(env):
             addressed_to="codex-pcb",
         ),
     )
-    # 6 unaddressed off-turn speeches from claude-pca while bob is
-    # supposedly the expected speaker. Gauge should climb to 6.
+    # 6 unaddressed off-turn speeches from claude-pca while codex-pcb
+    # is the expected speaker. Gauge should hit OVER_SPEECH_THRESHOLD=5
+    # on the 5th, emitting an over_speech event.
     for i in range(6):
         env.conv.submit_speech(
             conversation_id=inquiry.id,
@@ -466,21 +457,26 @@ def s10_loop_conversation_never_converges(env):
             ),
         )
     emit("claude-pca", "speech.claim x6", "off-turn chatter; codex-pcb is expected speaker")
-    flagged = env.conv.sweep_idle_conversations(
-        discord_thread_id=thread.discord_thread_id,
-        idle_threshold_seconds=30 * 60,
-    )
+    # Check for the new over_speech event
+    with db_module.session_scope() as session:
+        over_count = session.scalar(
+            select(func.count())
+            .select_from(ChatMessageModel)
+            .where(ChatMessageModel.conversation_id == inquiry.id)
+            .where(ChatMessageModel.event_kind == "chat.conversation.over_speech")
+        ) or 0
     detail = env.conv.get_conversation(conversation_id=inquiry.id).conversation
-    # idle won't fire because last_speech_at is fresh; the only signal
-    # is unaddressed_speech_count climbing.
-    if not flagged and detail.state == "open":
+    if over_count >= 1:
         report(
-            "10 loop never converges", RESULT_GAP,
-            f"10 unaddressed speech rows, idle not flagged, state still open "
-            f"(unaddressed_count={detail.unaddressed_speech_count})",
+            "10 loop convergence", RESULT_PROTECTED,
+            f"over_speech event emitted (count={over_count}, "
+            f"unaddressed={detail.unaddressed_speech_count})",
         )
     else:
-        report("10 loop never converges", RESULT_PROTECTED, f"flagged: {flagged}")
+        report(
+            "10 loop convergence", RESULT_GAP,
+            f"no over_speech event despite {detail.unaddressed_speech_count} unaddressed",
+        )
 
 
 def _all_conversations() -> list[ChatConversationModel]:
@@ -547,26 +543,19 @@ def main() -> int:
             print(f"    [XX] {name:<30} {msg}")
 
     print()
-    print("  hardening priorities (descending):")
-    print("    1. evidence/heartbeat lease check (gap #07) -- evidence path")
-    print("       is currently un-gated; any actor can plant evidence on any")
-    print("       task. Fix: require lease_token on add_evidence the way")
-    print("       heartbeat/complete already do.")
-    print("    2. actor identity binding (gap #06) -- the bridge token")
-    print("       authenticates the *caller* but not the *speaker*. Either")
-    print("       map bridge tokens to permitted actor_names or require a")
-    print("       per-actor signing key.")
-    print("    3. complete-without-evidence policy (gap #08) -- the agent")
-    print("       contract says \"no progress claim without evidence\" but the")
-    print("       system never checks. Fix: reject complete_task when zero")
-    print("       evidence rows exist (or warn + tag the row).")
-    print("    4. evidence kind allow-list (gap #09) -- enum the kind set")
-    print("       so 'trust_me_bro' fails at the schema layer, not silently")
-    print("       persists.")
-    print("    5. loop / convergence pressure (gap #10) -- idle escalation")
-    print("       only catches silence; need a separate \"too much chatter")
-    print("       no decision\" tier (e.g. >=N unaddressed speech without a")
-    print("       close emits a different escalation kind).")
+    print("  hardening status:")
+    print("    [DONE] gap #07 evidence injection   -- ChatTaskEvidenceRequest now")
+    print("           requires lease_token, coordinator validates actor+token")
+    print("           against the current assignment.")
+    print("    [DONE] gap #08 complete w/o evidence -- coordinator counts")
+    print("           ChatMessageModel evidence rows; zero -> ChatTaskBindingError.")
+    print("    [DONE] gap #09 fake evidence kind   -- EvidenceKind Literal")
+    print("           validates at schema layer.")
+    print("    [DONE] gap #10 loop convergence     -- chat.conversation.over_speech")
+    print("           event fires when unaddressed_speech_count crosses 5.")
+    print("    [TODO] gap #06 actor identity       -- needs a real identity")
+    print("           layer (bridge token -> permitted actor_names map, or per-")
+    print("           actor signing keys). Not addressable via PR-shaped patch.")
 
     return 0 if not crashes and not gaps else 1
 

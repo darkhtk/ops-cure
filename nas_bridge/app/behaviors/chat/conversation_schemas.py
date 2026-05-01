@@ -38,6 +38,25 @@ SpeechKind = Literal[
     "summarize",
 ]
 
+
+# Evidence kind allow-list. Closes GAP #09 from
+# scripts/failure_mode_scenarios.py: previously kind was a free-form
+# string and an AI could post evidence with kind="trust_me_bro".
+# These are the kinds the agent contract documents + the WORK kinds
+# from RemoteTaskService that auto-promote task status.
+EvidenceKind = Literal[
+    "command_execution",
+    "file_read",
+    "file_write",
+    "test_result",
+    "screenshot",
+    "approval_request",
+    "error",
+    "result",
+    "runtime_turn_started",
+    "runtime_turn_completed",
+]
+
 ConversationKind = Literal["inquiry", "proposal", "task", "general"]
 ConversationState = Literal["open", "resolving", "closed"]
 
@@ -200,7 +219,12 @@ class ChatTaskHeartbeatRequest(BaseModel):
 
 class ChatTaskEvidenceRequest(BaseModel):
     actor_name: str = Field(min_length=1)
-    kind: str = Field(min_length=1)
+    # Closes GAP #07: evidence injection without lease check. The
+    # coordinator validates lease_token + actor against the current
+    # task assignment before persisting the row.
+    lease_token: str = Field(min_length=1)
+    # Closes GAP #09: kind is now enum-validated.
+    kind: EvidenceKind
     summary: str = Field(min_length=1)
     payload: dict[str, Any] = Field(default_factory=dict)
 

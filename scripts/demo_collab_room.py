@@ -332,6 +332,7 @@ class Actor:
         self,
         conversation_id: str,
         *,
+        lease_token: str,
         kind: str,
         summary: str,
         payload: dict[str, Any] | None = None,
@@ -340,6 +341,7 @@ class Actor:
             conversation_id=conversation_id,
             request=ChatTaskEvidenceRequest(
                 actor_name=self.name,
+                lease_token=lease_token,
                 kind=kind,
                 summary=summary,
                 payload=payload or {},
@@ -512,6 +514,7 @@ def main() -> None:
     )
     pca.evidence(
         task_conv.id,
+        lease_token=lease,
         kind="file_write",
         summary="patched nas_bridge/app/auth/middleware.py to use new token store",
         payload={"files": ["nas_bridge/app/auth/middleware.py"]},
@@ -526,6 +529,7 @@ def main() -> None:
     )
     pca.evidence(
         task_conv.id,
+        lease_token=lease,
         kind="test_result",
         summary="pytest tests/test_auth.py -- 12 passed",
         payload={"passed": 12, "failed": 0},

@@ -26,7 +26,7 @@ import json
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from ...kernel.events import (
     EventEnvelope,
@@ -169,6 +169,24 @@ class ChatTaskCoordinator:
         request: ChatTaskEvidenceRequest,
     ) -> ChatTaskStateResponse:
         task_id = self._require_bound_task(conversation_id)
+        # PR-hardening: evidence path is now lease-gated. Previously
+        # ``add_evidence`` accepted any actor_name without verifying
+        # they held the lease, letting unrelated actors plant
+        # evidence on tasks they had no part in (failure-mode
+        # scenario #07).
+        current = self._remote.get_task(task_id)
+        if current.current_assignment is None:
+            raise ChatTaskBindingError(
+                f"task {task_id} has no active assignment; cannot add evidence",
+            )
+        if (
+            current.current_assignment.actor_id != request.actor_name
+            or current.current_assignment.lease_token != request.lease_token
+        ):
+            raise ChatTaskBindingError(
+                f"actor or lease_token mismatch: only the current lease holder "
+                f"({current.current_assignment.actor_id}) may add evidence",
+            )
         self._conversations.metrics.record_task_evidence()
         task = self._remote.add_evidence(
             task_id,
@@ -199,6 +217,25 @@ class ChatTaskCoordinator:
         request: ChatTaskCompleteRequest,
     ) -> ChatTaskStateResponse:
         task_id = self._require_bound_task(conversation_id)
+        # PR-hardening (failure-mode #08): the agent contract requires
+        # at least one evidence row before claiming a task complete.
+        # Previously this was documentation only; now it is enforced
+        # at the coordinator. The fail/interrupt paths intentionally
+        # bypass this check -- you can fail a task with no evidence
+        # because failure isn't a claim of work done.
+        from .models import ChatMessageModel  # local to keep top imports tidy
+        with session_scope() as db:
+            ev_count = db.scalar(
+                select(func.count())
+                .select_from(ChatMessageModel)
+                .where(ChatMessageModel.conversation_id == conversation_id)
+                .where(ChatMessageModel.event_kind == "chat.task.evidence")
+            ) or 0
+        if ev_count == 0:
+            raise ChatTaskBindingError(
+                f"task complete requires at least one evidence row; "
+                f"call add_evidence first (or fail/interrupt instead)",
+            )
         self._conversations.metrics.record_task_completed()
         task = self._remote.complete_task(
             task_id,

@@ -228,6 +228,14 @@ def test_double_complete_after_auto_close_rejected(tmp_path, monkeypatch):
         request=schemas.ChatTaskClaimRequest(actor_name="codex-pca", lease_seconds=120),
     )
     lease_token = claimed.task["current_assignment"]["lease_token"]
+    # PR-hardening: complete now requires at least one evidence row.
+    coordinator.add_evidence(
+        conversation_id=task_conv.id,
+        request=schemas.ChatTaskEvidenceRequest(
+            actor_name="codex-pca", lease_token=lease_token,
+            kind="file_write", summary="did the work",
+        ),
+    )
     coordinator.complete(
         conversation_id=task_conv.id,
         request=schemas.ChatTaskCompleteRequest(

@@ -262,11 +262,12 @@ class Actor:
             conversation=short(conv_id),
         )
 
-    def evidence(self, conv_id, *, kind, summary, payload=None):
+    def evidence(self, conv_id, *, lease_token, kind, summary, payload=None):
         self.coord.add_evidence(
             conversation_id=conv_id,
             request=ChatTaskEvidenceRequest(
-                actor_name=self.name, kind=kind, summary=summary, payload=payload or {},
+                actor_name=self.name, lease_token=lease_token,
+                kind=kind, summary=summary, payload=payload or {},
             ),
         )
         self.transcript.write(self.name, "task.evidence", f'{kind}: "{summary}"', conversation=short(conv_id))
@@ -505,12 +506,12 @@ def scenario_06_task_happy_path(env, transcript):
     lease = pca.claim(task.id, lease_seconds=180)
     pca.heartbeat(task.id, lease_token=lease, phase="executing",
                   summary="reading current code", files_read_count=4)
-    pca.evidence(task.id, kind="file_write",
+    pca.evidence(task.id, lease_token=lease, kind="file_write",
                  summary="patched nas_bridge/app/auth/middleware.py",
                  payload={"files": ["nas_bridge/app/auth/middleware.py"]})
     pca.heartbeat(task.id, lease_token=lease, phase="executing",
                   summary="running tests", tests_run_count=12)
-    pca.evidence(task.id, kind="test_result",
+    pca.evidence(task.id, lease_token=lease, kind="test_result",
                  summary="pytest -- 12 passed",
                  payload={"passed": 12, "failed": 0})
     pca.complete(task.id, lease_token=lease,
@@ -539,7 +540,7 @@ def scenario_07_task_fail(env, transcript):
     lease = pcb.claim(task.id, lease_seconds=120)
     pcb.heartbeat(task.id, lease_token=lease, phase="executing",
                   summary="starting migration")
-    pcb.evidence(task.id, kind="error",
+    pcb.evidence(task.id, lease_token=lease, kind="error",
                  summary="ALTER TABLE failed: duplicate column 'auth_token_v2'",
                  payload={"sqlcode": "42701"})
     pcb.fail(task.id, lease_token=lease, error_text="migration aborted: duplicate column")
@@ -568,7 +569,7 @@ def scenario_08_task_lease_takeover(env, transcript):
     transcript.write("system", "(simulated)", "pca walks away; lease expires", conversation=short(task.id))
     expire_lease(task.bound_task_id)
     lease_b = pcb.claim(task.id, lease_seconds=60)
-    pcb.evidence(task.id, kind="command_execution",
+    pcb.evidence(task.id, lease_token=lease_b, kind="command_execution",
                  summary="rm -rf /volume1/build/old/* (7d+)",
                  payload={"freed_bytes": 1234567890})
     pcb.complete(task.id, lease_token=lease_b, summary="reclaimed ~1.2GB")
@@ -626,7 +627,7 @@ def scenario_10_multi_conversation_isolation(env, transcript):
     # a task that proceeds normally
     task = alice.open_task(thread, "Bump pydantic to 2.6", objective="upgrade lib + tests")
     lease = pca.claim(task.id, lease_seconds=180)
-    pca.evidence(task.id, kind="file_write", summary="bumped requirements.txt")
+    pca.evidence(task.id, lease_token=lease, kind="file_write", summary="bumped requirements.txt")
     pca.complete(task.id, lease_token=lease, summary="upgrade clean")
 
     # idle the inquiry to tier-1 only (don't auto-abandon — verify isolation)
