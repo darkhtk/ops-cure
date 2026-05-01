@@ -161,6 +161,46 @@ class OperationMirror:
         )
         return ev.id
 
+    def attach_artifact(
+        self,
+        db: Session,
+        *,
+        v2_operation_id: str | None,
+        v2_event_id: str | None,
+        artifact: dict[str, object],
+    ) -> str | None:
+        """F6: Hang an OperationArtifact off a freshly-mirrored event.
+
+        ``artifact`` must carry kind/uri/sha256/mime/size_bytes; missing
+        required fields cause a no-op (mirror writes are best-effort
+        until F8 promotes v2 to authoritative).
+        """
+        if not v2_operation_id or not v2_event_id:
+            return None
+        try:
+            kind = str(artifact["kind"])
+            uri = str(artifact["uri"])
+            sha256 = str(artifact["sha256"])
+            mime = str(artifact["mime"])
+            size_bytes = int(artifact["size_bytes"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        label = artifact.get("label")
+        meta = artifact.get("metadata") if isinstance(artifact.get("metadata"), dict) else None
+        row = self._repo.insert_artifact(
+            db,
+            operation_id=v2_operation_id,
+            event_id=v2_event_id,
+            kind=kind,
+            uri=uri,
+            sha256=sha256,
+            mime=mime,
+            size_bytes=size_bytes,
+            label=str(label) if label is not None else None,
+            metadata=meta,
+        )
+        return row.id
+
     def mirror_conversation_close(
         self,
         db: Session,

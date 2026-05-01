@@ -211,6 +211,13 @@ class ChatTaskCoordinator:
                 payload=request.payload,
             ),
         )
+        # F6: pass artifact through if the caller embedded one in the
+        # evidence payload. The v2 OperationArtifact row gets pinned to
+        # this evidence event id; v1 has no artifact concept and stays
+        # narrative-only.
+        artifact_meta = None
+        if isinstance(request.payload.get("artifact"), dict):
+            artifact_meta = dict(request.payload["artifact"])
         self._update_owner_and_emit(
             conversation_id=conversation_id,
             actor_name=request.actor_name,
@@ -221,6 +228,7 @@ class ChatTaskCoordinator:
                 "evidenceKind": request.kind,
                 "summary": request.summary,
             },
+            artifact=artifact_meta,
         )
         return self._build_response(conversation_id=conversation_id, task=task)
 
@@ -492,6 +500,7 @@ class ChatTaskCoordinator:
         new_owner: str | None = None,
         new_expected_speaker: str | None = None,
         new_expected_speaker_to_none: bool = False,
+        artifact: dict[str, Any] | None = None,
     ) -> None:
         envelope: EventEnvelope | None = None
         with session_scope() as db:
@@ -519,7 +528,16 @@ class ChatTaskCoordinator:
             db.add(event_message)
             db.flush()
             # F4 dual-write: mirror task lifecycle event into v2.
-            _mirror_v1_message_to_v2(db, event_message, row, _OperationMirror())
+            mirror = _OperationMirror()
+            _mirror_v1_message_to_v2(db, event_message, row, mirror)
+            # F6 dual-write: artifact tied to this event (evidence path).
+            if artifact:
+                mirror.attach_artifact(
+                    db,
+                    v2_operation_id=row.v2_operation_id,
+                    v2_event_id=event_message.v2_event_id,
+                    artifact=artifact,
+                )
             envelope = make_message_envelope(
                 space_id=row.thread_id,
                 message=event_message,
