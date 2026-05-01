@@ -31,6 +31,23 @@ from .models import (  # noqa: F401
 from .repository import V2Repository  # noqa: F401
 from .actor_service import ActorService, DEFAULT_OPERATOR_HANDLE  # noqa: F401
 from .operation_mirror import OperationMirror  # noqa: F401
+from .state_machine import (  # noqa: F401
+    OperationStateMachine,
+    StateMachineError,
+    TransitionDecision,
+    KIND_GENERAL,
+    KIND_INQUIRY,
+    KIND_PROPOSAL,
+    KIND_TASK,
+    STATE_OPEN,
+    STATE_CLAIMED,
+    STATE_EXECUTING,
+    STATE_BLOCKED_APPROVAL,
+    STATE_VERIFYING,
+    STATE_CLOSED,
+    ALLOWED_RESOLUTIONS,
+    ALLOWED_TRANSITIONS,
+)
 from .capabilities import (  # noqa: F401
     CAP_CONVERSATION_OPEN,
     CAP_CONVERSATION_CLOSE,
