@@ -26,3 +26,5 @@ nas_bridge/data/
 
 .DS_Store
 Thumbs.db
+
+.claude/settings.local.json
