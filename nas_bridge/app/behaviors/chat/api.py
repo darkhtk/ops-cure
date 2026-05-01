@@ -3,6 +3,20 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from ...auth import require_bridge_token
+from .conversation_schemas import (
+    ConversationCloseRequest,
+    ConversationDetailResponse,
+    ConversationListResponse,
+    ConversationOpenRequest,
+    ConversationSummary,
+    SpeechActSubmitRequest,
+    SpeechActSummary,
+)
+from .conversation_service import (
+    ChatConversationNotFoundError,
+    ChatConversationStateError,
+    ChatThreadNotFoundError,
+)
 from .schemas import (
     ChatMessageSubmitRequest,
     ChatMessageSubmitResponse,
@@ -90,3 +104,115 @@ async def submit_chat_message(
     if response is None:
         raise HTTPException(status_code=404, detail="Chat thread not found.")
     return response
+
+
+# ---- conversation protocol layer -------------------------------------------
+
+
+@router.post(
+    "/threads/{thread_id}/conversations",
+    response_model=ConversationSummary,
+    status_code=201,
+)
+async def open_conversation(
+    thread_id: str,
+    payload: ConversationOpenRequest,
+    request: Request,
+) -> ConversationSummary:
+    services = request.app.state.services
+    try:
+        return services.chat_conversation_service.open_conversation(
+            discord_thread_id=thread_id,
+            request=payload,
+        )
+    except ChatThreadNotFoundError:
+        raise HTTPException(status_code=404, detail="Chat thread not found.")
+
+
+@router.get(
+    "/threads/{thread_id}/conversations",
+    response_model=ConversationListResponse,
+)
+async def list_conversations(
+    thread_id: str,
+    request: Request,
+    state: str | None = Query(default=None),
+    kind: str | None = Query(default=None),
+    include_general: bool = Query(default=True),
+    limit: int = Query(default=50, ge=1, le=200),
+) -> ConversationListResponse:
+    services = request.app.state.services
+    try:
+        return services.chat_conversation_service.list_conversations(
+            discord_thread_id=thread_id,
+            state=state,
+            kind=kind,
+            include_general=include_general,
+            limit=limit,
+        )
+    except ChatThreadNotFoundError:
+        raise HTTPException(status_code=404, detail="Chat thread not found.")
+
+
+@router.get(
+    "/conversations/{conversation_id}",
+    response_model=ConversationDetailResponse,
+)
+async def get_conversation(
+    conversation_id: str,
+    request: Request,
+    recent: int = Query(default=30, ge=1, le=200),
+) -> ConversationDetailResponse:
+    services = request.app.state.services
+    try:
+        return services.chat_conversation_service.get_conversation(
+            conversation_id=conversation_id,
+            recent=recent,
+        )
+    except ChatConversationNotFoundError:
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+
+
+@router.post(
+    "/conversations/{conversation_id}/speech",
+    response_model=SpeechActSummary,
+    status_code=201,
+)
+async def submit_speech(
+    conversation_id: str,
+    payload: SpeechActSubmitRequest,
+    request: Request,
+) -> SpeechActSummary:
+    services = request.app.state.services
+    try:
+        return services.chat_conversation_service.submit_speech(
+            conversation_id=conversation_id,
+            request=payload,
+        )
+    except ChatConversationNotFoundError:
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+    except ChatConversationStateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
+@router.post(
+    "/conversations/{conversation_id}/close",
+    response_model=ConversationSummary,
+)
+async def close_conversation(
+    conversation_id: str,
+    payload: ConversationCloseRequest,
+    request: Request,
+) -> ConversationSummary:
+    services = request.app.state.services
+    try:
+        return services.chat_conversation_service.close_conversation(
+            conversation_id=conversation_id,
+            closed_by=payload.closed_by,
+            resolution=payload.resolution,
+            summary=payload.summary,
+        )
+    except ChatConversationNotFoundError:
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+    except ChatConversationStateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))

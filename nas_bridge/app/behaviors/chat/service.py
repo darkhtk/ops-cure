@@ -11,6 +11,9 @@ from ...kernel.storage import session_scope
 from ...transcript_service import sanitize_text
 from ...transports.discord.threads import ThreadManager
 from .models import (
+    CONVERSATION_KIND_GENERAL,
+    CONVERSATION_STATE_OPEN,
+    ChatConversationModel,
     ChatMessageModel,
     ChatParticipantModel,
     ChatParticipantStateModel,
@@ -70,6 +73,7 @@ class ChatBehaviorService:
             )
             db.add(row)
             db.flush()
+            self._ensure_general_conversation(db=db, row=row)
             response = ChatThreadCreateResponse(
                 id=row.id,
                 discord_thread_id=row.discord_thread_id,
@@ -240,6 +244,7 @@ class ChatBehaviorService:
                 row=row,
                 actor_name=actor_name,
             )
+            general = self._ensure_general_conversation(db=db, row=row)
             message = self._append_message(
                 db=db,
                 row=row,
@@ -247,6 +252,7 @@ class ChatBehaviorService:
                 actor_name=actor_name,
                 content=content,
                 now=now,
+                conversation=general,
             )
             state.last_seen_at = now
             state.last_read_message_id = message.id
@@ -398,6 +404,34 @@ class ChatBehaviorService:
         return state
 
     @staticmethod
+    def _ensure_general_conversation(
+        *,
+        db,
+        row: ChatThreadModel,
+    ) -> ChatConversationModel:
+        general = db.scalar(
+            select(ChatConversationModel)
+            .where(ChatConversationModel.thread_id == row.id)
+            .where(ChatConversationModel.is_general.is_(True))
+            .limit(1),
+        )
+        if general is not None:
+            return general
+        general = ChatConversationModel(
+            thread_id=row.id,
+            kind=CONVERSATION_KIND_GENERAL,
+            title="General",
+            intent="Casual chat and unstructured updates.",
+            state=CONVERSATION_STATE_OPEN,
+            opener_actor="system",
+            owner_actor=None,
+            is_general=True,
+        )
+        db.add(general)
+        db.flush()
+        return general
+
+    @staticmethod
     def _append_message(
         *,
         db,
@@ -406,6 +440,7 @@ class ChatBehaviorService:
         actor_name: str,
         content: str,
         now: datetime,
+        conversation: ChatConversationModel,
     ) -> ChatMessageModel:
         clean_content = sanitize_text(content)
         preview = _preview_text(clean_content)
@@ -417,11 +452,15 @@ class ChatBehaviorService:
 
         message = ChatMessageModel(
             thread_id=row.id,
+            conversation_id=conversation.id,
             actor_name=actor_name,
             content=clean_content,
         )
         db.add(message)
         db.flush()
+
+        conversation.last_speech_at = now
+        conversation.speech_count = (conversation.speech_count or 0) + 1
 
         participant.turn_count = (participant.turn_count or 0) + 1
         participant.last_message_preview = preview

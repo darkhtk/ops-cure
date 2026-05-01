@@ -16,6 +16,7 @@ from .behaviors.remote_codex.service import RemoteCodexBehaviorService
 from .behaviors.remote_claude import api as remote_claude_api
 from .behaviors.remote_claude.service import RemoteClaudeBehaviorService
 from .behaviors.remote_claude.state_service import RemoteClaudeStateService
+from .behaviors.chat.conversation_service import ChatConversationService
 from .behaviors.chat.service import ChatBehaviorService
 from .behaviors.chat.task_service import ChatTaskService
 from .behaviors.orchestration.policy import PolicyService
@@ -81,6 +82,7 @@ class ServiceContainer:
     thread_manager: ThreadManager
     announcement_service: AnnouncementService
     chat_service: ChatBehaviorService
+    chat_conversation_service: ChatConversationService
     chat_task_service: ChatTaskService
     ops_service: OpsBehaviorService
     behavior_descriptors: tuple[BehaviorDescriptor, ...]
@@ -109,6 +111,8 @@ def build_services(settings: Settings) -> ServiceContainer:
     thread_manager = ThreadManager(settings)
     announcement_service = AnnouncementService(thread_manager=thread_manager)
     chat_service = ChatBehaviorService(thread_manager=thread_manager, subscription_broker=subscription_broker)
+    chat_conversation_service = ChatConversationService(subscription_broker=subscription_broker)
+    chat_conversation_service.backfill_general_conversations()
     ops_service = OpsBehaviorService(thread_manager=thread_manager, subscription_broker=subscription_broker)
     policy_service = PolicyService()
     verification_service = VerificationService(
@@ -248,6 +252,7 @@ def build_services(settings: Settings) -> ServiceContainer:
         thread_manager=thread_manager,
         announcement_service=announcement_service,
         chat_service=chat_service,
+        chat_conversation_service=chat_conversation_service,
         chat_task_service=chat_task_service,
         ops_service=ops_service,
         behavior_descriptors=behavior_descriptors,

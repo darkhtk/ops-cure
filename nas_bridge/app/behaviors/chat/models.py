@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, ForeignKey, Index, Integer, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ...db import Base
@@ -13,6 +13,16 @@ from ...db import Base
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+CONVERSATION_KIND_GENERAL = "general"
+CONVERSATION_KIND_INQUIRY = "inquiry"
+CONVERSATION_KIND_PROPOSAL = "proposal"
+CONVERSATION_KIND_TASK = "task"
+
+CONVERSATION_STATE_OPEN = "open"
+CONVERSATION_STATE_RESOLVING = "resolving"
+CONVERSATION_STATE_CLOSED = "closed"
 
 
 class ChatThreadModel(Base):
@@ -72,15 +82,65 @@ class ChatParticipantStateModel(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
+class ChatConversationModel(Base):
+    __tablename__ = "chat_conversations"
+    __table_args__ = (
+        Index("ix_chat_conversations_thread_state", "thread_id", "state"),
+        Index("ix_chat_conversations_thread_kind", "thread_id", "kind"),
+    )
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=lambda: str(uuid.uuid4()))
+    thread_id: Mapped[str] = mapped_column(
+        ForeignKey("chat_threads.id", ondelete="CASCADE"),
+        index=True,
+    )
+    kind: Mapped[str] = mapped_column(index=True, default=CONVERSATION_KIND_GENERAL)
+    title: Mapped[str] = mapped_column(Text())
+    intent: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    state: Mapped[str] = mapped_column(index=True, default=CONVERSATION_STATE_OPEN)
+    opener_actor: Mapped[str] = mapped_column(index=True)
+    owner_actor: Mapped[str | None] = mapped_column(index=True, nullable=True)
+    expected_speaker: Mapped[str | None] = mapped_column(index=True, nullable=True)
+    parent_conversation_id: Mapped[str | None] = mapped_column(
+        ForeignKey("chat_conversations.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    bound_task_id: Mapped[str | None] = mapped_column(index=True, nullable=True)
+    resolution: Mapped[str | None] = mapped_column(index=True, nullable=True)
+    resolution_summary: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    closed_by: Mapped[str | None] = mapped_column(index=True, nullable=True)
+    is_general: Mapped[bool] = mapped_column(Boolean(), default=False, index=True)
+    last_speech_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    speech_count: Mapped[int] = mapped_column(Integer(), default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        onupdate=utcnow,
+    )
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class ChatMessageModel(Base):
     __tablename__ = "chat_messages"
     __table_args__ = (
         Index("ix_chat_messages_thread_created", "thread_id", "created_at"),
+        Index("ix_chat_messages_conversation_created", "conversation_id", "created_at"),
     )
 
     id: Mapped[str] = mapped_column(primary_key=True, default=lambda: str(uuid.uuid4()))
     thread_id: Mapped[str] = mapped_column(ForeignKey("chat_threads.id", ondelete="CASCADE"), index=True)
+    conversation_id: Mapped[str | None] = mapped_column(
+        ForeignKey("chat_conversations.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     actor_name: Mapped[str] = mapped_column(index=True)
-    event_kind: Mapped[str] = mapped_column(Text(), default="message")
+    event_kind: Mapped[str] = mapped_column(Text(), default="claim")
+    addressed_to: Mapped[str | None] = mapped_column(Text(), nullable=True, index=True)
     content: Mapped[str] = mapped_column(Text())
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
