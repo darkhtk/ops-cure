@@ -182,7 +182,7 @@ def test_generic_kernel_supports_workflow_chat_and_ops_without_agents(tmp_path, 
 
     behaviors = behavior_catalog.list_behaviors()
     behavior_map = {behavior.behavior_id: behavior for behavior in behaviors}
-    assert set(behavior_map) == {"orchestration", "chat", "ops", "remote_codex"}
+    assert set(behavior_map) == {"orchestration", "chat", "ops", "remote_codex", "remote_claude"}
     for behavior_id in ("orchestration", "chat", "ops"):
         assert behavior_map[behavior_id].supports_spaces
         assert behavior_map[behavior_id].supports_actors
@@ -190,11 +190,22 @@ def test_generic_kernel_supports_workflow_chat_and_ops_without_agents(tmp_path, 
         assert behavior_map[behavior_id].supports_discord_commands
         assert behavior_map[behavior_id].supports_discord_messages
 
-    assert not behavior_map["remote_codex"].supports_spaces
+    # remote_codex registers a SpaceProvider for its synthetic
+    # remote_codex.machine:* / remote_codex.thread:* spaces. It does not
+    # surface actors/events through the kernel binding (those flow via
+    # the behavior-specific endpoints) nor any Discord wiring.
+    assert behavior_map["remote_codex"].supports_spaces
     assert not behavior_map["remote_codex"].supports_actors
     assert not behavior_map["remote_codex"].supports_events
     assert not behavior_map["remote_codex"].supports_discord_commands
     assert not behavior_map["remote_codex"].supports_discord_messages
+
+    # remote_claude follows the same pattern with machine/session spaces.
+    assert behavior_map["remote_claude"].supports_spaces
+    assert not behavior_map["remote_claude"].supports_actors
+    assert not behavior_map["remote_claude"].supports_events
+    assert not behavior_map["remote_claude"].supports_discord_commands
+    assert not behavior_map["remote_claude"].supports_discord_messages
 
     chat_space = space_service.get_space(space_id=chat_row.id)
     ops_space = space_service.get_space(space_id=ops_row.id)

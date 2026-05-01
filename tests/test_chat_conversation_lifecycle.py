@@ -393,3 +393,63 @@ def test_backfill_attaches_orphan_messages_to_general(tmp_path, monkeypatch):
         assert general is not None
         assert legacy_row.conversation_id == general.id
         assert legacy_row.event_kind == "claim"
+
+
+def test_close_with_disallowed_resolution_rejected(tmp_path, monkeypatch):
+    """Per-kind resolution vocabulary enforcement: an inquiry cannot be
+    closed with `accepted` (proposal-shaped); a proposal cannot close
+    with `answered` (inquiry-shaped). Catches semantic drift via free
+    strings."""
+    modules = _bootstrap_app(tmp_path, monkeypatch)
+    schemas = modules["conversation_schemas_module"]
+    conv_module = modules["conversation_service_module"]
+    _, chat_service, conversation_service = _build_services(modules)
+
+    async def scenario():
+        return await chat_service.create_chat_thread(
+            guild_id="guild-1",
+            parent_channel_id="parent-1",
+            title="collab room",
+            topic=None,
+            created_by="alice",
+        )
+
+    thread = asyncio.run(scenario())
+
+    inquiry = conversation_service.open_conversation(
+        discord_thread_id=thread.discord_thread_id,
+        request=schemas.ConversationOpenRequest(
+            kind="inquiry",
+            title="What's the rotation policy?",
+            opener_actor="alice",
+        ),
+    )
+    with pytest.raises(conv_module.ChatConversationStateError):
+        conversation_service.close_conversation(
+            conversation_id=inquiry.id,
+            closed_by="alice",
+            resolution="accepted",
+        )
+
+    proposal = conversation_service.open_conversation(
+        discord_thread_id=thread.discord_thread_id,
+        request=schemas.ConversationOpenRequest(
+            kind="proposal",
+            title="Adopt evidence-required heartbeats",
+            opener_actor="alice",
+        ),
+    )
+    with pytest.raises(conv_module.ChatConversationStateError):
+        conversation_service.close_conversation(
+            conversation_id=proposal.id,
+            closed_by="alice",
+            resolution="answered",
+        )
+
+    # Sanity: inquiry's own vocabulary is accepted.
+    closed = conversation_service.close_conversation(
+        conversation_id=inquiry.id,
+        closed_by="alice",
+        resolution="dropped",
+    )
+    assert closed.resolution == "dropped"

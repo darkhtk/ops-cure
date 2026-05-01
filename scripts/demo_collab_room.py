@@ -77,7 +77,7 @@ from app.behaviors.chat.task_coordinator import ChatTaskCoordinator  # noqa: E40
 from app.kernel.approvals import KernelApprovalService  # noqa: E402
 from app.kernel.presence import PresenceService  # noqa: E402
 from app.services.remote_task_service import RemoteTaskService  # noqa: E402
-from sqlalchemy import select  # noqa: E402
+from sqlalchemy import func, select  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -565,6 +565,65 @@ def main() -> None:
     # ---- Final: room state summary ------------------------------------------
     section("Final room state")
     _print_room_summary(thread.id)
+
+    # ---- Smoke assertions: protocol invariants we expect after the run ----
+    # If any of these fail the demo crashes, surfacing the regression.
+    section("Smoke assertions")
+    with db_module.session_scope() as session:
+        rows = list(
+            session.scalars(
+                select(ChatConversationModel)
+                .where(ChatConversationModel.thread_id == thread.id)
+            )
+        )
+        by_kind = {row.kind: row for row in rows}
+
+        assert "general" in by_kind and by_kind["general"].is_general
+        assert by_kind["general"].state == "open"
+        assert by_kind["general"].resolution is None
+
+        assert by_kind["inquiry"].state == "closed"
+        assert by_kind["inquiry"].resolution == "answered"
+
+        assert by_kind["task"].state == "closed"
+        assert by_kind["task"].resolution == "completed"
+        assert by_kind["task"].bound_task_id is not None
+        assert by_kind["task"].owner_actor == "codex-pca"
+
+        assert by_kind["proposal"].state == "closed"
+        assert by_kind["proposal"].resolution == "accepted"
+        assert by_kind["proposal"].owner_actor == "bob"
+        # Proposal saw the idle warning fire exactly once before close.
+        assert by_kind["proposal"].idle_warning_emitted_at is not None
+
+        # Idle warning must have produced exactly 1 event row, not zero (no
+        # warning) and not >=2 (re-emit bug).
+        idle_count = session.scalar(
+            select(func.count())
+            .select_from(ChatMessageModel)
+            .where(ChatMessageModel.event_kind == "chat.conversation.idle_warning")
+            .where(ChatMessageModel.thread_id == thread.id)
+        )
+        assert idle_count == 1, f"expected 1 idle_warning event, got {idle_count}"
+
+        # Task must have at least one heartbeat and one evidence row.
+        hb_count = session.scalar(
+            select(func.count())
+            .select_from(ChatMessageModel)
+            .where(ChatMessageModel.event_kind == "chat.task.heartbeat")
+            .where(ChatMessageModel.thread_id == thread.id)
+        )
+        ev_count = session.scalar(
+            select(func.count())
+            .select_from(ChatMessageModel)
+            .where(ChatMessageModel.event_kind == "chat.task.evidence")
+            .where(ChatMessageModel.thread_id == thread.id)
+        )
+        assert hb_count >= 1 and ev_count >= 1
+
+    print("  ok: 4 conversations (general/inquiry/task/proposal) in expected terminal states")
+    print("  ok: idle_warning emitted exactly once")
+    print(f"  ok: task lifecycle produced {hb_count} heartbeat(s) + {ev_count} evidence row(s)")
 
 
 if __name__ == "__main__":

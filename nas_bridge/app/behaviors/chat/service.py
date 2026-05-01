@@ -10,9 +10,8 @@ from ...kernel.events import EventEnvelope, EventSummary, encode_event_cursor
 from ...kernel.storage import session_scope
 from ...transcript_service import sanitize_text
 from ...transports.discord.threads import ThreadManager
+from .conversation_service import get_or_create_general_conversation
 from .models import (
-    CONVERSATION_KIND_GENERAL,
-    CONVERSATION_STATE_OPEN,
     ChatConversationModel,
     ChatMessageModel,
     ChatParticipantModel,
@@ -409,27 +408,10 @@ class ChatBehaviorService:
         db,
         row: ChatThreadModel,
     ) -> ChatConversationModel:
-        general = db.scalar(
-            select(ChatConversationModel)
-            .where(ChatConversationModel.thread_id == row.id)
-            .where(ChatConversationModel.is_general.is_(True))
-            .limit(1),
-        )
-        if general is not None:
-            return general
-        general = ChatConversationModel(
-            thread_id=row.id,
-            kind=CONVERSATION_KIND_GENERAL,
-            title="General",
-            intent="Casual chat and unstructured updates.",
-            state=CONVERSATION_STATE_OPEN,
-            opener_actor="system",
-            owner_actor=None,
-            is_general=True,
-        )
-        db.add(general)
-        db.flush()
-        return general
+        # Delegate to the shared helper in conversation_service so chat
+        # behavior and the conversation protocol service agree on the
+        # exact bootstrap shape.
+        return get_or_create_general_conversation(db, row)
 
     @staticmethod
     def _append_message(

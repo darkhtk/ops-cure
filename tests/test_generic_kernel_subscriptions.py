@@ -145,7 +145,7 @@ def test_generic_kernel_delta_and_stream_resume_without_domain_leakage(tmp_path,
     assert space is not None
 
     behavior_ids = {item.behavior_id for item in behavior_catalog.list_behaviors()}
-    assert behavior_ids == {"orchestration", "chat", "ops", "remote_codex"}
+    assert behavior_ids == {"orchestration", "chat", "ops", "remote_codex", "remote_claude"}
 
     initial = event_service.get_events_for_space(space_id=created.id, limit=10)
     assert initial is not None

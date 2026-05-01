@@ -36,11 +36,28 @@ SpeechKind = Literal[
     "block",
     "defer",
     "summarize",
-    "address",
 ]
 
 ConversationKind = Literal["inquiry", "proposal", "task", "general"]
 ConversationState = Literal["open", "resolving", "closed"]
+
+
+# Per-kind resolution vocabulary. Closing a conversation with a
+# resolution outside the allowed set for its kind is rejected so the
+# semantic layer cannot drift via free-form strings (the previous v0.1
+# accepted any string).
+ALLOWED_RESOLUTIONS_BY_KIND: dict[str, frozenset[str]] = {
+    "inquiry": frozenset({"answered", "dropped", "escalated"}),
+    "proposal": frozenset({"accepted", "rejected", "withdrawn", "superseded"}),
+    "task": frozenset({"completed", "failed", "cancelled", "abandoned"}),
+}
+
+
+def is_resolution_allowed(*, kind: str, resolution: str) -> bool:
+    allowed = ALLOWED_RESOLUTIONS_BY_KIND.get(kind)
+    if allowed is None:
+        return True  # general or unknown kind: skip enforcement
+    return resolution in allowed
 
 
 # ----- summaries / responses --------------------------------------------------

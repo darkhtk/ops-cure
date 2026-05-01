@@ -27,7 +27,7 @@ import json
 from datetime import datetime, timezone  # noqa: F401  -- used in sweep timing math
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import func, or_, select, update
 
 from ...kernel.events import EventEnvelope, EventSummary, encode_event_cursor
 from ...kernel.storage import session_scope
@@ -41,6 +41,7 @@ from .conversation_schemas import (
     ConversationSummary,
     SpeechActSubmitRequest,
     SpeechActSummary,
+    is_resolution_allowed,
 )
 from .models import (
     CONVERSATION_KIND_GENERAL,
@@ -90,6 +91,37 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def get_or_create_general_conversation(
+    db,
+    thread_row: ChatThreadModel,
+) -> ChatConversationModel:
+    """Module-level helper so both ChatConversationService and
+    ChatBehaviorService can share the bootstrap logic for a room's
+    always-open ``general`` conversation without depending on each other.
+    """
+    general = db.scalar(
+        select(ChatConversationModel)
+        .where(ChatConversationModel.thread_id == thread_row.id)
+        .where(ChatConversationModel.is_general.is_(True))
+        .limit(1),
+    )
+    if general is not None:
+        return general
+    general = ChatConversationModel(
+        thread_id=thread_row.id,
+        kind=CONVERSATION_KIND_GENERAL,
+        title=GENERAL_TITLE,
+        intent=GENERAL_INTENT,
+        state=CONVERSATION_STATE_OPEN,
+        opener_actor="system",
+        owner_actor=None,
+        is_general=True,
+    )
+    db.add(general)
+    db.flush()
+    return general
+
+
 def _speech_event_kind(kind: str) -> str:
     return f"chat.speech.{kind}"
 
@@ -136,10 +168,25 @@ class ChatConversationService:
 
     def backfill_general_conversations(self) -> int:
         """Ensure every room has a general conversation and orphan messages
-        get attached to it. Idempotent. Returns the number of orphan
-        messages migrated. Designed to run once at startup."""
-        migrated = 0
+        get attached to it. Idempotent and self-skipping: a single
+        count() at the top exits early when there is nothing to migrate,
+        which is the steady state after the first run.
+        Returns the number of orphan messages newly attached."""
         with session_scope() as db:
+            pending = db.scalar(
+                select(func.count())
+                .select_from(ChatMessageModel)
+                .where(
+                    or_(
+                        ChatMessageModel.conversation_id.is_(None),
+                        ChatMessageModel.event_kind == "message",
+                    )
+                )
+            )
+            if not pending:
+                return 0
+
+            migrated = 0
             for thread in db.scalars(select(ChatThreadModel)):
                 general = self._get_or_create_general(db, thread)
                 result = db.execute(
@@ -168,13 +215,9 @@ class ChatConversationService:
         discord_thread_id: str,
         request: ConversationOpenRequest,
     ) -> ConversationSummary:
-        # kind=task requires a wired RemoteTaskService and an objective.
-        # We create the bound RemoteTask BEFORE inserting the
-        # ChatConversationModel row so the conversation is never visible
-        # without its task. If the task-create step throws we never
-        # commit the conversation — failure stays atomic from the
-        # caller's perspective.
-        bound_task_id: str | None = None
+        # Pre-validate kind=task prerequisites before touching the DB so
+        # we never half-commit (no thread row read, no task created) on
+        # caller-side input errors.
         if request.kind == CONVERSATION_KIND_TASK:
             if self._remote_task_service is None:
                 raise ChatConversationStateError(
@@ -184,19 +227,6 @@ class ChatConversationService:
                 raise ChatConversationStateError(
                     "kind=task requires an objective",
                 )
-            chat_thread_id = self._resolve_chat_thread_id_for_open(discord_thread_id)
-            task = self._remote_task_service.create_task(
-                RemoteTaskCreateRequest(
-                    machine_id=CHAT_TASK_MACHINE_ID,
-                    thread_id=chat_thread_id,
-                    objective=request.objective,
-                    success_criteria=request.success_criteria,
-                    origin_surface="chat",
-                    priority=request.priority,
-                    created_by=request.opener_actor,
-                ),
-            )
-            bound_task_id = task.id
 
         envelope: EventEnvelope | None = None
         summary: ConversationSummary
@@ -205,6 +235,25 @@ class ChatConversationService:
             if thread_row is None:
                 raise ChatThreadNotFoundError(discord_thread_id)
             self._get_or_create_general(db, thread_row)
+
+            bound_task_id: str | None = None
+            if request.kind == CONVERSATION_KIND_TASK:
+                # RemoteTaskService runs its own session_scope; that's
+                # fine because the bound RemoteTask is independent state
+                # whose existence we record on the conversation row in
+                # this same scope below.
+                task = self._remote_task_service.create_task(
+                    RemoteTaskCreateRequest(
+                        machine_id=CHAT_TASK_MACHINE_ID,
+                        thread_id=thread_row.id,
+                        objective=request.objective,
+                        success_criteria=request.success_criteria,
+                        origin_surface="chat",
+                        priority=request.priority,
+                        created_by=request.opener_actor,
+                    ),
+                )
+                bound_task_id = task.id
 
             row = ChatConversationModel(
                 thread_id=thread_row.id,
@@ -237,13 +286,6 @@ class ChatConversationService:
         self._publish(envelope)
         return summary
 
-    def _resolve_chat_thread_id_for_open(self, discord_thread_id: str) -> str:
-        with session_scope() as db:
-            row = self._get_thread_row_by_discord(db, discord_thread_id)
-            if row is None:
-                raise ChatThreadNotFoundError(discord_thread_id)
-            return row.id
-
     def close_conversation(
         self,
         *,
@@ -266,6 +308,10 @@ class ChatConversationService:
             if row.state == CONVERSATION_STATE_CLOSED:
                 raise ChatConversationStateError(
                     f"conversation already closed (resolution={row.resolution})",
+                )
+            if not is_resolution_allowed(kind=row.kind, resolution=resolution):
+                raise ChatConversationStateError(
+                    f"resolution '{resolution}' is not valid for kind={row.kind}",
                 )
             # When a task is bound and still active, only the task lifecycle
             # path (ChatTaskCoordinator.complete/fail) may close — refuse
@@ -564,27 +610,7 @@ class ChatConversationService:
         db,
         thread_row: ChatThreadModel,
     ) -> ChatConversationModel:
-        general = db.scalar(
-            select(ChatConversationModel)
-            .where(ChatConversationModel.thread_id == thread_row.id)
-            .where(ChatConversationModel.is_general.is_(True))
-            .limit(1),
-        )
-        if general is not None:
-            return general
-        general = ChatConversationModel(
-            thread_id=thread_row.id,
-            kind=CONVERSATION_KIND_GENERAL,
-            title=GENERAL_TITLE,
-            intent=GENERAL_INTENT,
-            state=CONVERSATION_STATE_OPEN,
-            opener_actor="system",
-            owner_actor=None,
-            is_general=True,
-        )
-        db.add(general)
-        db.flush()
-        return general
+        return get_or_create_general_conversation(db, thread_row)
 
     @staticmethod
     def _summary(row: ChatConversationModel) -> ConversationSummary:
