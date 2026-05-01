@@ -54,6 +54,7 @@ from .models import (
     CONVERSATION_STATE_CLOSED,
     CONVERSATION_STATE_OPEN,
     ChatConversationModel,
+    ChatConversationReadModel,
     ChatMessageModel,
     ChatThreadModel,
 )
@@ -798,6 +799,124 @@ class ChatConversationService:
                     flagged.append(self._summary(refreshed))
 
         return flagged
+
+    # -------- per-actor read cursor (PR21) ---------------------------------
+
+    def mark_conversation_read(
+        self,
+        *,
+        conversation_id: str,
+        actor_name: str,
+        speech_id: str | None = None,
+        caller_context: Any = None,
+    ) -> dict[str, Any]:
+        """Update the per-actor read cursor on a conversation. When
+        ``speech_id`` is None, marks to the latest persisted speech in
+        the conversation (i.e. catch-up). Returns the updated cursor +
+        a freshly-computed unread_count (which should be 0 right after
+        catch-up but is informative if a new speech raced in)."""
+        self._check_actor(actor_name, caller_context=caller_context)
+        with session_scope() as db:
+            row = db.get(ChatConversationModel, conversation_id)
+            if row is None:
+                raise ChatConversationNotFoundError(conversation_id)
+
+            target_speech_id = speech_id
+            target_at = None
+            if target_speech_id is None:
+                # latest speech (any event_kind) in this conversation
+                latest = db.scalar(
+                    select(ChatMessageModel)
+                    .where(ChatMessageModel.conversation_id == conversation_id)
+                    .order_by(ChatMessageModel.created_at.desc())
+                    .limit(1)
+                )
+                if latest is not None:
+                    target_speech_id = latest.id
+                    target_at = latest.created_at
+            else:
+                target_msg = db.get(ChatMessageModel, target_speech_id)
+                if target_msg is None or target_msg.conversation_id != conversation_id:
+                    raise ChatConversationStateError(
+                        f"speech_id {speech_id!r} does not belong to conversation",
+                    )
+                target_at = target_msg.created_at
+
+            cursor_row = db.scalar(
+                select(ChatConversationReadModel)
+                .where(ChatConversationReadModel.conversation_id == conversation_id)
+                .where(ChatConversationReadModel.actor_name == actor_name)
+            )
+            if cursor_row is None:
+                cursor_row = ChatConversationReadModel(
+                    conversation_id=conversation_id,
+                    actor_name=actor_name,
+                    last_read_speech_id=target_speech_id,
+                    last_read_at=target_at,
+                )
+                db.add(cursor_row)
+            else:
+                cursor_row.last_read_speech_id = target_speech_id
+                cursor_row.last_read_at = target_at
+            db.flush()
+
+            unread = self._unread_count_inside_session(
+                db=db,
+                conversation_id=conversation_id,
+                cursor_at=target_at,
+            )
+            return {
+                "conversation_id": conversation_id,
+                "actor_name": actor_name,
+                "last_read_speech_id": target_speech_id,
+                "last_read_at": target_at,
+                "unread_count": unread,
+            }
+
+    def get_conversation_read_status(
+        self,
+        *,
+        conversation_id: str,
+        actor_name: str,
+    ) -> dict[str, Any]:
+        with session_scope() as db:
+            row = db.get(ChatConversationModel, conversation_id)
+            if row is None:
+                raise ChatConversationNotFoundError(conversation_id)
+            cursor_row = db.scalar(
+                select(ChatConversationReadModel)
+                .where(ChatConversationReadModel.conversation_id == conversation_id)
+                .where(ChatConversationReadModel.actor_name == actor_name)
+            )
+            cursor_at = cursor_row.last_read_at if cursor_row else None
+            unread = self._unread_count_inside_session(
+                db=db,
+                conversation_id=conversation_id,
+                cursor_at=cursor_at,
+            )
+            return {
+                "conversation_id": conversation_id,
+                "actor_name": actor_name,
+                "last_read_speech_id": cursor_row.last_read_speech_id if cursor_row else None,
+                "last_read_at": cursor_at,
+                "unread_count": unread,
+            }
+
+    @staticmethod
+    def _unread_count_inside_session(
+        *,
+        db,
+        conversation_id: str,
+        cursor_at: datetime | None,
+    ) -> int:
+        stmt = (
+            select(func.count())
+            .select_from(ChatMessageModel)
+            .where(ChatMessageModel.conversation_id == conversation_id)
+        )
+        if cursor_at is not None:
+            stmt = stmt.where(ChatMessageModel.created_at > cursor_at)
+        return db.scalar(stmt) or 0
 
     # -------- bulk + audit (PR16) ------------------------------------------
 

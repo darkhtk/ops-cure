@@ -8,6 +8,8 @@ from .conversation_schemas import (
     BulkCloseRequest,
     BulkCloseResponse,
     ChatRoomHealthResponse,
+    ConversationMarkReadRequest,
+    ConversationReadStatusResponse,
     ChatTaskApprovalRequest,
     ChatTaskApprovalResolveRequest,
     ChatTaskClaimRequest,
@@ -306,6 +308,51 @@ async def sweep_idle_conversations(
         idle_threshold_seconds=idle_threshold_seconds,
         flagged=flagged,
     )
+
+
+# ---- per-actor read cursor (PR21) ------------------------------------------
+
+
+@router.post(
+    "/conversations/{conversation_id}/mark-read",
+    response_model=ConversationReadStatusResponse,
+)
+async def mark_conversation_read(
+    conversation_id: str,
+    payload: ConversationMarkReadRequest,
+    request: Request,
+) -> ConversationReadStatusResponse:
+    services = request.app.state.services
+    try:
+        snap = services.chat_conversation_service.mark_conversation_read(
+            conversation_id=conversation_id,
+            actor_name=payload.actor_name,
+            speech_id=payload.speech_id,
+        )
+    except ChatConversationNotFoundError:
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+    except ChatConversationStateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return ConversationReadStatusResponse(**snap)
+
+
+@router.get(
+    "/conversations/{conversation_id}/read-status",
+    response_model=ConversationReadStatusResponse,
+)
+async def get_conversation_read_status(
+    conversation_id: str,
+    request: Request,
+    actor_name: str = Query(..., min_length=1),
+) -> ConversationReadStatusResponse:
+    services = request.app.state.services
+    try:
+        snap = services.chat_conversation_service.get_conversation_read_status(
+            conversation_id=conversation_id, actor_name=actor_name,
+        )
+    except ChatConversationNotFoundError:
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+    return ConversationReadStatusResponse(**snap)
 
 
 # ---- bulk + audit (PR16) ---------------------------------------------------

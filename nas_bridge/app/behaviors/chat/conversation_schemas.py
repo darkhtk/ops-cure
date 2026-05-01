@@ -342,6 +342,19 @@ class ConversationHandoffRequest(BaseModel):
         return text or None
 
 
+class ConversationMarkReadRequest(BaseModel):
+    actor_name: str = Field(min_length=1)
+    speech_id: str | None = None  # if None, mark to latest
+
+
+class ConversationReadStatusResponse(BaseModel):
+    conversation_id: str
+    actor_name: str
+    last_read_speech_id: str | None = None
+    last_read_at: datetime | None = None
+    unread_count: int = 0
+
+
 class IdleSweepResponse(BaseModel):
     thread_id: str
     idle_threshold_seconds: int

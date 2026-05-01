@@ -137,6 +137,43 @@ class ChatConversationModel(Base):
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class ChatConversationReadModel(Base):
+    """Per-actor read cursor for a single conversation. PR21.
+
+    ChatParticipantStateModel already tracks read state at the THREAD
+    level (legacy from before PR1 conversations existed); this table
+    is the conversation-level equivalent so a participant can have
+    different unread counts per conversation in the same thread.
+    """
+
+    __tablename__ = "chat_conversation_reads"
+    __table_args__ = (
+        UniqueConstraint("conversation_id", "actor_name", name="uq_chat_conv_read_per_actor"),
+        Index("ix_chat_conv_reads_actor", "actor_name"),
+    )
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=lambda: str(uuid.uuid4()))
+    conversation_id: Mapped[str] = mapped_column(
+        ForeignKey("chat_conversations.id", ondelete="CASCADE"),
+        index=True,
+    )
+    actor_name: Mapped[str] = mapped_column(index=True)
+    last_read_speech_id: Mapped[str | None] = mapped_column(
+        ForeignKey("chat_messages.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    last_read_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        onupdate=utcnow,
+    )
+
+
 class ChatMessageModel(Base):
     __tablename__ = "chat_messages"
     __table_args__ = (
