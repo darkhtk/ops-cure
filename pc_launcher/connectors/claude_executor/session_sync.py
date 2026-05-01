@@ -22,7 +22,7 @@ def default_projects_root() -> Path:
     return Path(os.path.expanduser("~/.claude/projects"))
 
 
-def scan_sessions(projects_root: Path | None = None, *, limit: int = 500) -> list[dict[str, Any]]:
+def scan_sessions(projects_root: Path | None = None, *, limit: int = 50) -> list[dict[str, Any]]:
     root = projects_root or default_projects_root()
     if not root.is_dir():
         return []

@@ -26,7 +26,7 @@ class BridgeClient:
         token: str,
         machine_id: str,
         worker_id: str,
-        timeout_seconds: float = 30.0,
+        timeout_seconds: float = 90.0,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.token = token
