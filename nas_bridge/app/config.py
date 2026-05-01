@@ -40,6 +40,14 @@ class Settings(BaseSettings):
         default=300,
         alias="BRIDGE_STALLED_START_TIMEOUT_SECONDS",
     )
+    # F8: v1 chat surface deprecation. The legacy chat_* endpoints stay
+    # functional through the dual-write era. When this flag is true the
+    # bridge logs a one-time deprecation banner at startup so operators
+    # know to migrate clients to /v2/operations + /v2/inbox.
+    chat_v1_deprecation_warning: bool = Field(
+        default=True,
+        alias="BRIDGE_CHAT_V1_DEPRECATION_WARNING",
+    )
 
     model_config = SettingsConfigDict(
         env_file=".env",

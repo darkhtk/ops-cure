@@ -279,6 +279,15 @@ def build_services(settings: Settings) -> ServiceContainer:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
+    if settings.chat_v1_deprecation_warning:
+        logging.getLogger("opscure.deprecation").warning(
+            "[v1 chat deprecation] Protocol v2 (operations_v2 + /v2 routes) "
+            "is now the system of record after F7. Legacy /chat endpoints "
+            "remain dual-written through F8 but will be removed once /v2 "
+            "covers all client surfaces. Migrate to GET /v2/inbox, "
+            "GET /v2/operations/{id}, and POST /v2/operations/{id}/seen. "
+            "Set BRIDGE_CHAT_V1_DEPRECATION_WARNING=false to silence."
+        )
     services = build_services(settings)
     app.state.services = services
     services.recovery_loop_task = asyncio.create_task(
