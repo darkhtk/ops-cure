@@ -73,6 +73,7 @@ def test_remote_codex_requested_by_uses_authenticated_service_context(app_env) -
             thread_id: str,
             prompt: str,
             requested_by: dict[str, object],
+            attachments: list[dict[str, object]] | None = None,
         ) -> dict[str, object]:
             self.requested_by = requested_by
             return {
@@ -80,6 +81,7 @@ def test_remote_codex_requested_by_uses_authenticated_service_context(app_env) -
                 "machineId": machine_id,
                 "threadId": thread_id,
                 "prompt": prompt,
+                "attachments": attachments or [],
             }
 
     service = StubRemoteCodexService()

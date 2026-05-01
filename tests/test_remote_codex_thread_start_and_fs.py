@@ -30,8 +30,11 @@ class _Recorder:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, Any]]] = []
 
-    def record(self, name: str, **kwargs: Any) -> None:
-        self.calls.append((name, kwargs))
+    def record(self, _event: str, /, **kwargs: Any) -> None:
+        # ``_event`` is positional-only so ``name``/``machine_id`` etc.
+        # in kwargs (e.g. fs_mkdir's ``name`` argument) don't collide
+        # with the recorder's own slot.
+        self.calls.append((_event, kwargs))
 
 
 def _now_iso() -> str:

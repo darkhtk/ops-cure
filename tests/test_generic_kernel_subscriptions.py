@@ -166,10 +166,10 @@ def test_generic_kernel_delta_and_stream_resume_without_domain_leakage(tmp_path,
         space_id=created.id,
         after_cursor=None,
         limit=10,
-        kinds=["message"],
+        kinds=["claim"],
     )
     assert kinds_filtered is not None
-    assert all(item.event.kind == "message" for item in kinds_filtered.items)
+    assert all(item.event.kind == "claim" for item in kinds_filtered.items)
 
     services = SimpleNamespace(
         event_service=event_service,
@@ -183,7 +183,7 @@ def test_generic_kernel_delta_and_stream_resume_without_domain_leakage(tmp_path,
             space_id=created.id,
             after_cursor=latest_cursor,
             limit=10,
-            kinds=["message"],
+            kinds=["claim"],
             subscriber_id="pc-codex-a",
         )
         open_chunk = await anext(generator)
@@ -234,7 +234,7 @@ def test_generic_kernel_delta_and_stream_resume_without_domain_leakage(tmp_path,
             space_id=race_thread.id,
             after_cursor=race_cursor,
             limit=10,
-            kinds=["message"],
+            kinds=["claim"],
             subscriber_id="pc-codex-b",
         )
         open_chunk = await anext(generator)
@@ -284,7 +284,7 @@ def test_generic_kernel_delta_and_stream_resume_without_domain_leakage(tmp_path,
             space_id=restart_thread.id,
             after_cursor=restart_cursor,
             limit=10,
-            kinds=["message"],
+            kinds=["claim"],
             subscriber_id="pc-codex-c",
         )
         open_chunk = await anext(generator)
@@ -328,7 +328,7 @@ def test_generic_kernel_delta_and_stream_resume_without_domain_leakage(tmp_path,
             space_id=limited_thread.id,
             after_cursor=limited_cursor,
             limit=1,
-            kinds=["message"],
+            kinds=["claim"],
             subscriber_id="pc-codex-d",
         )
         open_chunk = await anext(generator)

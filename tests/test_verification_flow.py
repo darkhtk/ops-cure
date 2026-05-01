@@ -101,8 +101,13 @@ def test_verification_queue_claim_complete_and_review(app_env):
         assert session_row is not None
         assert session_row.status_message_id is not None
         status_message = app_env.thread_manager.message_store[session_row.status_message_id][1]
-    assert "Verification: smoke -> review_pending" in status_message
-    assert "Attention: verification `smoke` is waiting for operator review" in status_message
+    # The status card now renders as a Korean-labeled embed
+    # ("검증: ..." / "주의: ..." / etc.) instead of the old plain-text
+    # English layout. Match on the language-agnostic substantive
+    # content -- the review_summary and attention strings are still
+    # English, only the field labels shifted.
+    assert "smoke -> review_pending" in status_message
+    assert "verification `smoke` is waiting for operator review" in status_message
 
     latest = __import__("asyncio").run(
         app_env.verification_service.latest_run(session_id=summary.id),

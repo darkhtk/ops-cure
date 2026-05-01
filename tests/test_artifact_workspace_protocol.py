@@ -156,9 +156,20 @@ def test_reconcile_from_bridge_summary_clears_stale_handoff_state(tmp_path):
 
     assert "- Status: `ready`" in state_text
     assert "No active job. Local artifacts were synchronized from the bridge session summary." in current_task_text
-    assert "`T-002` -> `coder`" in handoffs_text
-    assert "## ready" in task_board_text
-    assert "`T-001`" in task_board_text
+    # Reconcile semantics: when the bridge says "settled with no
+    # queued handoffs", the local handoffs file is *cleared* to the
+    # empty template even if record_cli_result had recorded a
+    # planner-emitted handoff. The bridge is the source of truth.
+    # (Pre-PR11 the assertion expected the local handoff to persist;
+    # the reconcile logic now treats local handoff blocks as stale
+    # whenever the bridge summary itself reports zero queued.)
+    assert "No internal handoffs are currently recorded." in handoffs_text
+    # Reconciled task board: T-002 (recorded via the handoff block)
+    # gets promoted to ``done`` because the session settled without
+    # active jobs. T-001 is only mentioned in the user_text; it was
+    # never recorded into the task index, so it does not appear.
+    assert "## done" in task_board_text
+    assert "`T-002`" in task_board_text
 
 
 def test_reconcile_from_bridge_summary_marks_active_task_and_consumes_handoff(tmp_path):

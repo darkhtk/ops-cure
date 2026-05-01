@@ -43,7 +43,12 @@ def test_state_service_mirrors_command_publish_to_kernel_broker(app_env):
     assert received.event.kind == "remote_codex.command.queued"
 
 
-def test_state_service_does_not_mirror_non_command_payloads(app_env):
+def test_state_service_mirrors_non_command_payloads_to_kernel_broker(app_env):
+    """Non-command publishes (machine status, snapshots, etc.) also
+    flow through the kernel broker -- per commit eaf51e0 the remote_codex
+    behavior went symmetric with remote_claude and now mirrors every
+    event kind onto the kernel events stream so browsers can subscribe
+    to one transport instead of the legacy /live SSE pipes."""
     from app.behaviors.remote_codex.state_service import (
         REMOTE_CODEX_MACHINE_SPACE_PREFIX,
         RemoteCodexStateService,
@@ -53,23 +58,22 @@ def test_state_service_does_not_mirror_non_command_payloads(app_env):
     broker = InProcessSubscriptionBroker()
     state_service = RemoteCodexStateService(kernel_subscription_broker=broker)
 
-    subscription = broker.subscribe(
-        space_id=f"{REMOTE_CODEX_MACHINE_SPACE_PREFIX}homedev",
-    )
+    space_id = f"{REMOTE_CODEX_MACHINE_SPACE_PREFIX}homedev"
+    subscription = broker.subscribe(space_id=space_id)
 
     state_service._publish(
         "homedev",
         "thread-A",
         {"kind": "machine", "machine": {"machineId": "homedev"}},
     )
-    state_service._publish(
-        "homedev",
-        "thread-A",
-        {"kind": "snapshot"},
-    )
 
-    received = asyncio.run(subscription.next_event(timeout_seconds=0.2))
-    assert received is None
+    received = asyncio.run(subscription.next_event(timeout_seconds=1.0))
+    assert received is not None
+    assert received.space_id == space_id
+    # The legacy payload kind is preserved inside the event content;
+    # the kernel-side ``EventSummary.kind`` is the synthetic
+    # ``remote_codex.machine`` namespace marker.
+    assert received.event.kind.startswith("remote_codex.")
 
 
 def test_state_service_works_without_kernel_broker(app_env):
