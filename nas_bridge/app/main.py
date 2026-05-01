@@ -17,6 +17,7 @@ from .behaviors.remote_claude import api as remote_claude_api
 from .behaviors.remote_claude.service import RemoteClaudeBehaviorService
 from .behaviors.remote_claude.state_service import RemoteClaudeStateService
 from .behaviors.chat.service import ChatBehaviorService
+from .behaviors.chat.task_service import ChatTaskService
 from .behaviors.orchestration.policy import PolicyService
 from .behaviors.orchestration.recovery import RecoveryService
 from .behaviors.orchestration.service import SessionService
@@ -80,6 +81,7 @@ class ServiceContainer:
     thread_manager: ThreadManager
     announcement_service: AnnouncementService
     chat_service: ChatBehaviorService
+    chat_task_service: ChatTaskService
     ops_service: OpsBehaviorService
     behavior_descriptors: tuple[BehaviorDescriptor, ...]
     kernel_behaviors: list[KernelBehaviorBinding]
@@ -122,6 +124,10 @@ def build_services(settings: Settings) -> ServiceContainer:
     remote_task_service = RemoteTaskService(
         presence_service=presence_service,
         kernel_approval_service=kernel_approval_service,
+    )
+    chat_task_service = ChatTaskService(
+        remote_task_service=remote_task_service,
+        subscription_broker=subscription_broker,
     )
     remote_codex_service = RemoteCodexBehaviorService(
         remote_task_service=remote_task_service,
@@ -242,6 +248,7 @@ def build_services(settings: Settings) -> ServiceContainer:
         thread_manager=thread_manager,
         announcement_service=announcement_service,
         chat_service=chat_service,
+        chat_task_service=chat_task_service,
         ops_service=ops_service,
         behavior_descriptors=behavior_descriptors,
         kernel_behaviors=kernel_behaviors,
