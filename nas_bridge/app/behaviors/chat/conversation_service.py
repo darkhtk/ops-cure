@@ -313,6 +313,21 @@ class ChatConversationService:
                 raise ChatConversationStateError(
                     f"resolution '{resolution}' is not valid for kind={row.kind}",
                 )
+            # Closure authority: only the original opener or the current
+            # owner may close. The bypass_task_guard path (used by
+            # ChatTaskCoordinator after a task settles) skips this check
+            # because the task lease itself is the authority on that
+            # branch — the lease_token already gated who could
+            # complete/fail the task.
+            if not bypass_task_guard:
+                authorized = {row.opener_actor}
+                if row.owner_actor:
+                    authorized.add(row.owner_actor)
+                if closed_by not in authorized:
+                    raise ChatConversationStateError(
+                        f"closed_by={closed_by!r} is not authorized; only opener "
+                        f"({row.opener_actor!r}) or owner ({row.owner_actor!r}) may close",
+                    )
             # When a task is bound and still active, only the task lifecycle
             # path (ChatTaskCoordinator.complete/fail) may close — refuse
             # manual closes so the bound RemoteTask doesn't get orphaned.
@@ -425,6 +440,18 @@ class ChatConversationService:
                 raise ChatConversationStateError(
                     "task-bound conversation owner is governed by the lease; "
                     "release/claim the task instead",
+                )
+            # Only the current owner or the original opener can hand off.
+            # If the conversation has no owner_actor set yet, fall back to
+            # opener-only authority.
+            authorized_handoff = {row.opener_actor}
+            if row.owner_actor:
+                authorized_handoff.add(row.owner_actor)
+            if by_actor not in authorized_handoff:
+                raise ChatConversationStateError(
+                    f"by_actor={by_actor!r} is not authorized to hand off; only "
+                    f"opener ({row.opener_actor!r}) or current owner "
+                    f"({row.owner_actor!r}) may transfer ownership",
                 )
 
             previous_owner = row.owner_actor
