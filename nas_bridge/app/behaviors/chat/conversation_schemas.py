@@ -92,6 +92,8 @@ class ConversationSummary(BaseModel):
     last_speech_at: datetime | None = None
     speech_count: int
     idle_warning_emitted_at: datetime | None = None
+    idle_warning_count: int = 0
+    unaddressed_speech_count: int = 0
     created_at: datetime
     closed_at: datetime | None = None
 

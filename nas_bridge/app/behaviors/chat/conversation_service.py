@@ -87,6 +87,16 @@ EVENT_CONVERSATION_IDLE_WARNING = "chat.conversation.idle_warning"
 EVENT_CONVERSATION_HANDOFF = "chat.conversation.handoff"
 
 
+# Idle escalation tier multipliers (over the caller-supplied tier-1
+# base). With a default 30min tier-1 these resolve to:
+#   tier-1: 30min   -> emit chat.conversation.idle_warning level=1
+#   tier-2: 2h      -> emit chat.conversation.idle_warning level=2
+#   tier-3: 24h     -> auto-abandon (close with resolution=abandoned)
+TIER_1_MULTIPLIER = 1
+TIER_2_MULTIPLIER = 4
+TIER_3_MULTIPLIER = 48
+
+
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -309,7 +319,13 @@ class ChatConversationService:
                 raise ChatConversationStateError(
                     f"conversation already closed (resolution={row.resolution})",
                 )
-            if not is_resolution_allowed(kind=row.kind, resolution=resolution):
+            # bypass paths (task settle / system auto-abandon) carry their
+            # own authority and may use kind-orthogonal resolutions like
+            # ``abandoned``. User-initiated closes still must use the
+            # per-kind vocabulary.
+            if not bypass_task_guard and not is_resolution_allowed(
+                kind=row.kind, resolution=resolution
+            ):
                 raise ChatConversationStateError(
                     f"resolution '{resolution}' is not valid for kind={row.kind}",
                 )
@@ -401,11 +417,24 @@ class ChatConversationService:
 
             row.last_speech_at = now
             row.speech_count = (row.speech_count or 0) + 1
+
+            # Soft turn-taking gauge — count speech that arrives from
+            # someone OTHER than the currently-expected_speaker since the
+            # last address. Reset to 0 whenever expected_speaker changes
+            # (a new address effectively rebases the round).
             if request.addressed_to:
+                if request.addressed_to != row.expected_speaker:
+                    row.unaddressed_speech_count = 0
                 row.expected_speaker = request.addressed_to
             elif request.actor_name == row.expected_speaker:
-                # the expected speaker just spoke — clear the slot
+                # the expected speaker just spoke -- clear the slot and
+                # reset the gauge (round resolved).
                 row.expected_speaker = None
+                row.unaddressed_speech_count = 0
+            elif row.expected_speaker:
+                # someone other than the expected speaker chimed in
+                # without addressing anyone -- bump the noise gauge.
+                row.unaddressed_speech_count = (row.unaddressed_speech_count or 0) + 1
             row.updated_at = now
 
             envelope = self._envelope_for(row.thread_id, message)
@@ -491,17 +520,34 @@ class ChatConversationService:
         discord_thread_id: str,
         idle_threshold_seconds: int,
     ) -> list[ConversationSummary]:
-        """Find ``open`` non-general conversations whose ``last_speech_at`` (or
-        ``created_at`` when nothing was said yet) is older than
-        ``idle_threshold_seconds`` and have not yet emitted an idle
-        warning. Stamp each with ``idle_warning_emitted_at`` and emit
-        one ``chat.conversation.idle_warning`` event per match."""
+        """Multi-tier idle escalation. ``idle_threshold_seconds`` is the
+        tier-1 base; tier-2 fires at 4x and tier-3 at 48x.
+
+        Tier 1 (>= 1x base): emit a chat.conversation.idle_warning at level=1.
+        Tier 2 (>= 4x base): emit a chat.conversation.idle_warning at level=2.
+        Tier 3 (>= 48x base): auto-abandon -- close the conversation with
+            resolution="abandoned" via the bypass path. The standard
+            chat.conversation.closed event tells observers what happened.
+
+        Each tier fires at most once per conversation (driven by
+        ``idle_warning_count`` on the row). A single sweep can advance a
+        very-stale conversation through multiple tiers in one call.
+        Returns the list of conversations whose tier advanced this call."""
 
         threshold = max(0, int(idle_threshold_seconds))
+        if threshold == 0:
+            return []
+
         flagged: list[ConversationSummary] = []
         envelopes: list[EventEnvelope] = []
+        abandon_ids: list[tuple[str, str, dict[str, object]]] = []
         now = _utcnow()
-        cutoff_seconds = threshold
+
+        tier_thresholds = (
+            TIER_1_MULTIPLIER * threshold,
+            TIER_2_MULTIPLIER * threshold,
+            TIER_3_MULTIPLIER * threshold,
+        )
 
         with session_scope() as db:
             thread_row = self._get_thread_row_by_discord(db, discord_thread_id)
@@ -513,7 +559,6 @@ class ChatConversationService:
                 .where(ChatConversationModel.thread_id == thread_row.id)
                 .where(ChatConversationModel.state == CONVERSATION_STATE_OPEN)
                 .where(ChatConversationModel.is_general.is_(False))
-                .where(ChatConversationModel.idle_warning_emitted_at.is_(None))
             )
             for row in db.scalars(stmt):
                 last_active = row.last_speech_at or row.created_at
@@ -525,37 +570,81 @@ class ChatConversationService:
                     else last_active.replace(tzinfo=timezone.utc)
                 )
                 age_seconds = (now - last_active_aware).total_seconds()
-                if age_seconds < cutoff_seconds:
+
+                target_tier = 0
+                if age_seconds >= tier_thresholds[2]:
+                    target_tier = 3
+                elif age_seconds >= tier_thresholds[1]:
+                    target_tier = 2
+                elif age_seconds >= tier_thresholds[0]:
+                    target_tier = 1
+
+                current_tier = row.idle_warning_count or 0
+                if target_tier <= current_tier:
                     continue
 
-                row.idle_warning_emitted_at = now
+                # Advance one or more tiers. We emit a warning row for
+                # tier-1 / tier-2 transitions; tier-3 is handled by the
+                # auto-abandon close after the loop.
+                for next_tier in range(current_tier + 1, min(target_tier, 2) + 1):
+                    payload = {
+                        "conversationId": row.id,
+                        "kind": row.kind,
+                        "title": row.title,
+                        "expectedSpeaker": row.expected_speaker,
+                        "ownerActor": row.owner_actor,
+                        "lastSpeechAt": last_active_aware.isoformat(),
+                        "ageSeconds": int(age_seconds),
+                        "idleThresholdSeconds": threshold,
+                        "level": next_tier,
+                    }
+                    event_message = ChatMessageModel(
+                        thread_id=row.thread_id,
+                        conversation_id=row.id,
+                        actor_name="system",
+                        event_kind=EVENT_CONVERSATION_IDLE_WARNING,
+                        addressed_to=row.expected_speaker,
+                        content=json.dumps(payload, ensure_ascii=False),
+                    )
+                    db.add(event_message)
+                    db.flush()
+                    envelopes.append(self._envelope_for(row.thread_id, event_message))
+                    if row.idle_warning_emitted_at is None:
+                        row.idle_warning_emitted_at = now
+                    row.idle_warning_count = next_tier
+
                 row.updated_at = now
 
-                payload = {
-                    "conversationId": row.id,
-                    "kind": row.kind,
-                    "title": row.title,
-                    "expectedSpeaker": row.expected_speaker,
-                    "ownerActor": row.owner_actor,
-                    "lastSpeechAt": last_active_aware.isoformat(),
-                    "ageSeconds": int(age_seconds),
-                    "idleThresholdSeconds": threshold,
-                }
-                event_message = ChatMessageModel(
-                    thread_id=row.thread_id,
-                    conversation_id=row.id,
-                    actor_name="system",
-                    event_kind=EVENT_CONVERSATION_IDLE_WARNING,
-                    addressed_to=row.expected_speaker,
-                    content=json.dumps(payload, ensure_ascii=False),
-                )
-                db.add(event_message)
-                db.flush()
-                envelopes.append(self._envelope_for(row.thread_id, event_message))
-                flagged.append(self._summary(row))
+                if target_tier == 3:
+                    abandon_payload = {
+                        "ageSeconds": int(age_seconds),
+                        "idleThresholdSeconds": threshold,
+                    }
+                    abandon_ids.append((row.id, last_active_aware.isoformat(), abandon_payload))
+                else:
+                    flagged.append(self._summary(row))
 
+        # Publish warnings first; abandon-closes go through the public
+        # close_conversation path so its own event ordering / publishing
+        # stays consistent with the rest of the service.
         for envelope in envelopes:
             self._publish(envelope)
+
+        for conversation_id, last_active_iso, payload in abandon_ids:
+            summary = "auto-abandoned: tier-3 idle threshold exceeded"
+            self.close_conversation(
+                conversation_id=conversation_id,
+                closed_by="system",
+                resolution="abandoned",
+                summary=f"{summary} (age={payload['ageSeconds']}s, base={payload['idleThresholdSeconds']}s, last={last_active_iso})",
+                bypass_task_guard=True,
+            )
+            with session_scope() as db:
+                refreshed = db.get(ChatConversationModel, conversation_id)
+                if refreshed is not None:
+                    refreshed.idle_warning_count = 3
+                    flagged.append(self._summary(refreshed))
+
         return flagged
 
     # -------- listing / detail ----------------------------------------------
@@ -660,6 +749,8 @@ class ChatConversationService:
             last_speech_at=row.last_speech_at,
             speech_count=row.speech_count or 0,
             idle_warning_emitted_at=row.idle_warning_emitted_at,
+            idle_warning_count=row.idle_warning_count or 0,
+            unaddressed_speech_count=row.unaddressed_speech_count or 0,
             created_at=row.created_at,
             closed_at=row.closed_at,
         )

@@ -120,6 +120,14 @@ class ChatConversationModel(Base):
         DateTime(timezone=True),
         nullable=True,
     )
+    # Multi-tier idle escalation: 0 = no warnings yet, 1 = tier-1 emitted,
+    # 2 = tier-2 emitted, 3 = tier-3 reached (conversation auto-abandoned).
+    idle_warning_count: Mapped[int] = mapped_column(Integer(), default=0)
+    # Soft turn-taking gauge: number of speech acts since the last
+    # expected_speaker change that came from someone OTHER than the
+    # expected_speaker. Visible to clients/operators but not enforced
+    # by the system in v1.
+    unaddressed_speech_count: Mapped[int] = mapped_column(Integer(), default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

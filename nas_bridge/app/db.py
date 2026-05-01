@@ -181,6 +181,16 @@ def _named_migrations(connection) -> tuple[NamedMigration, ...]:
                 ],
             ),
         ),
+        NamedMigration(
+            name="20260501_chat_conversation_escalation_columns",
+            statements=missing_columns(
+                "chat_conversations",
+                [
+                    ("idle_warning_count", "INTEGER NOT NULL DEFAULT 0"),
+                    ("unaddressed_speech_count", "INTEGER NOT NULL DEFAULT 0"),
+                ],
+            ),
+        ),
     )
 
 
