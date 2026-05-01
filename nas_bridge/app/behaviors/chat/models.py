@@ -154,6 +154,12 @@ class ChatMessageModel(Base):
     actor_name: Mapped[str] = mapped_column(index=True)
     event_kind: Mapped[str] = mapped_column(Text(), default="claim")
     addressed_to: Mapped[str | None] = mapped_column(Text(), nullable=True, index=True)
+    # PR20 multi-address: optional JSON-encoded list of additional
+    # addressees beyond the primary ``addressed_to``. ``addressed_to``
+    # remains the canonical single slot (drives expected_speaker);
+    # this field carries the full set so renderers can show "@alice
+    # @bob @carol" when needed without bloating the indexed column.
+    addressed_to_many_json: Mapped[str | None] = mapped_column(Text(), nullable=True)
     # PR15 reply chain: optional pointer to a prior speech act this
     # message replies to. Lets clients render nested threads instead
     # of flat lists once a conversation grows past ~6 turns.

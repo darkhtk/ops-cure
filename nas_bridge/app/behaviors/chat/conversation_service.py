@@ -499,12 +499,36 @@ class ChatConversationService:
 
             clean = sanitize_text(request.content)
             now = _utcnow()
+            # PR20 multi-address normalization: the primary slot
+            # (``addressed_to``) drives expected_speaker; if the caller
+            # only supplied addressed_to_many, lift its first element
+            # into the primary slot so existing turn-taking logic keeps
+            # working unchanged.
+            primary_addr = request.addressed_to
+            extras = list(request.addressed_to_many or [])
+            if primary_addr is None and extras:
+                primary_addr = extras[0]
+                extras_excluding_primary = extras[1:]
+            else:
+                extras_excluding_primary = [a for a in extras if a != primary_addr]
+            many_json = (
+                json.dumps([primary_addr, *extras_excluding_primary], ensure_ascii=False)
+                if (primary_addr and extras_excluding_primary) else
+                (
+                    json.dumps([primary_addr], ensure_ascii=False) if (primary_addr and extras) else
+                    (json.dumps(extras_excluding_primary, ensure_ascii=False) if extras_excluding_primary else None)
+                )
+            )
+            # The primary_addr (possibly lifted from many) is what
+            # turn-taking logic below should treat as request.addressed_to.
+            effective_addr = primary_addr
             message = ChatMessageModel(
                 thread_id=row.thread_id,
                 conversation_id=row.id,
                 actor_name=request.actor_name,
                 event_kind=_speech_event_kind(request.kind),
-                addressed_to=request.addressed_to,
+                addressed_to=primary_addr,
+                addressed_to_many_json=many_json,
                 replies_to_speech_id=request.replies_to_speech_id,
                 content=clean,
             )
@@ -517,12 +541,15 @@ class ChatConversationService:
             # Soft turn-taking gauge — count speech that arrives from
             # someone OTHER than the currently-expected_speaker since the
             # last address. Reset to 0 whenever expected_speaker changes
-            # (a new address effectively rebases the round).
+            # (a new address effectively rebases the round). Use
+            # ``effective_addr`` so multi-address-only callers (where
+            # primary was lifted from addressed_to_many[0]) still drive
+            # the slot.
             over_speech_envelope: EventEnvelope | None = None
-            if request.addressed_to:
-                if request.addressed_to != row.expected_speaker:
+            if effective_addr:
+                if effective_addr != row.expected_speaker:
                     row.unaddressed_speech_count = 0
-                row.expected_speaker = request.addressed_to
+                row.expected_speaker = effective_addr
             elif request.actor_name == row.expected_speaker:
                 # the expected speaker just spoke -- clear the slot and
                 # reset the gauge (round resolved).
@@ -1074,6 +1101,14 @@ class ChatConversationService:
         kind = message.event_kind
         if kind.startswith("chat.speech."):
             kind = kind[len("chat.speech.") :]
+        many: list[str] = []
+        if message.addressed_to_many_json:
+            try:
+                parsed = json.loads(message.addressed_to_many_json)
+                if isinstance(parsed, list):
+                    many = [str(item) for item in parsed if item]
+            except (ValueError, TypeError):
+                many = []
         return SpeechActSummary(
             id=message.id,
             conversation_id=message.conversation_id or "",
@@ -1081,6 +1116,7 @@ class ChatConversationService:
             kind=kind,
             content=message.content,
             addressed_to=message.addressed_to,
+            addressed_to_many=many,
             replies_to_speech_id=message.replies_to_speech_id,
             created_at=message.created_at,
         )

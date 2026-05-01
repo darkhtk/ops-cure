@@ -200,6 +200,15 @@ def _named_migrations(connection) -> tuple[NamedMigration, ...]:
                 ],
             ),
         ),
+        NamedMigration(
+            name="20260501_chat_message_addressed_to_many",
+            statements=missing_columns(
+                "chat_messages",
+                [
+                    ("addressed_to_many_json", "TEXT"),
+                ],
+            ),
+        ),
     )
 
 

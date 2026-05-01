@@ -36,6 +36,11 @@ SpeechKind = Literal[
     "block",
     "defer",
     "summarize",
+    # PR20: a low-cost acknowledgement (👍, "ack", "noted") that
+    # doesn't deserve a full agree/object speech act but still
+    # registers presence + intent. Useful for reducing noise on
+    # "I see you" turns.
+    "react",
 ]
 
 
@@ -89,6 +94,7 @@ class SpeechActSummary(BaseModel):
     kind: str
     content: str
     addressed_to: str | None = None
+    addressed_to_many: list[str] = Field(default_factory=list)
     replies_to_speech_id: str | None = None
     created_at: datetime
 
@@ -161,6 +167,12 @@ class SpeechActSubmitRequest(BaseModel):
     kind: SpeechKind = "claim"
     content: str = Field(min_length=1)
     addressed_to: str | None = None
+    # PR20: additional addressees beyond the primary ``addressed_to``.
+    # The canonical single slot (``addressed_to``) drives
+    # expected_speaker; the full list is stored alongside for
+    # renderers + callers that want to show "@a @b @c" without losing
+    # who's the round's primary expected respondent.
+    addressed_to_many: list[str] = Field(default_factory=list)
     # PR15: optional pointer to a prior speech act this one replies
     # to. The receiving service does not validate that the parent
     # speech belongs to the same conversation -- callers are expected
@@ -175,6 +187,19 @@ class SpeechActSubmitRequest(BaseModel):
             return None
         text = value.strip()
         return text or None
+
+    @field_validator("addressed_to_many")
+    @classmethod
+    def _normalize_addressed_to_many(cls, value: list[str]) -> list[str]:
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for item in value:
+            text = (item or "").strip()
+            if not text or text in seen:
+                continue
+            cleaned.append(text)
+            seen.add(text)
+        return cleaned
 
 
 class ConversationCloseRequest(BaseModel):
