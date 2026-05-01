@@ -137,6 +137,32 @@ class ChatConversationModel(Base):
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class ChatMetricSnapshotModel(Base):
+    """Persistent snapshot of ChatRoomMetrics (PR17). The in-memory
+    metrics on ``ChatConversationService.metrics`` reset on bridge
+    restart -- this table captures point-in-time snapshots so
+    operators can see trends over hours/days. Either thread-scoped
+    or global (thread_id is NULL); call sites pick which.
+
+    The full counter state is stored as a JSON blob so adding new
+    metric fields later doesn't require a schema change.
+    """
+
+    __tablename__ = "chat_metric_snapshots"
+    __table_args__ = (
+        Index("ix_chat_metric_snap_thread_at", "thread_id", "captured_at"),
+        Index("ix_chat_metric_snap_global_at", "captured_at"),
+    )
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=lambda: str(uuid.uuid4()))
+    thread_id: Mapped[str | None] = mapped_column(
+        ForeignKey("chat_threads.id", ondelete="CASCADE"),
+        nullable=True,
+    )
+    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    snapshot_json: Mapped[str] = mapped_column(Text(), default="{}")
+
+
 class ChatConversationReadModel(Base):
     """Per-actor read cursor for a single conversation. PR21.
 

@@ -342,6 +342,27 @@ class ConversationHandoffRequest(BaseModel):
         return text or None
 
 
+class MetricSnapshotEntry(BaseModel):
+    id: str
+    thread_id: str | None = None
+    captured_at: datetime
+    snapshot: dict[str, Any] = Field(default_factory=dict)
+
+
+class MetricHistoryResponse(BaseModel):
+    items: list[MetricSnapshotEntry] = Field(default_factory=list)
+
+
+class LatencyStatsResponse(BaseModel):
+    """Aggregate latency over the last N closed conversations. All
+    times in seconds. Counts per kind so you can see which kinds
+    close fastest."""
+    thread_id: str | None = None
+    sample_size: int
+    by_kind: dict[str, dict[str, float]] = Field(default_factory=dict)
+    overall: dict[str, float] = Field(default_factory=dict)
+
+
 class ConversationMarkReadRequest(BaseModel):
     actor_name: str = Field(min_length=1)
     speech_id: str | None = None  # if None, mark to latest

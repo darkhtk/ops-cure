@@ -56,6 +56,7 @@ from .models import (
     ChatConversationModel,
     ChatConversationReadModel,
     ChatMessageModel,
+    ChatMetricSnapshotModel,
     ChatThreadModel,
 )
 
@@ -799,6 +800,147 @@ class ChatConversationService:
                     flagged.append(self._summary(refreshed))
 
         return flagged
+
+    # -------- persistent metrics + latency (PR17) -------------------------
+
+    def capture_metric_snapshot(
+        self,
+        *,
+        discord_thread_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Persist the current in-memory metric counters as a row in
+        chat_metric_snapshots. When thread_id is None, snapshot is
+        global. Operators / cron callers use this to build a time
+        series across restarts."""
+        thread_uuid = None
+        if discord_thread_id is not None:
+            with session_scope() as db:
+                tr = self._get_thread_row_by_discord(db, discord_thread_id)
+                if tr is None:
+                    raise ChatThreadNotFoundError(discord_thread_id)
+                thread_uuid = tr.id
+        snap_json = json.dumps(self._metrics.snapshot(), ensure_ascii=False)
+        with session_scope() as db:
+            row = ChatMetricSnapshotModel(
+                thread_id=thread_uuid,
+                snapshot_json=snap_json,
+            )
+            db.add(row)
+            db.flush()
+            return {
+                "id": row.id,
+                "thread_id": thread_uuid,
+                "captured_at": row.captured_at,
+                "snapshot": json.loads(snap_json),
+            }
+
+    def get_metric_history(
+        self,
+        *,
+        discord_thread_id: str | None = None,
+        since: datetime | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Return persisted metric snapshots ordered newest-first."""
+        thread_uuid = None
+        with session_scope() as db:
+            if discord_thread_id is not None:
+                tr = self._get_thread_row_by_discord(db, discord_thread_id)
+                if tr is None:
+                    raise ChatThreadNotFoundError(discord_thread_id)
+                thread_uuid = tr.id
+
+            stmt = select(ChatMetricSnapshotModel)
+            if thread_uuid is not None:
+                stmt = stmt.where(ChatMetricSnapshotModel.thread_id == thread_uuid)
+            else:
+                stmt = stmt.where(ChatMetricSnapshotModel.thread_id.is_(None))
+            if since is not None:
+                stmt = stmt.where(ChatMetricSnapshotModel.captured_at >= since)
+            stmt = stmt.order_by(ChatMetricSnapshotModel.captured_at.desc()).limit(max(1, min(int(limit), 500)))
+
+            result = []
+            for row in db.scalars(stmt):
+                try:
+                    snap = json.loads(row.snapshot_json)
+                except (ValueError, TypeError):
+                    snap = {}
+                result.append({
+                    "id": row.id,
+                    "thread_id": row.thread_id,
+                    "captured_at": row.captured_at,
+                    "snapshot": snap,
+                })
+            return result
+
+    def compute_latency_stats(
+        self,
+        *,
+        discord_thread_id: str | None = None,
+        sample_limit: int = 200,
+    ) -> dict[str, Any]:
+        """Aggregate latency stats over the last N closed conversations.
+        Time-to-close is closed_at minus created_at. Returns per-kind
+        + overall avg/min/max in seconds."""
+        thread_uuid = None
+        with session_scope() as db:
+            if discord_thread_id is not None:
+                tr = self._get_thread_row_by_discord(db, discord_thread_id)
+                if tr is None:
+                    raise ChatThreadNotFoundError(discord_thread_id)
+                thread_uuid = tr.id
+
+            stmt = (
+                select(ChatConversationModel)
+                .where(ChatConversationModel.state == CONVERSATION_STATE_CLOSED)
+                .where(ChatConversationModel.is_general.is_(False))
+            )
+            if thread_uuid is not None:
+                stmt = stmt.where(ChatConversationModel.thread_id == thread_uuid)
+            stmt = stmt.order_by(ChatConversationModel.closed_at.desc()).limit(
+                max(1, min(int(sample_limit), 1000))
+            )
+
+            samples: list[tuple[str, float]] = []
+            for row in db.scalars(stmt):
+                if row.closed_at is None or row.created_at is None:
+                    continue
+                created = row.created_at if row.created_at.tzinfo else row.created_at.replace(tzinfo=timezone.utc)
+                closed = row.closed_at if row.closed_at.tzinfo else row.closed_at.replace(tzinfo=timezone.utc)
+                delta = (closed - created).total_seconds()
+                if delta < 0:
+                    continue
+                samples.append((row.kind, delta))
+
+        by_kind: dict[str, dict[str, float]] = {}
+        all_deltas: list[float] = []
+        for kind, delta in samples:
+            bucket = by_kind.setdefault(kind, {"count": 0, "min": delta, "max": delta, "sum": 0.0})
+            bucket["count"] += 1
+            bucket["min"] = min(bucket["min"], delta)
+            bucket["max"] = max(bucket["max"], delta)
+            bucket["sum"] += delta
+            all_deltas.append(delta)
+
+        # Convert sum to avg
+        for kind, b in by_kind.items():
+            b["avg"] = b["sum"] / b["count"] if b["count"] else 0.0
+            del b["sum"]
+
+        overall = {}
+        if all_deltas:
+            overall = {
+                "count": float(len(all_deltas)),
+                "min": min(all_deltas),
+                "max": max(all_deltas),
+                "avg": sum(all_deltas) / len(all_deltas),
+            }
+        return {
+            "thread_id": discord_thread_id,
+            "sample_size": len(samples),
+            "by_kind": by_kind,
+            "overall": overall,
+        }
 
     # -------- per-actor read cursor (PR21) ---------------------------------
 
