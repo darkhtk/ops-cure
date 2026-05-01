@@ -30,6 +30,7 @@ from .models import (  # noqa: F401
 )
 from .repository import V2Repository  # noqa: F401
 from .actor_service import ActorService, DEFAULT_OPERATOR_HANDLE  # noqa: F401
+from .operation_mirror import OperationMirror  # noqa: F401
 
 __all__ = [
     "ActorV2Model",
@@ -40,4 +41,5 @@ __all__ = [
     "V2Repository",
     "ActorService",
     "DEFAULT_OPERATOR_HANDLE",
+    "OperationMirror",
 ]

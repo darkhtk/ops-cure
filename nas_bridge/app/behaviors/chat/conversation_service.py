@@ -36,6 +36,7 @@ from ...kernel.events import (
 )
 from ...kernel.storage import session_scope
 from ...kernel.operation_service import KernelOperationService as RemoteTaskService
+from ...kernel.v2 import OperationMirror
 from ...schemas import RemoteTaskCreateRequest
 from ...transcript_service import sanitize_text
 from .conversation_schemas import (
@@ -218,6 +219,7 @@ class ChatConversationService:
         metrics: ChatRoomMetrics | None = None,
         actor_authorizer: ActorAuthorizer | None = None,
         policy: "ChatPolicyConfig | None" = None,
+        operation_mirror: OperationMirror | None = None,
     ) -> None:
         self._broker = subscription_broker
         self._remote_task_service = remote_task_service
@@ -228,6 +230,10 @@ class ChatConversationService:
         # pass (back-compat with un-wired identity).
         self._actor_authorizer = actor_authorizer
         self._policy = policy or ChatPolicyConfig()
+        # Protocol v2 dual-write (F3). Defaults to a real mirror so v2
+        # tables fill up automatically; tests that bootstrap their own
+        # DB get the mirror writing into v2 alongside v1.
+        self._operation_mirror = operation_mirror or OperationMirror()
 
     def _check_actor(self, actor_name: str, *, caller_context: Any = None) -> None:
         if self._actor_authorizer is None:
@@ -364,6 +370,23 @@ class ChatConversationService:
             db.add(row)
             db.flush()
 
+            # F3 dual-write: mirror v1 conversation as a v2 Operation in
+            # the same transaction. Failures here would taint the v1
+            # write; while the mirror is non-authoritative this is the
+            # intended coupling -- if v2 writes break we want to know.
+            row.v2_operation_id = self._operation_mirror.mirror_conversation_open(
+                db,
+                v1_conversation_id=row.id,
+                thread_id=thread_row.id,
+                kind=row.kind,
+                title=row.title,
+                intent=row.intent,
+                opener_actor=row.opener_actor,
+                owner_actor=row.owner_actor,
+                addressed_to=row.expected_speaker,
+                is_general=False,
+            )
+
             payload = self._summary_payload(row)
             event_message = ChatMessageModel(
                 thread_id=thread_row.id,
@@ -460,6 +483,15 @@ class ChatConversationService:
             row.closed_by = closed_by
             row.closed_at = now
             row.updated_at = now
+
+            # F3 dual-write: mirror the close to v2 in the same tx.
+            self._operation_mirror.mirror_conversation_close(
+                db,
+                v2_operation_id=row.v2_operation_id,
+                closed_by_actor=closed_by,
+                resolution=resolution,
+                resolution_summary=summary,
+            )
 
             payload = self._summary_payload(row)
             event_message = ChatMessageModel(
@@ -1318,12 +1350,33 @@ class ChatConversationService:
             ),
         )
 
-    @staticmethod
     def _get_or_create_general(
+        self,
         db,
         thread_row: ChatThreadModel,
     ) -> ChatConversationModel:
-        return get_or_create_general_conversation(db, thread_row)
+        existed = db.scalar(
+            select(ChatConversationModel)
+            .where(ChatConversationModel.thread_id == thread_row.id)
+            .where(ChatConversationModel.is_general.is_(True))
+            .limit(1),
+        ) is not None
+        row = get_or_create_general_conversation(db, thread_row)
+        if not existed and row.v2_operation_id is None:
+            # Newly created general -- mirror to v2 (F3).
+            row.v2_operation_id = self._operation_mirror.mirror_conversation_open(
+                db,
+                v1_conversation_id=row.id,
+                thread_id=thread_row.id,
+                kind=row.kind,
+                title=row.title,
+                intent=row.intent,
+                opener_actor=row.opener_actor,
+                owner_actor=row.owner_actor,
+                addressed_to=row.expected_speaker,
+                is_general=True,
+            )
+        return row
 
     @staticmethod
     def _summary(row: ChatConversationModel) -> ConversationSummary:

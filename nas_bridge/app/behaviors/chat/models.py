@@ -107,6 +107,10 @@ class ChatConversationModel(Base):
         index=True,
     )
     bound_task_id: Mapped[str | None] = mapped_column(index=True, nullable=True)
+    # Cross-link to v2 operations_v2.id (Protocol v2, F3 dual-write).
+    # Nullable so legacy rows created before F3 still load -- they will
+    # never gain a v2 mirror, only new rows do.
+    v2_operation_id: Mapped[str | None] = mapped_column(index=True, nullable=True)
     resolution: Mapped[str | None] = mapped_column(index=True, nullable=True)
     resolution_summary: Mapped[str | None] = mapped_column(Text(), nullable=True)
     closed_by: Mapped[str | None] = mapped_column(index=True, nullable=True)
@@ -232,4 +236,7 @@ class ChatMessageModel(Base):
         index=True,
     )
     content: Mapped[str] = mapped_column(Text())
+    # F4 dual-write cross-link: the v2 OperationEvent.id mirrored from
+    # this v1 message. Nullable so legacy rows keep loading.
+    v2_event_id: Mapped[str | None] = mapped_column(index=True, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
