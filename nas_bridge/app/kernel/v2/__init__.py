@@ -31,6 +31,19 @@ from .models import (  # noqa: F401
 from .repository import V2Repository  # noqa: F401
 from .actor_service import ActorService, DEFAULT_OPERATOR_HANDLE  # noqa: F401
 from .operation_mirror import OperationMirror  # noqa: F401
+from .capabilities import (  # noqa: F401
+    CAP_CONVERSATION_OPEN,
+    CAP_CONVERSATION_CLOSE,
+    CAP_CONVERSATION_CLOSE_OPENER,
+    CAP_CONVERSATION_HANDOFF,
+    CAP_SPEECH_SUBMIT,
+    CAP_TASK_CLAIM,
+    CAP_TASK_COMPLETE,
+    CAP_TASK_FAIL,
+    CAP_TASK_APPROVE_DESTRUCTIVE,
+    CapabilityService,
+    make_capability_authorizer,
+)
 
 __all__ = [
     "ActorV2Model",
@@ -42,4 +55,15 @@ __all__ = [
     "ActorService",
     "DEFAULT_OPERATOR_HANDLE",
     "OperationMirror",
+    "CapabilityService",
+    "make_capability_authorizer",
+    "CAP_CONVERSATION_OPEN",
+    "CAP_CONVERSATION_CLOSE",
+    "CAP_CONVERSATION_CLOSE_OPENER",
+    "CAP_CONVERSATION_HANDOFF",
+    "CAP_SPEECH_SUBMIT",
+    "CAP_TASK_CLAIM",
+    "CAP_TASK_COMPLETE",
+    "CAP_TASK_FAIL",
+    "CAP_TASK_APPROVE_DESTRUCTIVE",
 ]
