@@ -191,6 +191,15 @@ def _named_migrations(connection) -> tuple[NamedMigration, ...]:
                 ],
             ),
         ),
+        NamedMigration(
+            name="20260501_chat_message_reply_chain",
+            statements=missing_columns(
+                "chat_messages",
+                [
+                    ("replies_to_speech_id", "TEXT"),
+                ],
+            ),
+        ),
     )
 
 

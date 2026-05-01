@@ -89,6 +89,7 @@ class SpeechActSummary(BaseModel):
     kind: str
     content: str
     addressed_to: str | None = None
+    replies_to_speech_id: str | None = None
     created_at: datetime
 
 
@@ -160,6 +161,12 @@ class SpeechActSubmitRequest(BaseModel):
     kind: SpeechKind = "claim"
     content: str = Field(min_length=1)
     addressed_to: str | None = None
+    # PR15: optional pointer to a prior speech act this one replies
+    # to. The receiving service does not validate that the parent
+    # speech belongs to the same conversation -- callers are expected
+    # to keep that consistent (cross-conversation replies could arise
+    # from cross-references like "see #other-conv message-X").
+    replies_to_speech_id: str | None = None
 
     @field_validator("addressed_to")
     @classmethod

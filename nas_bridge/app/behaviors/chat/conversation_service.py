@@ -478,6 +478,7 @@ class ChatConversationService:
                 actor_name=request.actor_name,
                 event_kind=_speech_event_kind(request.kind),
                 addressed_to=request.addressed_to,
+                replies_to_speech_id=request.replies_to_speech_id,
                 content=clean,
             )
             db.add(message)
@@ -944,6 +945,7 @@ class ChatConversationService:
             kind=kind,
             content=message.content,
             addressed_to=message.addressed_to,
+            replies_to_speech_id=message.replies_to_speech_id,
             created_at=message.created_at,
         )
 

@@ -154,5 +154,13 @@ class ChatMessageModel(Base):
     actor_name: Mapped[str] = mapped_column(index=True)
     event_kind: Mapped[str] = mapped_column(Text(), default="claim")
     addressed_to: Mapped[str | None] = mapped_column(Text(), nullable=True, index=True)
+    # PR15 reply chain: optional pointer to a prior speech act this
+    # message replies to. Lets clients render nested threads instead
+    # of flat lists once a conversation grows past ~6 turns.
+    replies_to_speech_id: Mapped[str | None] = mapped_column(
+        ForeignKey("chat_messages.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     content: Mapped[str] = mapped_column(Text())
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
