@@ -29,6 +29,7 @@ from .models import (  # noqa: F401
     OperationArtifactV2Model,
 )
 from .repository import V2Repository  # noqa: F401
+from .actor_service import ActorService, DEFAULT_OPERATOR_HANDLE  # noqa: F401
 
 __all__ = [
     "ActorV2Model",
@@ -37,4 +38,6 @@ __all__ = [
     "OperationEventV2Model",
     "OperationArtifactV2Model",
     "V2Repository",
+    "ActorService",
+    "DEFAULT_OPERATOR_HANDLE",
 ]
