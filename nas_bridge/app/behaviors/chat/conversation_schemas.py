@@ -20,7 +20,7 @@ The protocol distinguishes:
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -99,8 +99,14 @@ class ConversationOpenRequest(BaseModel):
     owner_actor: str | None = None
     addressed_to: str | None = None
     parent_conversation_id: str | None = None
+    # Only meaningful when kind == "task". A bound RemoteTaskModel row is
+    # created through RemoteTaskService and its id stored on
+    # ``bound_task_id``. Ignored for inquiry / proposal.
+    objective: str | None = None
+    success_criteria: dict[str, Any] = Field(default_factory=dict)
+    priority: str = "normal"
 
-    @field_validator("title", "intent", "opener_actor", "owner_actor", "addressed_to")
+    @field_validator("title", "intent", "opener_actor", "owner_actor", "addressed_to", "objective")
     @classmethod
     def _strip(cls, value: str | None) -> str | None:
         if value is None:
@@ -134,3 +140,68 @@ class ConversationCloseRequest(BaseModel):
     @classmethod
     def _normalize_resolution(cls, value: str) -> str:
         return value.strip().lower().replace(" ", "_")
+
+
+# ----- task lifecycle (kind=task only) ---------------------------------------
+
+
+class ChatTaskClaimRequest(BaseModel):
+    actor_name: str = Field(min_length=1)
+    lease_seconds: int = 120
+
+    @field_validator("lease_seconds")
+    @classmethod
+    def _bound_lease(cls, value: int) -> int:
+        return max(10, min(value, 3600))
+
+
+class ChatTaskHeartbeatRequest(BaseModel):
+    actor_name: str = Field(min_length=1)
+    lease_token: str = Field(min_length=1)
+    phase: str = Field(min_length=1)
+    summary: str | None = None
+    commands_run_count: int = 0
+    files_read_count: int = 0
+    files_modified_count: int = 0
+    tests_run_count: int = 0
+    lease_seconds: int = 120
+
+    @field_validator(
+        "commands_run_count",
+        "files_read_count",
+        "files_modified_count",
+        "tests_run_count",
+        "lease_seconds",
+    )
+    @classmethod
+    def _non_negative(cls, value: int) -> int:
+        return max(0, value)
+
+
+class ChatTaskEvidenceRequest(BaseModel):
+    actor_name: str = Field(min_length=1)
+    kind: str = Field(min_length=1)
+    summary: str = Field(min_length=1)
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class ChatTaskCompleteRequest(BaseModel):
+    actor_name: str = Field(min_length=1)
+    lease_token: str = Field(min_length=1)
+    summary: str | None = None
+
+
+class ChatTaskFailRequest(BaseModel):
+    actor_name: str = Field(min_length=1)
+    lease_token: str = Field(min_length=1)
+    error_text: str = Field(min_length=1)
+
+
+class ChatTaskStateResponse(BaseModel):
+    """Combined response shape for task lifecycle endpoints. Returns the
+    underlying RemoteTask payload (already in Opscure shape) plus a
+    snapshot of the bound conversation so callers can verify
+    auto-close happened on terminal transitions."""
+
+    conversation: ConversationSummary
+    task: dict[str, Any]

@@ -4,6 +4,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from ...auth import require_bridge_token
 from .conversation_schemas import (
+    ChatTaskClaimRequest,
+    ChatTaskCompleteRequest,
+    ChatTaskEvidenceRequest,
+    ChatTaskFailRequest,
+    ChatTaskHeartbeatRequest,
+    ChatTaskStateResponse,
     ConversationCloseRequest,
     ConversationDetailResponse,
     ConversationListResponse,
@@ -17,6 +23,7 @@ from .conversation_service import (
     ChatConversationStateError,
     ChatThreadNotFoundError,
 )
+from .task_coordinator import ChatTaskBindingError
 from .schemas import (
     ChatMessageSubmitRequest,
     ChatMessageSubmitResponse,
@@ -215,4 +222,112 @@ async def close_conversation(
     except ChatConversationNotFoundError:
         raise HTTPException(status_code=404, detail="Conversation not found.")
     except ChatConversationStateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
+# ---- task lifecycle (kind=task only) ---------------------------------------
+
+
+@router.post(
+    "/conversations/{conversation_id}/task/claim",
+    response_model=ChatTaskStateResponse,
+)
+async def claim_task_conversation(
+    conversation_id: str,
+    payload: ChatTaskClaimRequest,
+    request: Request,
+) -> ChatTaskStateResponse:
+    services = request.app.state.services
+    try:
+        return services.chat_task_coordinator.claim(
+            conversation_id=conversation_id,
+            request=payload,
+        )
+    except ChatTaskBindingError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
+@router.post(
+    "/conversations/{conversation_id}/task/heartbeat",
+    response_model=ChatTaskStateResponse,
+)
+async def heartbeat_task_conversation(
+    conversation_id: str,
+    payload: ChatTaskHeartbeatRequest,
+    request: Request,
+) -> ChatTaskStateResponse:
+    services = request.app.state.services
+    try:
+        return services.chat_task_coordinator.heartbeat(
+            conversation_id=conversation_id,
+            request=payload,
+        )
+    except ChatTaskBindingError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
+@router.post(
+    "/conversations/{conversation_id}/task/evidence",
+    response_model=ChatTaskStateResponse,
+)
+async def evidence_task_conversation(
+    conversation_id: str,
+    payload: ChatTaskEvidenceRequest,
+    request: Request,
+) -> ChatTaskStateResponse:
+    services = request.app.state.services
+    try:
+        return services.chat_task_coordinator.add_evidence(
+            conversation_id=conversation_id,
+            request=payload,
+        )
+    except ChatTaskBindingError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
+@router.post(
+    "/conversations/{conversation_id}/task/complete",
+    response_model=ChatTaskStateResponse,
+)
+async def complete_task_conversation(
+    conversation_id: str,
+    payload: ChatTaskCompleteRequest,
+    request: Request,
+) -> ChatTaskStateResponse:
+    services = request.app.state.services
+    try:
+        return services.chat_task_coordinator.complete(
+            conversation_id=conversation_id,
+            request=payload,
+        )
+    except ChatTaskBindingError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
+@router.post(
+    "/conversations/{conversation_id}/task/fail",
+    response_model=ChatTaskStateResponse,
+)
+async def fail_task_conversation(
+    conversation_id: str,
+    payload: ChatTaskFailRequest,
+    request: Request,
+) -> ChatTaskStateResponse:
+    services = request.app.state.services
+    try:
+        return services.chat_task_coordinator.fail(
+            conversation_id=conversation_id,
+            request=payload,
+        )
+    except ChatTaskBindingError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc))

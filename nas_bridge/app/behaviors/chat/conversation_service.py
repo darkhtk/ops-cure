@@ -31,6 +31,8 @@ from sqlalchemy import select, update
 
 from ...kernel.events import EventEnvelope, EventSummary, encode_event_cursor
 from ...kernel.storage import session_scope
+from ...schemas import RemoteTaskCreateRequest
+from ...services.remote_task_service import RemoteTaskService
 from ...transcript_service import sanitize_text
 from .conversation_schemas import (
     ConversationDetailResponse,
@@ -42,11 +44,35 @@ from .conversation_schemas import (
 )
 from .models import (
     CONVERSATION_KIND_GENERAL,
+    CONVERSATION_KIND_TASK,
     CONVERSATION_STATE_CLOSED,
     CONVERSATION_STATE_OPEN,
     ChatConversationModel,
     ChatMessageModel,
     ChatThreadModel,
+)
+
+
+# RemoteTaskService keys tasks by (machine_id, thread_id). Chat tasks share a
+# single sentinel machine; the chat thread's internal UUID supplies the
+# scope. Once Operation is promoted to the kernel (Candidate 2 in
+# generic-kernel-promotion-candidates.md) this sentinel goes away.
+CHAT_TASK_MACHINE_ID = "chat"
+
+# Statuses RemoteTaskService treats as "still owning the conversation". A
+# manual ``close_conversation`` against a task-bound conversation in any of
+# these states is rejected so the lifecycle stays consistent — only
+# ChatTaskCoordinator's complete/fail/cancel paths can close them.
+TASK_NON_TERMINAL_STATUSES = frozenset(
+    {
+        "queued",
+        "claimed",
+        "executing",
+        "blocked_approval",
+        "verifying",
+        "interrupted",
+        "stalled",
+    }
 )
 
 
@@ -79,8 +105,14 @@ class ChatConversationStateError(ValueError):
 
 
 class ChatConversationService:
-    def __init__(self, *, subscription_broker: Any | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        subscription_broker: Any | None = None,
+        remote_task_service: RemoteTaskService | None = None,
+    ) -> None:
         self._broker = subscription_broker
+        self._remote_task_service = remote_task_service
 
     # -------- thread / general bootstrap ------------------------------------
 
@@ -134,6 +166,36 @@ class ChatConversationService:
         discord_thread_id: str,
         request: ConversationOpenRequest,
     ) -> ConversationSummary:
+        # kind=task requires a wired RemoteTaskService and an objective.
+        # We create the bound RemoteTask BEFORE inserting the
+        # ChatConversationModel row so the conversation is never visible
+        # without its task. If the task-create step throws we never
+        # commit the conversation — failure stays atomic from the
+        # caller's perspective.
+        bound_task_id: str | None = None
+        if request.kind == CONVERSATION_KIND_TASK:
+            if self._remote_task_service is None:
+                raise ChatConversationStateError(
+                    "remote_task_service is not configured; kind=task is unavailable",
+                )
+            if not request.objective:
+                raise ChatConversationStateError(
+                    "kind=task requires an objective",
+                )
+            chat_thread_id = self._resolve_chat_thread_id_for_open(discord_thread_id)
+            task = self._remote_task_service.create_task(
+                RemoteTaskCreateRequest(
+                    machine_id=CHAT_TASK_MACHINE_ID,
+                    thread_id=chat_thread_id,
+                    objective=request.objective,
+                    success_criteria=request.success_criteria,
+                    origin_surface="chat",
+                    priority=request.priority,
+                    created_by=request.opener_actor,
+                ),
+            )
+            bound_task_id = task.id
+
         envelope: EventEnvelope | None = None
         summary: ConversationSummary
         with session_scope() as db:
@@ -151,6 +213,7 @@ class ChatConversationService:
                 owner_actor=request.owner_actor or request.opener_actor,
                 expected_speaker=request.addressed_to,
                 parent_conversation_id=request.parent_conversation_id,
+                bound_task_id=bound_task_id,
             )
             db.add(row)
             db.flush()
@@ -172,6 +235,13 @@ class ChatConversationService:
         self._publish(envelope)
         return summary
 
+    def _resolve_chat_thread_id_for_open(self, discord_thread_id: str) -> str:
+        with session_scope() as db:
+            row = self._get_thread_row_by_discord(db, discord_thread_id)
+            if row is None:
+                raise ChatThreadNotFoundError(discord_thread_id)
+            return row.id
+
     def close_conversation(
         self,
         *,
@@ -179,6 +249,7 @@ class ChatConversationService:
         closed_by: str,
         resolution: str,
         summary: str | None = None,
+        bypass_task_guard: bool = False,
     ) -> ConversationSummary:
         envelope: EventEnvelope | None = None
         result: ConversationSummary
@@ -194,6 +265,20 @@ class ChatConversationService:
                 raise ChatConversationStateError(
                     f"conversation already closed (resolution={row.resolution})",
                 )
+            # When a task is bound and still active, only the task lifecycle
+            # path (ChatTaskCoordinator.complete/fail) may close — refuse
+            # manual closes so the bound RemoteTask doesn't get orphaned.
+            if (
+                row.bound_task_id
+                and not bypass_task_guard
+                and self._remote_task_service is not None
+            ):
+                task = self._remote_task_service.get_task(row.bound_task_id)
+                if task.status in TASK_NON_TERMINAL_STATUSES:
+                    raise ChatConversationStateError(
+                        f"task-bound conversation cannot be manually closed while "
+                        f"task is {task.status}; complete/fail the task instead",
+                    )
 
             now = _utcnow()
             row.state = CONVERSATION_STATE_CLOSED
