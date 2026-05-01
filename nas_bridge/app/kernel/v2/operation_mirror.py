@@ -80,6 +80,60 @@ class OperationMirror:
             )
         return op.id
 
+    def mirror_message(
+        self,
+        db: Session,
+        *,
+        v2_operation_id: str | None,
+        actor_name: str,
+        event_kind: str,
+        content: str,
+        addressed_to: str | None,
+        addressed_to_many: list[str] | None,
+        replies_to_v2_event_id: str | None,
+        private_to_actors: list[str] | None = None,
+    ) -> str | None:
+        """Mirror a v1 ChatMessage row into a v2 OperationEvent. Returns
+        the v2 event id (or None if the conversation has no v2 mirror)."""
+        if not v2_operation_id:
+            return None
+        actor = self._actors.ensure_actor_by_handle(
+            db, handle=_normalize_handle(actor_name) or "@system",
+            kind="human" if actor_name == "system" else "ai",
+        )
+        addressed_handles = []
+        primary = _normalize_handle(addressed_to)
+        if primary:
+            addressed_handles.append(primary)
+        for extra in addressed_to_many or []:
+            extra_h = _normalize_handle(extra)
+            if extra_h and extra_h not in addressed_handles:
+                addressed_handles.append(extra_h)
+        addressed_actor_ids: list[str] = []
+        for handle in addressed_handles:
+            row = self._actors.ensure_actor_by_handle(db, handle=handle)
+            addressed_actor_ids.append(row.id)
+        private_actor_ids: list[str] | None = None
+        if private_to_actors:
+            private_actor_ids = []
+            for handle in private_to_actors:
+                handle_norm = _normalize_handle(handle)
+                if not handle_norm:
+                    continue
+                row = self._actors.ensure_actor_by_handle(db, handle=handle_norm)
+                private_actor_ids.append(row.id)
+        ev = self._repo.insert_event(
+            db,
+            operation_id=v2_operation_id,
+            actor_id=actor.id,
+            kind=event_kind,
+            payload={"text": content} if event_kind.startswith("chat.speech.") else {"content": content},
+            addressed_to_actor_ids=addressed_actor_ids or None,
+            replies_to_event_id=replies_to_v2_event_id,
+            private_to_actor_ids=private_actor_ids,
+        )
+        return ev.id
+
     def mirror_conversation_close(
         self,
         db: Session,

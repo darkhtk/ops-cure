@@ -221,6 +221,15 @@ def _named_migrations(connection) -> tuple[NamedMigration, ...]:
                 ],
             ),
         ),
+        NamedMigration(
+            name="20260502_chat_message_v2_link",
+            statements=missing_columns(
+                "chat_messages",
+                [
+                    ("v2_event_id", "TEXT"),
+                ],
+            ),
+        ),
     )
 
 

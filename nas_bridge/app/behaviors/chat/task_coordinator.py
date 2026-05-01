@@ -34,6 +34,7 @@ from ...kernel.events import (
     publish_envelope,
 )
 from ...kernel.storage import session_scope
+from ...kernel.v2 import OperationMirror as _OperationMirror
 from ...schemas import (
     RemoteTaskApprovalRequest,
     RemoteTaskApprovalResolveRequest,
@@ -61,7 +62,7 @@ from .conversation_schemas import (
     ChatTaskStateResponse,
     ConversationSummary,
 )
-from .conversation_service import ChatConversationService
+from .conversation_service import ChatConversationService, _mirror_v1_message_to_v2
 from .models import (
     CONVERSATION_KIND_TASK,
     CONVERSATION_STATE_CLOSED,
@@ -517,6 +518,8 @@ class ChatTaskCoordinator:
             )
             db.add(event_message)
             db.flush()
+            # F4 dual-write: mirror task lifecycle event into v2.
+            _mirror_v1_message_to_v2(db, event_message, row, _OperationMirror())
             envelope = make_message_envelope(
                 space_id=row.thread_id,
                 message=event_message,

@@ -180,6 +180,45 @@ def _speech_event_kind(kind: str) -> str:
     return f"chat.speech.{kind}"
 
 
+def _mirror_v1_message_to_v2(
+    db,
+    msg: "ChatMessageModel",
+    conversation_row: "ChatConversationModel",
+    operation_mirror: OperationMirror,
+) -> None:
+    """F4: Resolve replies_to + addressed_to_many from v1 forms and call
+    OperationMirror.mirror_message. Stamps v2_event_id back on the v1
+    message row so downstream consumers can join across protocols.
+
+    Module-level so ChatTaskCoordinator and other services that own a
+    ChatMessageModel insert can share the dual-write with the same
+    semantics ChatConversationService uses.
+    """
+    if conversation_row.v2_operation_id is None:
+        return
+    extras: list[str] = []
+    if msg.addressed_to_many_json:
+        try:
+            extras = list(json.loads(msg.addressed_to_many_json) or [])
+        except (ValueError, TypeError):
+            extras = []
+    parent_v2: str | None = None
+    if msg.replies_to_speech_id:
+        parent = db.get(ChatMessageModel, msg.replies_to_speech_id)
+        if parent is not None:
+            parent_v2 = parent.v2_event_id
+    msg.v2_event_id = operation_mirror.mirror_message(
+        db,
+        v2_operation_id=conversation_row.v2_operation_id,
+        actor_name=msg.actor_name,
+        event_kind=msg.event_kind,
+        content=msg.content,
+        addressed_to=msg.addressed_to,
+        addressed_to_many=extras,
+        replies_to_v2_event_id=parent_v2,
+    )
+
+
 class ChatConversationNotFoundError(LookupError):
     """Raised when a conversation cannot be located."""
 
@@ -398,6 +437,7 @@ class ChatConversationService:
             )
             db.add(event_message)
             db.flush()
+            _mirror_v1_message_to_v2(db, event_message, row, self._operation_mirror)
             envelope = self._envelope_for(thread_row.id, event_message)
             summary = self._summary(row)
 
@@ -503,6 +543,7 @@ class ChatConversationService:
             )
             db.add(event_message)
             db.flush()
+            _mirror_v1_message_to_v2(db, event_message, row, self._operation_mirror)
             envelope = self._envelope_for(row.thread_id, event_message)
             result = self._summary(row)
 
@@ -568,6 +609,7 @@ class ChatConversationService:
             )
             db.add(message)
             db.flush()
+            _mirror_v1_message_to_v2(db, message, row, self._operation_mirror)
 
             row.last_speech_at = now
             row.speech_count = (row.speech_count or 0) + 1
@@ -613,6 +655,7 @@ class ChatConversationService:
                     )
                     db.add(over_msg)
                     db.flush()
+                    _mirror_v1_message_to_v2(db, over_msg, row, self._operation_mirror)
                     over_speech_envelope = self._envelope_for(row.thread_id, over_msg)
             row.updated_at = now
 
@@ -690,6 +733,7 @@ class ChatConversationService:
             )
             db.add(event_message)
             db.flush()
+            _mirror_v1_message_to_v2(db, event_message, row, self._operation_mirror)
             envelope = self._envelope_for(row.thread_id, event_message)
             result = self._summary(row)
 
@@ -793,6 +837,7 @@ class ChatConversationService:
                     )
                     db.add(event_message)
                     db.flush()
+                    _mirror_v1_message_to_v2(db, event_message, row, self._operation_mirror)
                     envelopes.append(self._envelope_for(row.thread_id, event_message))
                     if row.idle_warning_emitted_at is None:
                         row.idle_warning_emitted_at = now

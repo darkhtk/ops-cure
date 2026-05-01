@@ -12,9 +12,10 @@ from ...kernel.events import (
     publish_envelope,
 )
 from ...kernel.storage import session_scope
+from ...kernel.v2 import OperationMirror as _OperationMirror
 from ...transcript_service import sanitize_text
 from ...transports.discord.threads import ThreadManager
-from .conversation_service import get_or_create_general_conversation
+from .conversation_service import _mirror_v1_message_to_v2, get_or_create_general_conversation
 from .models import (
     ChatConversationModel,
     ChatMessageModel,
@@ -433,6 +434,8 @@ class ChatBehaviorService:
         )
         db.add(message)
         db.flush()
+        # F4 dual-write: free-form messages also land in v2 events log.
+        _mirror_v1_message_to_v2(db, message, conversation, _OperationMirror())
 
         conversation.last_speech_at = now
         conversation.speech_count = (conversation.speech_count or 0) + 1
