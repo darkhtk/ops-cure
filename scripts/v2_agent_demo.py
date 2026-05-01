@@ -27,23 +27,15 @@ def auto_reply_handler(event: IncomingEvent, client: BridgeV2Client) -> None:
     """The agent's brain. v2 events come in here; the agent decides
     whether to speak, ignore, or close based on event kind + payload.
     """
-    # Only react to a fresh inquiry question addressed at us.
     if event.kind != "chat.speech.question":
         return
     text = event.payload.get("text", "")
-    # Reply with a stub answer.
-    # operation_id maps to v1 conversation_id 1:1 (dual-write era).
-    # For now we look it up via metadata.v1_conversation_id but the
-    # demo uses the chat surface so re-resolving is simpler:
-    op = client.get_operation(event.operation_id)
-    v1_conv_id = op.get("metadata", {}).get("v1_conversation_id")
-    if v1_conv_id:
-        client.submit_speech(
-            conversation_id=v1_conv_id,
-            kind="claim",
-            content=f"echo: {text}",
-            replies_to_speech_id=None,
-        )
+    client.append_event(
+        event.operation_id,
+        kind="speech.claim",
+        text=f"echo: {text}",
+        replies_to_event_id=event.kind and None,  # replies wired by event id directly
+    )
 
 
 def main() -> int:
@@ -52,18 +44,16 @@ def main() -> int:
     thread_id = os.environ["DISCORD_THREAD_ID"]
 
     with BridgeV2Client(base_url=base, bearer_token=token, actor_handle="@alice") as alice:
-        opened = alice.open_conversation(
-            discord_thread_id=thread_id,
+        opened = alice.open_operation(
+            space_id=thread_id,
             kind="inquiry",
             title="echo test",
             addressed_to="claude-pca",
         )
-        v1_conv_id = opened["id"]
-        alice.submit_speech(
-            conversation_id=v1_conv_id,
-            kind="question",
-            content="what is 2+2?",
-            addressed_to="claude-pca",
+        op_id = opened["id"]
+        alice.append_event(
+            op_id, kind="speech.question",
+            text="what is 2+2?", addressed_to="claude-pca",
         )
 
     with BridgeV2Client(base_url=base, bearer_token=token, actor_handle="@claude-pca") as claude:

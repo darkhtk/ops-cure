@@ -119,25 +119,26 @@ class BridgeV2Client:
             params={"actor_handle": self._actor_handle, "seq": seq},
         )
 
-    # ---- write side: speech / open / close use existing v1 endpoints ----
-    # These hit the chat surface which is dual-written; v2 picks them
-    # up automatically. Once F8's hard removal lands, swap to native v2
-    # endpoints (POST /v2/operations/.../events).
+    # ---- write side: native v2 endpoints (G2) ----
+    # The SDK speaks v2 exclusively. The bridge dual-writes to v1 under
+    # the hood through F8; clients never see the v1 conversation id.
 
-    def open_conversation(
+    def open_operation(
         self,
         *,
-        discord_thread_id: str,
+        space_id: str,
         kind: str,
         title: str,
         intent: str | None = None,
         addressed_to: str | None = None,
         objective: str | None = None,
+        success_criteria: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {
+            "space_id": space_id,
             "kind": kind,
             "title": title,
-            "opener_actor": self._actor_handle.lstrip("@"),
+            "opener_actor_handle": self._actor_handle,
         }
         if intent is not None:
             body["intent"] = intent
@@ -145,55 +146,54 @@ class BridgeV2Client:
             body["addressed_to"] = addressed_to
         if objective is not None:
             body["objective"] = objective
-        return self._post(
-            f"/api/chat/threads/{discord_thread_id}/conversations",
-            json=body,
-        )
+        if success_criteria is not None:
+            body["success_criteria"] = success_criteria
+        return self._post("/v2/operations", json=body)
 
-    def submit_speech(
+    def append_event(
         self,
+        operation_id: str,
         *,
-        conversation_id: str,
         kind: str,
-        content: str,
+        text: str,
         addressed_to: str | None = None,
         addressed_to_many: list[str] | None = None,
-        replies_to_speech_id: str | None = None,
+        replies_to_event_id: str | None = None,
         private_to_actors: list[str] | None = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {
-            "actor_name": self._actor_handle.lstrip("@"),
+            "actor_handle": self._actor_handle,
             "kind": kind,
-            "content": content,
+            "payload": {"text": text},
         }
         if addressed_to is not None:
             body["addressed_to"] = addressed_to
         if addressed_to_many:
             body["addressed_to_many"] = addressed_to_many
-        if replies_to_speech_id is not None:
-            body["replies_to_speech_id"] = replies_to_speech_id
+        if replies_to_event_id is not None:
+            body["replies_to_event_id"] = replies_to_event_id
         if private_to_actors:
             body["private_to_actors"] = private_to_actors
         return self._post(
-            f"/api/chat/conversations/{conversation_id}/speech",
+            f"/v2/operations/{operation_id}/events",
             json=body,
         )
 
-    def close_conversation(
+    def close_operation(
         self,
+        operation_id: str,
         *,
-        conversation_id: str,
         resolution: str,
         summary: str | None = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {
-            "closed_by": self._actor_handle.lstrip("@"),
+            "actor_handle": self._actor_handle,
             "resolution": resolution,
         }
         if summary is not None:
             body["summary"] = summary
         return self._post(
-            f"/api/chat/conversations/{conversation_id}/close",
+            f"/v2/operations/{operation_id}/close",
             json=body,
         )
 

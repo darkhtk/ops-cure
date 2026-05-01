@@ -159,11 +159,10 @@ def test_runtime_handler_can_send_reply_through_client(tmp_path, monkeypatch):
     def handler(event, c):
         if event.kind != "chat.speech.question":
             return
-        op = c.get_operation(event.operation_id)
-        v1_id = op.get("metadata", {}).get("v1_conversation_id")
-        c.submit_speech(
-            conversation_id=v1_id, kind="claim",
-            content=f"echo:{event.payload.get('text')}",
+        c.append_event(
+            event.operation_id,
+            kind="speech.claim",
+            text=f"echo:{event.payload.get('text')}",
         )
 
     try:
