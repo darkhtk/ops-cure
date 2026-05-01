@@ -323,6 +323,49 @@ class IdleSweepResponse(BaseModel):
     flagged: list[ConversationSummary] = Field(default_factory=list)
 
 
+class BulkCloseRequest(BaseModel):
+    """Operator bulk close of N conversations with the same
+    resolution. Each conversation is closed independently; failures
+    on individual rows are reported per-id rather than aborting the
+    whole call."""
+    conversation_ids: list[str] = Field(min_length=1)
+    closed_by: str = Field(min_length=1)
+    resolution: str = Field(min_length=1, max_length=80)
+    summary: str | None = None
+    bypass_task_guard: bool = False
+
+
+class BulkCloseResultItem(BaseModel):
+    conversation_id: str
+    ok: bool
+    resolution: str | None = None
+    error: str | None = None
+
+
+class BulkCloseResponse(BaseModel):
+    requested: int
+    succeeded: int
+    failed: int
+    results: list[BulkCloseResultItem] = Field(default_factory=list)
+
+
+class AuditLogEntry(BaseModel):
+    id: str
+    thread_id: str
+    conversation_id: str | None = None
+    actor_name: str
+    event_kind: str
+    addressed_to: str | None = None
+    content: str
+    created_at: datetime
+
+
+class AuditLogResponse(BaseModel):
+    items: list[AuditLogEntry] = Field(default_factory=list)
+    has_more: bool = False
+    next_cursor: str | None = None
+
+
 class ChatRoomHealthResponse(BaseModel):
     """Per-thread health snapshot. ``open_conversations`` and
     ``idle_candidates`` are derived live from the DB; ``metrics`` is

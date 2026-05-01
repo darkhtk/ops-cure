@@ -745,6 +745,115 @@ class ChatConversationService:
 
         return flagged
 
+    # -------- bulk + audit (PR16) ------------------------------------------
+
+    def bulk_close_conversations(
+        self,
+        *,
+        conversation_ids: list[str],
+        closed_by: str,
+        resolution: str,
+        summary: str | None = None,
+        bypass_task_guard: bool = False,
+        caller_context: Any = None,
+    ) -> dict[str, Any]:
+        """Operator bulk close. Each id is closed independently; per-id
+        errors are captured rather than aborting the whole call. Auth
+        and resolution-vocab checks still apply per id (unless
+        bypass_task_guard is True)."""
+        if not bypass_task_guard:
+            self._check_actor(closed_by, caller_context=caller_context)
+        results: list[dict[str, Any]] = []
+        succeeded = 0
+        for cid in conversation_ids:
+            try:
+                closed = self.close_conversation(
+                    conversation_id=cid,
+                    closed_by=closed_by,
+                    resolution=resolution,
+                    summary=summary,
+                    bypass_task_guard=bypass_task_guard,
+                    caller_context=caller_context,
+                )
+                results.append({
+                    "conversation_id": cid,
+                    "ok": True,
+                    "resolution": closed.resolution,
+                    "error": None,
+                })
+                succeeded += 1
+            except Exception as exc:  # noqa: BLE001
+                results.append({
+                    "conversation_id": cid,
+                    "ok": False,
+                    "resolution": None,
+                    "error": f"{type(exc).__name__}: {exc}",
+                })
+        return {
+            "requested": len(conversation_ids),
+            "succeeded": succeeded,
+            "failed": len(conversation_ids) - succeeded,
+            "results": results,
+        }
+
+    def search_audit_log(
+        self,
+        *,
+        thread_id: str | None = None,
+        conversation_id: str | None = None,
+        actor_name: str | None = None,
+        event_kind: str | None = None,
+        event_kind_prefix: str | None = None,
+        from_at: datetime | None = None,
+        to_at: datetime | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        """Query the chat event log. Every persisted ChatMessageModel
+        row -- speech, lifecycle, task events alike -- is searchable.
+        Each filter is independent; pass any combination."""
+        capped_limit = max(1, min(int(limit), 1000))
+        offset = max(0, int(offset))
+        with session_scope() as db:
+            stmt = select(ChatMessageModel)
+            if thread_id is not None:
+                # discord_thread_id -> internal UUID
+                thread_row = self._get_thread_row_by_discord(db, thread_id)
+                if thread_row is None:
+                    return {"items": [], "has_more": False, "next_cursor": None}
+                stmt = stmt.where(ChatMessageModel.thread_id == thread_row.id)
+            if conversation_id is not None:
+                stmt = stmt.where(ChatMessageModel.conversation_id == conversation_id)
+            if actor_name is not None:
+                stmt = stmt.where(ChatMessageModel.actor_name == actor_name)
+            if event_kind is not None:
+                stmt = stmt.where(ChatMessageModel.event_kind == event_kind)
+            if event_kind_prefix is not None:
+                stmt = stmt.where(ChatMessageModel.event_kind.like(f"{event_kind_prefix}%"))
+            if from_at is not None:
+                stmt = stmt.where(ChatMessageModel.created_at >= from_at)
+            if to_at is not None:
+                stmt = stmt.where(ChatMessageModel.created_at <= to_at)
+            stmt = stmt.order_by(ChatMessageModel.created_at.desc()).limit(capped_limit + 1).offset(offset)
+            rows = list(db.scalars(stmt))
+            has_more = len(rows) > capped_limit
+            page = rows[:capped_limit]
+            items = [
+                {
+                    "id": r.id,
+                    "thread_id": r.thread_id,
+                    "conversation_id": r.conversation_id,
+                    "actor_name": r.actor_name,
+                    "event_kind": r.event_kind,
+                    "addressed_to": r.addressed_to,
+                    "content": r.content,
+                    "created_at": r.created_at,
+                }
+                for r in page
+            ]
+            next_cursor = str(offset + capped_limit) if has_more else None
+            return {"items": items, "has_more": has_more, "next_cursor": next_cursor}
+
     # -------- health --------------------------------------------------------
 
     def get_room_health(

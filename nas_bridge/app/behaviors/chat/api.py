@@ -4,6 +4,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from ...auth import require_bridge_token
 from .conversation_schemas import (
+    AuditLogResponse,
+    BulkCloseRequest,
+    BulkCloseResponse,
     ChatRoomHealthResponse,
     ChatTaskApprovalRequest,
     ChatTaskApprovalResolveRequest,
@@ -303,6 +306,60 @@ async def sweep_idle_conversations(
         idle_threshold_seconds=idle_threshold_seconds,
         flagged=flagged,
     )
+
+
+# ---- bulk + audit (PR16) ---------------------------------------------------
+
+
+@router.post(
+    "/conversations/close-bulk",
+    response_model=BulkCloseResponse,
+)
+async def bulk_close_conversations(
+    payload: BulkCloseRequest,
+    request: Request,
+) -> BulkCloseResponse:
+    """Operator bulk close. Pass a list of conversation_ids and a
+    common resolution; each id is closed independently and per-id
+    errors are reported in the response without aborting the call."""
+    services = request.app.state.services
+    snap = services.chat_conversation_service.bulk_close_conversations(
+        conversation_ids=payload.conversation_ids,
+        closed_by=payload.closed_by,
+        resolution=payload.resolution,
+        summary=payload.summary,
+        bypass_task_guard=payload.bypass_task_guard,
+    )
+    return BulkCloseResponse(**snap)
+
+
+@router.get("/audit", response_model=AuditLogResponse)
+async def search_audit_log(
+    request: Request,
+    thread_id: str | None = Query(default=None),
+    conversation_id: str | None = Query(default=None),
+    actor_name: str | None = Query(default=None),
+    event_kind: str | None = Query(default=None),
+    event_kind_prefix: str | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+) -> AuditLogResponse:
+    """Search the chat event log -- speech, lifecycle, task events
+    are all queryable. Every filter is independent; pass any
+    combination. Time-range filtering uses ISO timestamp query
+    params (not implemented in this endpoint signature; pass them
+    via the service method when calling from Python)."""
+    services = request.app.state.services
+    snap = services.chat_conversation_service.search_audit_log(
+        thread_id=thread_id,
+        conversation_id=conversation_id,
+        actor_name=actor_name,
+        event_kind=event_kind,
+        event_kind_prefix=event_kind_prefix,
+        limit=limit,
+        offset=offset,
+    )
+    return AuditLogResponse(**snap)
 
 
 # ---- task lifecycle (kind=task only) ---------------------------------------
