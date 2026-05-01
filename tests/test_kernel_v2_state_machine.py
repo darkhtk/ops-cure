@@ -26,8 +26,10 @@ def _import():
 def test_inquiry_close_only_allows_inquiry_resolutions():
     mod = _import()
     m = mod["OperationStateMachine"]()
+    # vocab mirrors v1 ALLOWED_RESOLUTIONS_BY_KIND + 'abandoned' system bypass
     assert m.can_close(kind=mod["KIND_INQUIRY"], from_state=mod["STATE_OPEN"], resolution="answered").allowed
-    assert m.can_close(kind=mod["KIND_INQUIRY"], from_state=mod["STATE_OPEN"], resolution="redirected").allowed
+    assert m.can_close(kind=mod["KIND_INQUIRY"], from_state=mod["STATE_OPEN"], resolution="dropped").allowed
+    assert m.can_close(kind=mod["KIND_INQUIRY"], from_state=mod["STATE_OPEN"], resolution="escalated").allowed
     # proposal-only resolution rejected
     bad = m.can_close(kind=mod["KIND_INQUIRY"], from_state=mod["STATE_OPEN"], resolution="accepted")
     assert not bad.allowed
@@ -37,7 +39,7 @@ def test_inquiry_close_only_allows_inquiry_resolutions():
 def test_proposal_close_vocabulary():
     mod = _import()
     m = mod["OperationStateMachine"]()
-    for ok in ["accepted", "rejected", "withdrawn", "abandoned"]:
+    for ok in ["accepted", "rejected", "withdrawn", "superseded", "abandoned"]:
         assert m.can_close(kind="proposal", from_state="open", resolution=ok).allowed
     assert not m.can_close(kind="proposal", from_state="open", resolution="answered").allowed
 

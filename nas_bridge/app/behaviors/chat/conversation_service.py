@@ -532,12 +532,17 @@ class ChatConversationService:
             row.updated_at = now
 
             # F3 dual-write: mirror the close to v2 in the same tx.
+            # G1: ``bypass_task_guard`` doubles as system-authority signal
+            # for v2 state machine -- idle sweeper auto-abandon and
+            # task-coordinator-initiated closes use unconventional
+            # resolutions that the kind vocab wouldn't allow on its own.
             self._operation_mirror.mirror_conversation_close(
                 db,
                 v2_operation_id=row.v2_operation_id,
                 closed_by_actor=closed_by,
                 resolution=resolution,
                 resolution_summary=summary,
+                system_bypass=bypass_task_guard,
             )
 
             payload = self._summary_payload(row)

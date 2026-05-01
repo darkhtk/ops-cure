@@ -127,9 +127,27 @@ def build_services(settings: Settings) -> ServiceContainer:
         presence_service=presence_service,
         kernel_approval_service=kernel_approval_service,
     )
+    # G1: wire v2 capability-based authorization into the chat
+    # conversation service. The authorizer below gates speech/open/close
+    # actions by checking the v2 Actor.capabilities row. With the
+    # default kind-based capability set (humans get most caps; AIs get
+    # speech.submit/conversation.open/conversation.close.opener), the
+    # wiring is back-compat: every actor BridgeCaller has produced so
+    # far would have been auto-provisioned by ActorService and granted
+    # the appropriate defaults.
+    from .kernel.v2 import (
+        CapabilityService,
+        CAP_SPEECH_SUBMIT,
+        make_capability_authorizer,
+    )
+
+    capability_service = CapabilityService()
     chat_conversation_service = ChatConversationService(
         subscription_broker=subscription_broker,
         remote_task_service=remote_task_service,
+        actor_authorizer=make_capability_authorizer(
+            capability_service, capability=CAP_SPEECH_SUBMIT,
+        ),
     )
     chat_conversation_service.backfill_general_conversations()
     chat_task_coordinator = ChatTaskCoordinator(

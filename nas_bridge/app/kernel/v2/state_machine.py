@@ -45,10 +45,15 @@ STATE_VERIFYING = "verifying"
 STATE_CLOSED = "closed"
 
 
-# Per-kind allowed resolutions for a CLOSE transition
+# Per-kind allowed resolutions for a CLOSE transition. Mirrors v1's
+# ALLOWED_RESOLUTIONS_BY_KIND (conversation_schemas.py) so v2's state
+# machine doesn't disagree with the authoritative v1 path during the
+# dual-write era. ``abandoned`` is added on top of the v1 vocab for
+# every closeable kind because the system-bypass auto-abandon path
+# (idle sweeper) closes with that resolution regardless of kind.
 ALLOWED_RESOLUTIONS: dict[str, frozenset[str]] = {
-    KIND_INQUIRY: frozenset({"answered", "redirected", "abandoned"}),
-    KIND_PROPOSAL: frozenset({"accepted", "rejected", "withdrawn", "abandoned"}),
+    KIND_INQUIRY: frozenset({"answered", "dropped", "escalated", "abandoned"}),
+    KIND_PROPOSAL: frozenset({"accepted", "rejected", "withdrawn", "superseded", "abandoned"}),
     KIND_TASK: frozenset({"completed", "failed", "cancelled", "abandoned"}),
     KIND_GENERAL: frozenset(),  # general doesn't close
 }

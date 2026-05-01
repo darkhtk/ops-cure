@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 
 from .actor_service import ActorService
 from .repository import V2Repository
+from .state_machine import OperationStateMachine, StateMachineError
 
 
 def _normalize_handle(actor: str | None) -> str | None:
@@ -29,9 +30,11 @@ class OperationMirror:
         self,
         repo: V2Repository | None = None,
         actor_service: ActorService | None = None,
+        state_machine: OperationStateMachine | None = None,
     ) -> None:
         self._repo = repo or V2Repository()
         self._actors = actor_service or ActorService(self._repo)
+        self._sm = state_machine or OperationStateMachine()
 
     def mirror_conversation_open(
         self,
@@ -209,9 +212,23 @@ class OperationMirror:
         closed_by_actor: str | None,
         resolution: str,
         resolution_summary: str | None,
+        system_bypass: bool = False,
     ) -> None:
         if not v2_operation_id:
             return
+        # G1: state machine sanity check. v1 already validated the
+        # resolution against ALLOWED_RESOLUTIONS_BY_KIND; v2 vocab now
+        # mirrors that, so the machine should agree. If it disagrees we
+        # WANT to know loudly -- either a vocab drifted or the close
+        # path is taking an unexpected route.
+        op = self._repo.get_operation(db, v2_operation_id)
+        if op is not None:
+            self._sm.assert_close(
+                kind=op.kind,
+                from_state=op.state,
+                resolution=resolution,
+                system=system_bypass,
+            )
         closer_id: str | None = None
         closer_handle = _normalize_handle(closed_by_actor)
         if closer_handle and closer_handle != "@system":

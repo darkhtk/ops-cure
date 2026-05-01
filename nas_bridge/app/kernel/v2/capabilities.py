@@ -163,17 +163,31 @@ def make_capability_authorizer(
     capability_service: CapabilityService,
     *,
     capability: str,
+    auto_provision: bool = True,
 ):
     """Adapter so ChatConversationService.actor_authorizer keeps its
     (caller_context, actor_name) -> bool shape while delegating to
     capability checks. ``caller_context`` is currently unused at this
     seam -- the asserted_client_id is already baked into actor_name
     via the upstream service layer.
+
+    G1: ``auto_provision=True`` (default) auto-creates the actor row
+    when it doesn't exist yet, so the first speech / open call from a
+    fresh handle gets the kind-default capability set instead of an
+    immediate denial. The mirror_conversation_open path would create
+    the same row a moment later anyway -- this just eliminates a
+    chicken-and-egg with _check_actor running before the mirror.
     """
     from ...db import session_scope
 
     def _authorize(caller_context, actor_name: str) -> bool:  # noqa: ARG001
         with session_scope() as db:
+            if auto_provision:
+                actor_service = capability_service._actors  # noqa: SLF001
+                actor_service.ensure_actor_by_handle(
+                    db,
+                    handle=actor_name if actor_name.startswith("@") else f"@{actor_name}",
+                )
             return capability_service.actor_can(
                 db,
                 actor_handle=actor_name,
