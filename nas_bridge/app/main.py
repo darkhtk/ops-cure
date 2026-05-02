@@ -321,6 +321,10 @@ async def lifespan(app: FastAPI):
     agent_service = build_default_agent_service(
         broker=services.subscription_broker,
         chat_service=services.chat_conversation_service,
+        # Production brain path is pc-claude -- delegates to a worker
+        # PC running claude_executor (uses local Claude session, no
+        # API key needed on the bridge).
+        remote_claude_service=services.remote_claude_service,
     )
     services.agent_service = agent_service
     if agent_service is not None:

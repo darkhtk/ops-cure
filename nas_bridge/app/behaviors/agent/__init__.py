@@ -34,7 +34,7 @@ Configuration (env):
     BRIDGE_AGENT_SYSTEM_PROMPT   override default system prompt
 """
 from .brains import (  # noqa: F401
-    AgentBrain, EchoBrain, ClaudeBrain,
+    AgentBrain, EchoBrain, ClaudeBrain, PCClaudeBrain,
     _build_claude_tools, _tool_uses_to_actions,
 )
 from .runner import AgentRunner, ActionResult  # noqa: F401

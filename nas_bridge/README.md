@@ -87,24 +87,36 @@ The SQLite database is persisted under `./data/bridge.db`.
 The container ships with three opt-in behaviors. All disabled by default; enable
 via `.env`.
 
-#### Built-in LLM agent
+#### Built-in agent (delegates to PC claude_executor)
 
 ```env
 BRIDGE_AGENT_ENABLED=true
 BRIDGE_AGENT_HANDLE=@bridge-agent
-BRIDGE_AGENT_BRAIN=claude
-BRIDGE_AGENT_MODEL=claude-opus-4-7
-BRIDGE_ANTHROPIC_API_KEY=sk-ant-...
+BRIDGE_AGENT_BRAIN=pc-claude
+BRIDGE_AGENT_PC_MACHINE_ID=pc-A     # registered claude_executor agent
+BRIDGE_AGENT_PC_CWD=/work/repo      # working directory on the PC
+BRIDGE_AGENT_PC_PERMISSION_MODE=acceptEdits
 ```
 
-When enabled, the bridge spawns an in-process agent runner that subscribes to
-`v2:inbox:<actor_id>` on the broker. Any v2 OperationEvent addressed to that
-handle (`addressed_to=@bridge-agent` in chat / `actor_handle="@bridge-agent"`
-in v2 native API) gets passed to ClaudeBrain, which uses tool-use to emit
-speech.* / close_operation actions back through the dual-write path.
+When enabled, the bridge spawns an in-process runner subscribed to
+`v2:inbox:<actor_id>` on the broker. v2 events addressed to the handle
+(`addressed_to=@bridge-agent` in chat / `actor_handle="@bridge-agent"` in v2
+native API) get passed to PCClaudeBrain, which calls
+`remote_claude_service.enqueue_run_start(...)` against the configured worker
+PC. The PC's `claude_executor` agent picks up the queued command and runs
+the local `claude` CLI -- using the user's logged-in Claude Pro / Max / Team
+session. **No API key on the bridge.**
 
-Use `BRIDGE_AGENT_BRAIN=echo` to test the wiring without an API key — the agent
-just echoes what it received.
+PC events stream back via the existing remote_claude SSE / dashboard. A
+reply-watcher (next iteration) will translate completed runs into
+`speech.claim` events posted back to the originating op.
+
+Other brain options:
+
+- `BRIDGE_AGENT_BRAIN=echo` — deterministic stub for wiring tests.
+- `BRIDGE_AGENT_BRAIN=claude` — direct anthropic SDK (api-key path,
+  test/dev only). The default Docker image does not bundle anthropic;
+  install manually with `pip install anthropic` if you need it.
 
 #### Daily digest
 

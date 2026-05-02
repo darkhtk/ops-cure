@@ -6,7 +6,9 @@ import logging
 import os
 from contextlib import suppress
 
-from .brains import AgentBrain, ClaudeBrain, EchoBrain, DEFAULT_SYSTEM_PROMPT
+from .brains import (
+    AgentBrain, ClaudeBrain, EchoBrain, PCClaudeBrain, DEFAULT_SYSTEM_PROMPT,
+)
 from .runner import AgentRunner
 
 logger = logging.getLogger("opscure.agent.service")
@@ -50,27 +52,66 @@ def build_default_agent_service(
     *,
     broker,
     chat_service,
+    remote_claude_service=None,
 ) -> AgentService | None:
     """Reads BRIDGE_AGENT_* env to decide whether to spawn an agent
     in this process. Returns ``None`` when disabled (the common dev
-    case). Production / live deployments set BRIDGE_AGENT_ENABLED=true
-    + an API key.
+    case).
+
+    Production path: BRIDGE_AGENT_BRAIN=pc-claude. The agent enqueues
+    runs to a worker PC running claude_executor (which uses the user's
+    locally-logged-in Claude session -- no API key on the bridge).
+
+    Test paths:
+      BRIDGE_AGENT_BRAIN=echo           deterministic stub
+      BRIDGE_AGENT_BRAIN=claude         direct anthropic SDK; needs
+                                        anthropic installed + API key.
+                                        NOT bundled in default image.
     """
     enabled = os.environ.get("BRIDGE_AGENT_ENABLED", "").strip().lower()
     if enabled not in {"1", "true", "yes", "on"}:
         return None
 
     handle = os.environ.get("BRIDGE_AGENT_HANDLE", "@bridge-agent").strip() or "@bridge-agent"
-    brain_kind = os.environ.get("BRIDGE_AGENT_BRAIN", "claude").strip().lower()
+    brain_kind = os.environ.get("BRIDGE_AGENT_BRAIN", "pc-claude").strip().lower()
     brain: AgentBrain
+
     if brain_kind == "echo":
         brain = EchoBrain()
+    elif brain_kind == "pc-claude":
+        if remote_claude_service is None:
+            logger.warning(
+                "BRIDGE_AGENT_BRAIN=pc-claude but remote_claude_service not "
+                "wired -- agent disabled"
+            )
+            return None
+        machine_id = os.environ.get("BRIDGE_AGENT_PC_MACHINE_ID", "").strip()
+        cwd = os.environ.get("BRIDGE_AGENT_PC_CWD", "").strip()
+        if not machine_id or not cwd:
+            logger.warning(
+                "BRIDGE_AGENT_BRAIN=pc-claude requires "
+                "BRIDGE_AGENT_PC_MACHINE_ID + BRIDGE_AGENT_PC_CWD"
+            )
+            return None
+        model = os.environ.get("BRIDGE_AGENT_MODEL", "").strip() or None
+        permission = os.environ.get(
+            "BRIDGE_AGENT_PC_PERMISSION_MODE", "acceptEdits"
+        ).strip()
+        brain = PCClaudeBrain(
+            remote_claude_service=remote_claude_service,
+            machine_id=machine_id,
+            cwd=cwd,
+            actor_handle=handle,
+            model=model,
+            permission_mode=permission,
+        )
     elif brain_kind == "claude":
         api_key = os.environ.get("BRIDGE_ANTHROPIC_API_KEY", "").strip()
         if not api_key:
             logger.warning(
-                "BRIDGE_AGENT_ENABLED=true with brain=claude but "
-                "BRIDGE_ANTHROPIC_API_KEY not set -- agent disabled"
+                "BRIDGE_AGENT_BRAIN=claude (api-key path) but "
+                "BRIDGE_ANTHROPIC_API_KEY not set -- agent disabled. "
+                "Use BRIDGE_AGENT_BRAIN=pc-claude for the PC-CLI path."
             )
             return None
         model = os.environ.get("BRIDGE_AGENT_MODEL", "claude-opus-4-7").strip()
