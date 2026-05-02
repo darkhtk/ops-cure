@@ -46,6 +46,14 @@ from .personas import (  # noqa: F401
     SilentObserverBrain,
     ALL_PERSONAS,
 )
+from .adversarial import (  # noqa: F401
+    WhisperLeakerBrain,
+    RogueCloserBrain,
+    LoopHostBrain,
+    LeaseSquatterBrain,
+    InboxSpammerBrain,
+    ALL_ADVERSARIAL,
+)
 from .driver import (  # noqa: F401
     ScenarioDriver,
     ProtocolObservation,

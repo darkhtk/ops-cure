@@ -145,6 +145,11 @@ class AgentRunner:
             return []
 
         context = self._build_context(operation_id, envelope)
+        # Pass through the incoming event's privacy + addressing meta
+        # so brains can react differently to whispers vs. public messages
+        # (e.g. WhisperLeakerBrain detects "this came to me as a whisper").
+        context["private_to_actor_ids"] = wrapped.get("private_to_actor_ids")
+        context["addressed_to_actor_ids"] = wrapped.get("addressed_to_actor_ids") or []
         actions = self._brain.respond(wrapped.get("payload") or {}, context) or []
         results: list[ActionResult] = []
         for action in actions:
