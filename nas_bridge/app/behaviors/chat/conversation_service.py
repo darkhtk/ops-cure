@@ -37,6 +37,7 @@ from ...kernel.events import (
 from ...kernel.storage import session_scope
 from ...kernel.operation_service import KernelOperationService as RemoteTaskService
 from ...kernel.v2 import OperationMirror
+from ...kernel.v2 import contract as _v2_contract
 from ...schemas import RemoteTaskCreateRequest
 from ...transcript_service import sanitize_text
 from .conversation_schemas import (
@@ -324,6 +325,7 @@ class ChatConversationService:
         remote_task_service: RemoteTaskService | None = None,
         metrics: ChatRoomMetrics | None = None,
         actor_authorizer: ActorAuthorizer | None = None,
+        capability_authorizer: Any | None = None,
         policy: "ChatPolicyConfig | None" = None,
         operation_mirror: OperationMirror | None = None,
         digest_service: Any | None = None,
@@ -331,11 +333,16 @@ class ChatConversationService:
         self._broker = subscription_broker
         self._remote_task_service = remote_task_service
         self._metrics = metrics or ChatRoomMetrics()
-        # Optional callback (caller_context, actor_name) -> bool. When
-        # set, every public method that takes an actor_name validates
-        # it against the authorizer first. When unset, all actor_names
-        # pass (back-compat with un-wired identity).
+        # Two authorizer slots, exactly one of which is consulted per
+        # gate (3-arg form takes priority when set). The 2-arg form
+        # is the legacy ``actor_authorizer`` interface preserved for
+        # back-compat with old wiring (test_chat_actor_identity etc.).
+        # The 3-arg ``capability_authorizer`` (H1) takes the action's
+        # capability so different gates can require different caps --
+        # speech.submit only checks SPEECH_SUBMIT, conversation.open
+        # checks CONVERSATION_OPEN, etc.
         self._actor_authorizer = actor_authorizer
+        self._capability_authorizer = capability_authorizer
         self._policy = policy or ChatPolicyConfig()
         # Protocol v2 dual-write (F3). Defaults to a real mirror so v2
         # tables fill up automatically; tests that bootstrap their own
@@ -351,12 +358,45 @@ class ChatConversationService:
         self._digest_service = digest_service
 
     def _check_actor(self, actor_name: str, *, caller_context: Any = None) -> None:
+        """Legacy 2-arg gate. Preserved for back-compat -- new code
+        should use ``check_capability``."""
         if self._actor_authorizer is None:
             return
         if not self._actor_authorizer(caller_context, actor_name):
             raise ChatActorIdentityError(
                 f"caller is not authorized to act as {actor_name!r}"
             )
+
+    def check_capability(
+        self,
+        actor_name: str,
+        capability: str,
+        *,
+        caller_context: Any = None,
+    ) -> None:
+        """H1: per-action capability gate. ChatTaskCoordinator and
+        future v2 native endpoints share this same entry point so
+        the wiring stays in one place.
+
+        Resolution order:
+          1. capability_authorizer (3-arg) is set -> ask it with cap
+          2. actor_authorizer (2-arg legacy) is set -> ask it (cap-blind)
+          3. neither set -> pass
+
+        Raises ChatActorIdentityError on denial; the message names
+        the offending capability so audit logs are meaningful.
+        """
+        if self._capability_authorizer is not None:
+            if not self._capability_authorizer(caller_context, actor_name, capability):
+                raise ChatActorIdentityError(
+                    f"actor {actor_name!r} lacks capability {capability!r}"
+                )
+            return
+        if self._actor_authorizer is not None:
+            if not self._actor_authorizer(caller_context, actor_name):
+                raise ChatActorIdentityError(
+                    f"caller is not authorized to act as {actor_name!r}"
+                )
 
     @property
     def metrics(self) -> ChatRoomMetrics:
@@ -430,7 +470,13 @@ class ChatConversationService:
         request: ConversationOpenRequest,
         caller_context: Any = None,
     ) -> ConversationSummary:
-        self._check_actor(request.opener_actor, caller_context=caller_context)
+        # H1: cap-aware gate. Falls back to legacy 2-arg authorizer
+        # when only that's wired (test_chat_actor_identity).
+        self.check_capability(
+            request.opener_actor,
+            _v2_contract.CAP_CONVERSATION_OPEN,
+            caller_context=caller_context,
+        )
         # Pre-validate kind=task prerequisites before touching the DB so
         # we never half-commit (no thread row read, no task created) on
         # caller-side input errors.
@@ -540,7 +586,15 @@ class ChatConversationService:
         # is "system" or the lease holder, both of which the
         # authorizer wouldn't normally know about.
         if not bypass_task_guard:
-            self._check_actor(closed_by, caller_context=caller_context)
+            # H1: pick the cap based on whether the closer is the
+            # opener of THIS op. Most production closes are opener-
+            # initiated so CAP_CONVERSATION_CLOSE_OPENER (in default
+            # ai+human sets) covers them; non-opener closes require
+            # the broader CAP_CONVERSATION_CLOSE which only humans
+            # have by default. We need to peek at the row to know
+            # which cap to demand -- defer the gate until inside the
+            # session_scope below.
+            pass
         envelope: EventEnvelope | None = None
         result: ConversationSummary
         with session_scope() as db:
@@ -580,6 +634,18 @@ class ChatConversationService:
                         f"closed_by={closed_by!r} is not authorized; only opener "
                         f"({row.opener_actor!r}) or owner ({row.owner_actor!r}) may close",
                     )
+                # H1: now check the v2 capability appropriate to the
+                # closer's relationship to this op. Opener-or-owner
+                # close needs CAP_CONVERSATION_CLOSE_OPENER (default
+                # for ai + human). The unrestricted CAP_CONVERSATION_CLOSE
+                # is reserved for admin paths and isn't reached here
+                # because non-opener/non-owner closers were rejected
+                # above.
+                self.check_capability(
+                    closed_by,
+                    _v2_contract.CAP_CONVERSATION_CLOSE_OPENER,
+                    caller_context=caller_context,
+                )
             # When a task is bound and still active, only the task lifecycle
             # path (ChatTaskCoordinator.complete/fail) may close — refuse
             # manual closes so the bound RemoteTask doesn't get orphaned.
@@ -658,7 +724,11 @@ class ChatConversationService:
         request: SpeechActSubmitRequest,
         caller_context: Any = None,
     ) -> SpeechActSummary:
-        self._check_actor(request.actor_name, caller_context=caller_context)
+        self.check_capability(
+            request.actor_name,
+            _v2_contract.CAP_SPEECH_SUBMIT,
+            caller_context=caller_context,
+        )
         envelope: EventEnvelope | None = None
         summary: SpeechActSummary
         with session_scope() as db:
@@ -788,7 +858,11 @@ class ChatConversationService:
         reason: str | None = None,
         caller_context: Any = None,
     ) -> ConversationSummary:
-        self._check_actor(by_actor, caller_context=caller_context)
+        self.check_capability(
+            by_actor,
+            _v2_contract.CAP_CONVERSATION_HANDOFF,
+            caller_context=caller_context,
+        )
         envelope: EventEnvelope | None = None
         result: ConversationSummary
         with session_scope() as db:

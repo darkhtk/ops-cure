@@ -61,6 +61,7 @@ from .capabilities import (  # noqa: F401
     CAP_TASK_APPROVE_DESTRUCTIVE,
     CapabilityService,
     make_capability_authorizer,
+    make_per_capability_authorizer,
 )
 
 __all__ = [
@@ -75,6 +76,7 @@ __all__ = [
     "OperationMirror",
     "CapabilityService",
     "make_capability_authorizer",
+    "make_per_capability_authorizer",
     "CAP_CONVERSATION_OPEN",
     "CAP_CONVERSATION_CLOSE",
     "CAP_CONVERSATION_CLOSE_OPENER",

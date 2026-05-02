@@ -117,7 +117,17 @@ class ChatTaskCoordinator:
         *,
         conversation_id: str,
         request: ChatTaskClaimRequest,
+        caller_context: Any = None,
     ) -> ChatTaskStateResponse:
+        # H1: every task lifecycle gate checks the matching capability.
+        # Default actor sets include task.claim/complete/fail so existing
+        # tests pass; task.approve.destructive is gated separately on
+        # resolve_approval(approved).
+        self._conversations.check_capability(
+            request.actor_name,
+            _v2_contract.CAP_TASK_CLAIM,
+            caller_context=caller_context,
+        )
         task_id = self._require_bound_task(conversation_id)
         self._conversations.metrics.record_task_claimed()
         task = self._remote.claim_task(
@@ -250,7 +260,13 @@ class ChatTaskCoordinator:
         *,
         conversation_id: str,
         request: ChatTaskCompleteRequest,
+        caller_context: Any = None,
     ) -> ChatTaskStateResponse:
+        self._conversations.check_capability(
+            request.actor_name,
+            _v2_contract.CAP_TASK_COMPLETE,
+            caller_context=caller_context,
+        )
         task_id = self._require_bound_task(conversation_id)
         # PR-hardening (failure-mode #08): the agent contract requires
         # at least one evidence row before claiming a task complete.
@@ -305,7 +321,13 @@ class ChatTaskCoordinator:
         *,
         conversation_id: str,
         request: ChatTaskFailRequest,
+        caller_context: Any = None,
     ) -> ChatTaskStateResponse:
+        self._conversations.check_capability(
+            request.actor_name,
+            _v2_contract.CAP_TASK_FAIL,
+            caller_context=caller_context,
+        )
         task_id = self._require_bound_task(conversation_id)
         self._conversations.metrics.record_task_failed()
         task = self._remote.fail_task(
@@ -377,11 +399,24 @@ class ChatTaskCoordinator:
         *,
         conversation_id: str,
         request: ChatTaskApprovalResolveRequest,
+        caller_context: Any = None,
     ) -> ChatTaskStateResponse:
         """Resolve a pending approval. resolution must be
         'approved' or 'denied'. On approved, task returns to
         executing state; on denied, the conversation is auto-closed
-        with resolution=cancelled (the task can no longer proceed)."""
+        with resolution=cancelled (the task can no longer proceed).
+
+        H1: 'approved' specifically grants destructive permission
+        and is gated by CAP_TASK_APPROVE_DESTRUCTIVE (NOT in default
+        actor sets -- must be explicitly granted to humans). 'denied'
+        is unrestricted; anyone authorized to converse can deny.
+        """
+        if request.resolution == "approved":
+            self._conversations.check_capability(
+                request.resolved_by,
+                _v2_contract.CAP_TASK_APPROVE_DESTRUCTIVE,
+                caller_context=caller_context,
+            )
         task_id = self._require_bound_task(conversation_id)
         task = self._remote.resolve_approval(
             task_id,

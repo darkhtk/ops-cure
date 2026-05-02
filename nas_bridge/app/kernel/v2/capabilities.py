@@ -143,6 +143,37 @@ def _serialize(values: list[str]) -> str:
     return json.dumps(values, ensure_ascii=False)
 
 
+def make_per_capability_authorizer(
+    capability_service: CapabilityService,
+    *,
+    auto_provision: bool = True,
+):
+    """H1 form: returns a 3-arg authorizer ``(ctx, actor, capability)
+    -> bool`` that ChatConversationService / TaskCoordinator call with
+    the capability appropriate to each entry point. This is the
+    successor to ``make_capability_authorizer`` (which baked one
+    capability into the closure -- adequate for speech.submit but
+    leaves all other gates unprotected).
+    """
+    from ...db import session_scope
+
+    def _authorize(caller_context, actor_name: str, capability: str) -> bool:  # noqa: ARG001
+        with session_scope() as db:
+            if auto_provision:
+                actor_service = capability_service._actors  # noqa: SLF001
+                actor_service.ensure_actor_by_handle(
+                    db,
+                    handle=actor_name if actor_name.startswith("@") else f"@{actor_name}",
+                )
+            return capability_service.actor_can(
+                db,
+                actor_handle=actor_name,
+                capability=capability,
+            )
+
+    return _authorize
+
+
 def make_capability_authorizer(
     capability_service: CapabilityService,
     *,
