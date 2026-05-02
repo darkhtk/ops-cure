@@ -210,6 +210,114 @@ class BridgeV2Client:
             json=body,
         )
 
+    # ---- H3: task lifecycle native v2 ----
+
+    def claim_task(
+        self,
+        operation_id: str,
+        *,
+        lease_seconds: int = 300,
+    ) -> dict[str, Any]:
+        return self._post(
+            f"/v2/operations/{operation_id}/claim",
+            json={
+                "actor_handle": self._actor_handle,
+                "lease_seconds": lease_seconds,
+            },
+        )
+
+    def submit_evidence(
+        self,
+        operation_id: str,
+        *,
+        lease_token: str,
+        kind: str,
+        summary: str,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return self._post(
+            f"/v2/operations/{operation_id}/evidence",
+            json={
+                "actor_handle": self._actor_handle,
+                "lease_token": lease_token,
+                "kind": kind,
+                "summary": summary,
+                "payload": payload or {},
+            },
+        )
+
+    def request_approval(
+        self,
+        operation_id: str,
+        *,
+        lease_token: str,
+        reason: str,
+        note: str | None = None,
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {
+            "actor_handle": self._actor_handle,
+            "lease_token": lease_token,
+            "reason": reason,
+        }
+        if note is not None:
+            body["note"] = note
+        return self._post(
+            f"/v2/operations/{operation_id}/approval/request",
+            json=body,
+        )
+
+    def resolve_approval(
+        self,
+        operation_id: str,
+        *,
+        resolution: str,
+        note: str | None = None,
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {
+            "actor_handle": self._actor_handle,
+            "resolution": resolution,
+        }
+        if note is not None:
+            body["note"] = note
+        return self._post(
+            f"/v2/operations/{operation_id}/approval/resolve",
+            json=body,
+        )
+
+    def complete_task(
+        self,
+        operation_id: str,
+        *,
+        lease_token: str,
+        summary: str | None = None,
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {
+            "actor_handle": self._actor_handle,
+            "lease_token": lease_token,
+        }
+        if summary is not None:
+            body["summary"] = summary
+        return self._post(
+            f"/v2/operations/{operation_id}/complete",
+            json=body,
+        )
+
+    def fail_task(
+        self,
+        operation_id: str,
+        *,
+        lease_token: str,
+        error_text: str,
+    ) -> dict[str, Any]:
+        return self._post(
+            f"/v2/operations/{operation_id}/fail",
+            json={
+                "actor_handle": self._actor_handle,
+                "lease_token": lease_token,
+                "error_text": error_text,
+            },
+        )
+
     # ---- transport ----
 
     def _get(self, path: str, *, params: dict[str, Any] | None = None) -> dict[str, Any]:

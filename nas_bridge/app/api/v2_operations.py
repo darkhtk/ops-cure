@@ -250,6 +250,47 @@ class V2CloseRequest(BaseModel):
     summary: str | None = None
 
 
+# H3: native v2 task lifecycle endpoints. Each delegates to
+# ChatTaskCoordinator (still v1-authoritative for lease state) but
+# the SDK callers no longer need /api/chat or v1 conversation ids.
+class V2ClaimRequest(BaseModel):
+    actor_handle: str
+    lease_seconds: int = 300
+
+
+class V2EvidenceRequest(BaseModel):
+    actor_handle: str
+    lease_token: str
+    kind: str  # EvidenceKind from contract
+    summary: str
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class V2ApprovalRequestRequest(BaseModel):
+    actor_handle: str
+    lease_token: str
+    reason: str
+    note: str | None = None
+
+
+class V2ApprovalResolveRequest(BaseModel):
+    actor_handle: str
+    resolution: str  # 'approved' | 'denied'
+    note: str | None = None
+
+
+class V2CompleteRequest(BaseModel):
+    actor_handle: str
+    lease_token: str
+    summary: str | None = None
+
+
+class V2FailRequest(BaseModel):
+    actor_handle: str
+    lease_token: str
+    error_text: str
+
+
 @router.post("", status_code=201)
 def open_operation(
     payload: V2OpenOperationRequest,
@@ -266,6 +307,15 @@ def open_operation(
     from ..behaviors.chat.conversation_service import (
         ChatThreadNotFoundError, ChatConversationStateError,
     )
+    # Pre-create the thread's general conversation in its own session.
+    # If we don't, kind=task triggers create_task inside open_conversation's
+    # session, which on SQLite locks because the outer session has
+    # already written the (newly created) general row. Calling
+    # ensure_general first commits the general row separately.
+    try:
+        chat_service.ensure_general(discord_thread_id=payload.space_id)
+    except ChatThreadNotFoundError:
+        raise HTTPException(status_code=404, detail=f"space {payload.space_id} not found")
     open_kwargs: dict[str, Any] = {
         "kind": payload.kind,
         "title": payload.title,
@@ -405,3 +455,166 @@ def close_operation(
     with session_scope() as db:
         op = repo.get_operation(db, operation_id)
         return _serialize_operation(op, repo)
+
+
+# ---- H3: task lifecycle native endpoints ----
+# All delegate to ChatTaskCoordinator. Same exception -> HTTP status
+# mapping (404 not found / 403 actor identity / 400 state error).
+def _coord_call(http_request: Request, fn_name: str, *args, **kwargs):
+    services = http_request.app.state.services
+    coord = getattr(services, "chat_task_coordinator", None)
+    if coord is None:
+        raise HTTPException(status_code=503, detail="task coordinator not available")
+    from ..behaviors.chat.conversation_service import (
+        ChatConversationNotFoundError, ChatConversationStateError, ChatActorIdentityError,
+    )
+    from ..behaviors.chat.task_coordinator import ChatTaskBindingError
+    try:
+        return getattr(coord, fn_name)(*args, **kwargs)
+    except ChatConversationNotFoundError:
+        raise HTTPException(status_code=404, detail="operation conversation not found")
+    except ChatActorIdentityError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ChatTaskBindingError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except ChatConversationStateError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+def _coord_response_to_v2_dict(operation_id: str, coord_response) -> dict[str, Any]:
+    """Map ChatTaskStateResponse -> v2 op dict + task fields.
+    Caller already knows the op_id; we re-fetch for canonical state."""
+    repo = V2Repository()
+    with session_scope() as db:
+        op = repo.get_operation(db, operation_id)
+        body = _serialize_operation(op, repo)
+    body["task"] = coord_response.task
+    return body
+
+
+@router.post("/{operation_id}/claim", status_code=201)
+def claim_operation(
+    operation_id: str,
+    payload: V2ClaimRequest,
+    request: Request,
+    caller: BridgeCaller = Depends(require_bridge_caller),  # noqa: ARG001
+) -> dict[str, Any]:
+    v1_id = _operation_to_v1_conversation_id(operation_id)
+    from ..behaviors.chat.conversation_schemas import ChatTaskClaimRequest
+    coord_response = _coord_call(
+        request, "claim",
+        conversation_id=v1_id,
+        request=ChatTaskClaimRequest(
+            actor_name=_strip_at(payload.actor_handle),
+            lease_seconds=payload.lease_seconds,
+        ),
+    )
+    return _coord_response_to_v2_dict(operation_id, coord_response)
+
+
+@router.post("/{operation_id}/evidence", status_code=201)
+def submit_evidence(
+    operation_id: str,
+    payload: V2EvidenceRequest,
+    request: Request,
+    caller: BridgeCaller = Depends(require_bridge_caller),  # noqa: ARG001
+) -> dict[str, Any]:
+    v1_id = _operation_to_v1_conversation_id(operation_id)
+    from ..behaviors.chat.conversation_schemas import ChatTaskEvidenceRequest
+    coord_response = _coord_call(
+        request, "add_evidence",
+        conversation_id=v1_id,
+        request=ChatTaskEvidenceRequest(
+            actor_name=_strip_at(payload.actor_handle),
+            lease_token=payload.lease_token,
+            kind=payload.kind,
+            summary=payload.summary,
+            payload=payload.payload,
+        ),
+    )
+    return _coord_response_to_v2_dict(operation_id, coord_response)
+
+
+@router.post("/{operation_id}/approval/request", status_code=201)
+def request_approval(
+    operation_id: str,
+    payload: V2ApprovalRequestRequest,
+    request: Request,
+    caller: BridgeCaller = Depends(require_bridge_caller),  # noqa: ARG001
+) -> dict[str, Any]:
+    v1_id = _operation_to_v1_conversation_id(operation_id)
+    from ..behaviors.chat.conversation_schemas import ChatTaskApprovalRequest
+    coord_response = _coord_call(
+        request, "request_approval",
+        conversation_id=v1_id,
+        request=ChatTaskApprovalRequest(
+            actor_name=_strip_at(payload.actor_handle),
+            lease_token=payload.lease_token,
+            reason=payload.reason,
+            note=payload.note,
+        ),
+    )
+    return _coord_response_to_v2_dict(operation_id, coord_response)
+
+
+@router.post("/{operation_id}/approval/resolve")
+def resolve_approval(
+    operation_id: str,
+    payload: V2ApprovalResolveRequest,
+    request: Request,
+    caller: BridgeCaller = Depends(require_bridge_caller),  # noqa: ARG001
+) -> dict[str, Any]:
+    v1_id = _operation_to_v1_conversation_id(operation_id)
+    from ..behaviors.chat.conversation_schemas import ChatTaskApprovalResolveRequest
+    coord_response = _coord_call(
+        request, "resolve_approval",
+        conversation_id=v1_id,
+        request=ChatTaskApprovalResolveRequest(
+            resolved_by=_strip_at(payload.actor_handle),
+            resolution=payload.resolution,
+            note=payload.note,
+        ),
+    )
+    return _coord_response_to_v2_dict(operation_id, coord_response)
+
+
+@router.post("/{operation_id}/complete")
+def complete_operation(
+    operation_id: str,
+    payload: V2CompleteRequest,
+    request: Request,
+    caller: BridgeCaller = Depends(require_bridge_caller),  # noqa: ARG001
+) -> dict[str, Any]:
+    v1_id = _operation_to_v1_conversation_id(operation_id)
+    from ..behaviors.chat.conversation_schemas import ChatTaskCompleteRequest
+    coord_response = _coord_call(
+        request, "complete",
+        conversation_id=v1_id,
+        request=ChatTaskCompleteRequest(
+            actor_name=_strip_at(payload.actor_handle),
+            lease_token=payload.lease_token,
+            summary=payload.summary,
+        ),
+    )
+    return _coord_response_to_v2_dict(operation_id, coord_response)
+
+
+@router.post("/{operation_id}/fail")
+def fail_operation(
+    operation_id: str,
+    payload: V2FailRequest,
+    request: Request,
+    caller: BridgeCaller = Depends(require_bridge_caller),  # noqa: ARG001
+) -> dict[str, Any]:
+    v1_id = _operation_to_v1_conversation_id(operation_id)
+    from ..behaviors.chat.conversation_schemas import ChatTaskFailRequest
+    coord_response = _coord_call(
+        request, "fail",
+        conversation_id=v1_id,
+        request=ChatTaskFailRequest(
+            actor_name=_strip_at(payload.actor_handle),
+            lease_token=payload.lease_token,
+            error_text=payload.error_text,
+        ),
+    )
+    return _coord_response_to_v2_dict(operation_id, coord_response)
