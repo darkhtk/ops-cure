@@ -55,6 +55,7 @@ from .adversarial import (  # noqa: F401
     ALL_ADVERSARIAL,
 )
 from .load import LoadScenarioRunner, LoadObservation  # noqa: F401
+from .race import RaceClaimBrain, EagerReplierBrain, RaceCloseBrain  # noqa: F401
 from .driver import (  # noqa: F401
     ScenarioDriver,
     ProtocolObservation,
