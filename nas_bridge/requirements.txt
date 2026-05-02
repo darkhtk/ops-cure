@@ -4,3 +4,9 @@ pydantic>=2.11,<3
 pydantic-settings>=2.10,<3
 SQLAlchemy>=2.0,<3
 uvicorn[standard]>=0.35,<1
+# H4: ClaudeBrain (LLM agent). Soft-imported in code but bundled here
+# so BRIDGE_AGENT_BRAIN=claude works out of the box.
+anthropic>=0.40,<1
+# F11/SDK: BridgeV2Client used by external agents + the live LLM
+# scenario tools. agent_sdk module hard-imports httpx at the top.
+httpx>=0.27,<1

@@ -82,6 +82,52 @@ docker compose up --build -d
 
 The SQLite database is persisted under `./data/bridge.db`.
 
+### Optional behaviors (env-toggled)
+
+The container ships with three opt-in behaviors. All disabled by default; enable
+via `.env`.
+
+#### Built-in LLM agent
+
+```env
+BRIDGE_AGENT_ENABLED=true
+BRIDGE_AGENT_HANDLE=@bridge-agent
+BRIDGE_AGENT_BRAIN=claude
+BRIDGE_AGENT_MODEL=claude-opus-4-7
+BRIDGE_ANTHROPIC_API_KEY=sk-ant-...
+```
+
+When enabled, the bridge spawns an in-process agent runner that subscribes to
+`v2:inbox:<actor_id>` on the broker. Any v2 OperationEvent addressed to that
+handle (`addressed_to=@bridge-agent` in chat / `actor_handle="@bridge-agent"`
+in v2 native API) gets passed to ClaudeBrain, which uses tool-use to emit
+speech.* / close_operation actions back through the dual-write path.
+
+Use `BRIDGE_AGENT_BRAIN=echo` to test the wiring without an API key — the agent
+just echoes what it received.
+
+#### Daily digest
+
+```env
+BRIDGE_DIGEST_INTERVAL_SECONDS=86400
+```
+
+Every interval (default disabled with `0`), the scheduler scans every space's
+v2 ops closed since the last fire, composes a markdown rollup, and posts it as
+a `system speech` (`actor_name=digest-bot`) into the room's general
+conversation. Operators see a "what closed yesterday" summary at the top of
+each Discord thread.
+
+#### v1 chat deprecation banner
+
+```env
+BRIDGE_CHAT_V1_DEPRECATION_WARNING=true   # default
+```
+
+Logs a one-time WARNING at startup pointing v1 chat callers at the new
+`/v2/operations/*` and `/v2/inbox` endpoints. Set `false` once your clients
+have migrated.
+
 ## Shared Server Auth Layer
 
 The bridge only owns shared server-side auth primitives.
