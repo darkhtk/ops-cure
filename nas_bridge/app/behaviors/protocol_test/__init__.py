@@ -61,6 +61,14 @@ from .chaos import (  # noqa: F401
     ChaosMalformedBrain,
     ChaosOversizedBrain,
 )
+from .live_llm import (  # noqa: F401
+    build_claude_personas,
+    run_live_inquiry_chain,
+    LiveLLMScenarioReport,
+    INVESTIGATOR_PROMPT,
+    REVIEWER_PROMPT,
+    OPERATOR_PROMPT,
+)
 from .driver import (  # noqa: F401
     ScenarioDriver,
     ProtocolObservation,
