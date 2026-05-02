@@ -35,6 +35,14 @@ from ...kernel.events import (
 )
 from ...kernel.storage import session_scope
 from ...kernel.v2 import OperationMirror as _OperationMirror
+from ...kernel.v2 import contract as _v2_contract
+
+
+# γ ext: sentinel for "auto-derive v2 state target from contract.
+# EVENT_KIND_TO_TARGET_STATE". Pass an explicit ``str`` to override
+# (e.g. approval_resolved depends on payload.resolution); pass
+# explicit ``None`` to suppress auto-derivation entirely.
+_AUTO_V2_STATE = object()
 from ...schemas import (
     RemoteTaskApprovalRequest,
     RemoteTaskApprovalResolveRequest,
@@ -119,6 +127,8 @@ class ChatTaskCoordinator:
                 lease_seconds=request.lease_seconds,
             ),
         )
+        # v2 state target ('claimed') auto-derived from contract via
+        # EVENT_KIND_TO_TARGET_STATE[event_kind].
         self._update_owner_and_emit(
             conversation_id=conversation_id,
             actor_name=request.actor_name,
@@ -132,7 +142,6 @@ class ChatTaskCoordinator:
             },
             new_owner=request.actor_name,
             new_expected_speaker=request.actor_name,
-            new_v2_state="claimed",
         )
         return self._build_response(conversation_id=conversation_id, task=task)
 
@@ -219,8 +228,9 @@ class ChatTaskCoordinator:
         artifact_meta = None
         if isinstance(request.payload.get("artifact"), dict):
             artifact_meta = dict(request.payload["artifact"])
-        # First evidence flips claimed -> executing. Subsequent evidence
-        # is idempotent (transition_state is no-op when already in target).
+        # First evidence flips claimed -> executing via contract auto.
+        # Subsequent evidence is idempotent (transition_state is no-op
+        # when already in target).
         self._update_owner_and_emit(
             conversation_id=conversation_id,
             actor_name=request.actor_name,
@@ -232,7 +242,6 @@ class ChatTaskCoordinator:
                 "summary": request.summary,
             },
             artifact=artifact_meta,
-            new_v2_state="executing",
         )
         return self._build_response(conversation_id=conversation_id, task=task)
 
@@ -349,6 +358,7 @@ class ChatTaskCoordinator:
                 note=request.note,
             ),
         )
+        # blocked_approval auto-derived from contract.
         self._update_owner_and_emit(
             conversation_id=conversation_id,
             actor_name=request.actor_name,
@@ -359,7 +369,6 @@ class ChatTaskCoordinator:
                 "reason": request.reason,
                 "note": request.note,
             },
-            new_v2_state="blocked_approval",
         )
         return self._build_response(conversation_id=conversation_id, task=task)
 
@@ -382,6 +391,10 @@ class ChatTaskCoordinator:
                 note=request.note,
             ),
         )
+        # approval_resolved is the one site where state target depends
+        # on payload, so contract.EVENT_KIND_TO_TARGET_STATE deliberately
+        # omits it; we override explicitly here. Approved -> executing
+        # (resume work); denied -> None (close runs separately below).
         self._update_owner_and_emit(
             conversation_id=conversation_id,
             actor_name=request.resolved_by,
@@ -507,7 +520,7 @@ class ChatTaskCoordinator:
         new_expected_speaker: str | None = None,
         new_expected_speaker_to_none: bool = False,
         artifact: dict[str, Any] | None = None,
-        new_v2_state: str | None = None,
+        new_v2_state: Any = _AUTO_V2_STATE,
     ) -> None:
         envelope: EventEnvelope | None = None
         with session_scope() as db:
@@ -545,15 +558,23 @@ class ChatTaskCoordinator:
                     v2_event_id=event_message.v2_event_id,
                     artifact=artifact,
                 )
-            # G2-followup (#2 fix): wire task lifecycle into operations_v2.state
-            # so /v2/inbox?state=executing & friends actually return what
-            # callers expect. State machine assertion in mirror catches
-            # invalid transitions (programmer error in mapping below).
-            if new_v2_state is not None and row.v2_operation_id is not None:
+            # G2-followup (#2 fix) + γ ext: wire task lifecycle into
+            # operations_v2.state so /v2/inbox?state=executing & friends
+            # actually return what callers expect. The mapping itself
+            # lives in contract.EVENT_KIND_TO_TARGET_STATE -- the default
+            # sentinel makes call sites that only know event_kind get
+            # the right transition for free. Explicit ``str`` overrides
+            # (approval_resolved). Explicit ``None`` suppresses.
+            target_state: str | None
+            if new_v2_state is _AUTO_V2_STATE:
+                target_state = _v2_contract.EVENT_KIND_TO_TARGET_STATE.get(event_kind)
+            else:
+                target_state = new_v2_state
+            if target_state is not None and row.v2_operation_id is not None:
                 mirror.transition_state(
                     db,
                     v2_operation_id=row.v2_operation_id,
-                    to_state=new_v2_state,
+                    to_state=target_state,
                 )
             envelope = make_message_envelope(
                 space_id=row.thread_id,

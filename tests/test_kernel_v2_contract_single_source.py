@@ -107,3 +107,76 @@ def test_close_resolution_uses_contract_vocab_through_v1():
     assert is_ok(kind="inquiry", resolution="abandoned")
     # 'completed' is task vocab, NOT inquiry
     assert not is_ok(kind="inquiry", resolution="completed")
+
+
+def test_task_coordinator_uses_contract_for_state_transitions(tmp_path, monkeypatch):
+    """End-to-end: ChatTaskCoordinator no longer hardcodes new_v2_state
+    at 3 of 4 sites. The contract.EVENT_KIND_TO_TARGET_STATE table
+    drives the transition. Patching the contract for one event_kind
+    flips the behavior live."""
+    if str(NAS_BRIDGE_ROOT) not in sys.path:
+        sys.path.insert(0, str(NAS_BRIDGE_ROOT))
+    monkeypatch.setenv("BRIDGE_SHARED_AUTH_TOKEN", "t")
+    monkeypatch.setenv("BRIDGE_DISABLE_DISCORD", "true")
+    monkeypatch.setenv("BRIDGE_DATABASE_URL", f"sqlite:///{(tmp_path / 'b.db').as_posix()}")
+    for mod in list(sys.modules):
+        if mod == "app" or mod.startswith("app."):
+            del sys.modules[mod]
+    import app.config as config
+    config.get_settings.cache_clear()
+    import app.db as db
+    from app.behaviors.chat.conversation_service import ChatConversationService
+    from app.behaviors.chat.conversation_schemas import (
+        ConversationOpenRequest, ChatTaskClaimRequest,
+    )
+    from app.behaviors.chat.models import ChatThreadModel, ChatConversationModel
+    from app.behaviors.chat.task_coordinator import ChatTaskCoordinator
+    from app.kernel.presence import PresenceService
+    from app.kernel.approvals import KernelApprovalService
+    from app.kernel.v2 import V2Repository, contract as v2_contract
+    from app.services.remote_task_service import RemoteTaskService
+    db.init_db()
+
+    # Patch contract: route chat.task.claimed to 'verifying' instead.
+    # This shouldn't be possible logically (state machine bars open->verifying)
+    # so we expect the assert_transition to RAISE -- proving the lookup
+    # path is the one driving the transition.
+    import uuid
+    with db.session_scope() as s:
+        t = ChatThreadModel(
+            id=str(uuid.uuid4()), guild_id="g", parent_channel_id="p",
+            discord_thread_id="d", title="t", created_by="alice",
+        )
+        s.add(t); s.flush()
+        discord = t.discord_thread_id
+
+    remote_task = RemoteTaskService(
+        presence_service=PresenceService(),
+        kernel_approval_service=KernelApprovalService(),
+    )
+    chat = ChatConversationService(remote_task_service=remote_task)
+    coord = ChatTaskCoordinator(
+        conversation_service=chat,
+        remote_task_service=remote_task,
+    )
+    chat.ensure_general(discord_thread_id=discord)
+    summary = chat.open_conversation(
+        discord_thread_id=discord,
+        request=ConversationOpenRequest(
+            kind="task", title="t",
+            objective="do", opener_actor="alice",
+        ),
+    )
+
+    monkeypatch.setitem(
+        v2_contract.EVENT_KIND_TO_TARGET_STATE,
+        "chat.task.claimed", "verifying",
+    )
+    from app.kernel.v2 import StateMachineError
+    with pytest.raises(StateMachineError):
+        coord.claim(
+            conversation_id=summary.id,
+            request=ChatTaskClaimRequest(
+                actor_name="claude-pca", lease_seconds=300,
+            ),
+        )
