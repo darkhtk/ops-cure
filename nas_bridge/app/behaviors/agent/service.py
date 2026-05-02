@@ -13,6 +13,10 @@ from .runner import AgentRunner
 
 logger = logging.getLogger("opscure.agent.service")
 
+# Maximum number of agent slots to scan for in env. Slot 1 uses bare names
+# (BRIDGE_AGENT_HANDLE); slots 2..N use suffixed names (BRIDGE_AGENT_2_HANDLE).
+_MAX_AGENT_SLOTS = 8
+
 
 class AgentService:
     """Owns AgentRunners + an optional RemoteClaudeReplyWatcher and
@@ -56,68 +60,47 @@ class AgentService:
             await self._reply_watcher.stop()
 
 
-def build_default_agent_service(
+def _slot_env(slot: int, key: str) -> str:
+    """Slot 1 uses BRIDGE_AGENT_<KEY>; slot >=2 uses BRIDGE_AGENT_<N>_<KEY>."""
+    if slot <= 1:
+        return f"BRIDGE_AGENT_{key}"
+    return f"BRIDGE_AGENT_{slot}_{key}"
+
+
+def _slot_get(slot: int, key: str, default: str = "") -> str:
+    return os.environ.get(_slot_env(slot, key), default).strip()
+
+
+def _build_brain_for_slot(
+    slot: int,
     *,
-    broker,
-    chat_service,
-    remote_claude_service=None,
-) -> AgentService | None:
-    """Returns AgentService with runner + (for pc-claude brain) reply
-    watcher already wired. Caller awaits svc.start() in lifespan.
+    handle: str,
+    remote_claude_service,
+) -> tuple[AgentBrain | None, str | None]:
+    """Build a brain for the given agent slot. Returns (brain, pc_machine_id)
+    where pc_machine_id is non-None when the brain dispatches to a PC and
+    that machine_id should be added to the shared reply watcher.
     """
-    """Reads BRIDGE_AGENT_* env to decide whether to spawn an agent
-    in this process. Returns ``None`` when disabled (the common dev
-    case).
-
-    Production path: BRIDGE_AGENT_BRAIN=pc-claude. The agent enqueues
-    runs to a worker PC running claude_executor (which uses the user's
-    locally-logged-in Claude session -- no API key on the bridge).
-
-    Test paths:
-      BRIDGE_AGENT_BRAIN=echo           deterministic stub
-      BRIDGE_AGENT_BRAIN=claude         direct anthropic SDK; needs
-                                        anthropic installed + API key.
-                                        NOT bundled in default image.
-    """
-    enabled = os.environ.get("BRIDGE_AGENT_ENABLED", "").strip().lower()
-    if enabled not in {"1", "true", "yes", "on"}:
-        return None
-
-    handle = os.environ.get("BRIDGE_AGENT_HANDLE", "@bridge-agent").strip() or "@bridge-agent"
-    brain_kind = os.environ.get("BRIDGE_AGENT_BRAIN", "pc-claude").strip().lower()
-    brain: AgentBrain
-
+    brain_kind = _slot_get(slot, "BRAIN", "pc-claude").lower() or "pc-claude"
     if brain_kind == "echo":
-        brain = EchoBrain()
-    elif brain_kind == "pc-claude":
+        return EchoBrain(), None
+    if brain_kind == "pc-claude":
         if remote_claude_service is None:
             logger.warning(
-                "BRIDGE_AGENT_BRAIN=pc-claude but remote_claude_service not "
-                "wired -- agent disabled"
+                "agent slot %d: BRAIN=pc-claude but remote_claude_service not "
+                "wired -- slot disabled", slot,
             )
-            return None
-        machine_id = os.environ.get("BRIDGE_AGENT_PC_MACHINE_ID", "").strip()
-        cwd = os.environ.get("BRIDGE_AGENT_PC_CWD", "").strip()
+            return None, None
+        machine_id = _slot_get(slot, "PC_MACHINE_ID")
+        cwd = _slot_get(slot, "PC_CWD")
         if not machine_id or not cwd:
             logger.warning(
-                "BRIDGE_AGENT_BRAIN=pc-claude requires "
-                "BRIDGE_AGENT_PC_MACHINE_ID + BRIDGE_AGENT_PC_CWD"
+                "agent slot %d (handle=%s): BRAIN=pc-claude requires "
+                "PC_MACHINE_ID + PC_CWD; slot disabled", slot, handle,
             )
-            return None
-        model = os.environ.get("BRIDGE_AGENT_MODEL", "").strip() or None
-        permission = os.environ.get(
-            "BRIDGE_AGENT_PC_PERMISSION_MODE", "acceptEdits"
-        ).strip()
-        from .reply_watcher import RemoteClaudeReplyWatcher
-
-        watcher = RemoteClaudeReplyWatcher(
-            broker=broker,
-            chat_service=chat_service,
-            machine_ids=[machine_id],
-            remote_claude_state_service=getattr(
-                remote_claude_service, "state_service", None
-            ),
-        )
+            return None, None
+        model = _slot_get(slot, "MODEL") or None
+        permission = _slot_get(slot, "PC_PERMISSION_MODE") or "acceptEdits"
         brain = PCClaudeBrain(
             remote_claude_service=remote_claude_service,
             machine_id=machine_id,
@@ -125,36 +108,104 @@ def build_default_agent_service(
             actor_handle=handle,
             model=model,
             permission_mode=permission,
-            reply_watcher=watcher,
+            reply_watcher=None,  # attached below once shared watcher exists
         )
-    elif brain_kind == "claude":
-        api_key = os.environ.get("BRIDGE_ANTHROPIC_API_KEY", "").strip()
+        return brain, machine_id
+    if brain_kind == "claude":
+        api_key = _slot_get(slot, "ANTHROPIC_API_KEY") or os.environ.get(
+            "BRIDGE_ANTHROPIC_API_KEY", ""
+        ).strip()
         if not api_key:
             logger.warning(
-                "BRIDGE_AGENT_BRAIN=claude (api-key path) but "
-                "BRIDGE_ANTHROPIC_API_KEY not set -- agent disabled. "
-                "Use BRIDGE_AGENT_BRAIN=pc-claude for the PC-CLI path."
+                "agent slot %d: BRAIN=claude needs ANTHROPIC_API_KEY -- "
+                "slot disabled. Use BRAIN=pc-claude for the PC-CLI path.",
+                slot,
             )
-            return None
-        model = os.environ.get("BRIDGE_AGENT_MODEL", "claude-opus-4-7").strip()
-        system = os.environ.get("BRIDGE_AGENT_SYSTEM_PROMPT", DEFAULT_SYSTEM_PROMPT)
-        brain = ClaudeBrain(api_key=api_key, model=model, system_prompt=system)
-    else:
-        logger.warning("unknown BRIDGE_AGENT_BRAIN=%s -- agent disabled", brain_kind)
+            return None, None
+        model = _slot_get(slot, "MODEL") or "claude-opus-4-7"
+        system = _slot_get(slot, "SYSTEM_PROMPT") or DEFAULT_SYSTEM_PROMPT
+        return ClaudeBrain(api_key=api_key, model=model, system_prompt=system), None
+    logger.warning(
+        "agent slot %d: unknown BRAIN=%s -- slot disabled", slot, brain_kind
+    )
+    return None, None
+
+
+def build_default_agent_service(
+    *,
+    broker,
+    chat_service,
+    remote_claude_service=None,
+) -> AgentService | None:
+    """Returns AgentService with up to _MAX_AGENT_SLOTS runners + (when any
+    pc-claude slot is configured) a single shared RemoteClaudeReplyWatcher
+    that handles every PC machine id across slots.
+
+    Slot 1 reads bare env names (``BRIDGE_AGENT_HANDLE`` etc.). Slots 2..N
+    read suffixed names (``BRIDGE_AGENT_2_HANDLE``). Slot 1 is required to
+    be configured for the service to start; additional slots are optional
+    and silently skipped if their HANDLE is unset.
+
+    Production path (slot 1): BRAIN=pc-claude — agent enqueues runs to a
+    worker PC running claude_executor.
+
+    Multi-agent path: configure additional slots with distinct HANDLE +
+    PC_MACHINE_ID (one per worker PC).
+    """
+    enabled = os.environ.get("BRIDGE_AGENT_ENABLED", "").strip().lower()
+    if enabled not in {"1", "true", "yes", "on"}:
         return None
 
-    runner = AgentRunner(
-        actor_handle=handle,
-        brain=brain,
-        broker=broker,
-        chat_service=chat_service,
-    )
     svc = AgentService()
-    svc.add_runner(runner)
-    # If pc-claude path created a watcher, attach it -- AgentService.start()
-    # will spawn its tasks.
-    if brain_kind == "pc-claude":
-        watcher = getattr(brain, "_reply_watcher", None)
-        if watcher is not None:
-            svc.set_reply_watcher(watcher)
+    pc_machine_ids: list[str] = []
+    pc_brains: list[PCClaudeBrain] = []
+
+    for slot in range(1, _MAX_AGENT_SLOTS + 1):
+        if slot == 1:
+            handle = _slot_get(slot, "HANDLE") or "@bridge-agent"
+        else:
+            handle = _slot_get(slot, "HANDLE")
+            if not handle:
+                continue  # slot not configured
+        brain, pc_machine_id = _build_brain_for_slot(
+            slot, handle=handle, remote_claude_service=remote_claude_service
+        )
+        if brain is None:
+            if slot == 1:
+                # Slot 1 misconfigured -- bail out completely.
+                return None
+            continue
+        if pc_machine_id and isinstance(brain, PCClaudeBrain):
+            pc_machine_ids.append(pc_machine_id)
+            pc_brains.append(brain)
+        runner = AgentRunner(
+            actor_handle=handle,
+            brain=brain,
+            broker=broker,
+            chat_service=chat_service,
+        )
+        svc.add_runner(runner)
+        logger.info(
+            "agent slot %d configured: handle=%s brain=%s",
+            slot, handle, type(brain).__name__,
+        )
+
+    if not svc._runners:
+        return None
+
+    # Single shared watcher across all PC-bound slots so machine spaces are
+    # subscribed exactly once and the FIFO bind ordering is per-machine.
+    if pc_machine_ids:
+        from .reply_watcher import RemoteClaudeReplyWatcher
+        watcher = RemoteClaudeReplyWatcher(
+            broker=broker,
+            chat_service=chat_service,
+            machine_ids=list(dict.fromkeys(pc_machine_ids)),  # de-dup, preserve order
+            remote_claude_state_service=getattr(
+                remote_claude_service, "state_service", None
+            ),
+        )
+        for brain in pc_brains:
+            brain._reply_watcher = watcher
+        svc.set_reply_watcher(watcher)
     return svc
