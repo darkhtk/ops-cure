@@ -235,6 +235,25 @@ class AgentRunner:
             except Exception as exc:  # noqa: BLE001
                 logger.exception("agent action %s failed", kind)
                 return ActionResult(operation_id, kind, False, repr(exc))
+        if kind == "close":
+            resolution = action.get("resolution")
+            if not resolution:
+                return ActionResult(operation_id, kind, False, "missing resolution")
+            summary = action.get("summary")
+            v1_id = self._operation_id_to_v1_conversation_id(operation_id)
+            if v1_id is None:
+                return ActionResult(operation_id, kind, False, "no v1 mirror")
+            try:
+                self._chat_service.close_conversation(
+                    conversation_id=v1_id,
+                    closed_by=self._handle.lstrip("@"),
+                    resolution=resolution,
+                    summary=summary,
+                )
+                return ActionResult(operation_id, kind, True)
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("agent close action failed")
+                return ActionResult(operation_id, kind, False, repr(exc))
         # Unknown action -- record and skip.
         return ActionResult(operation_id, kind, False, "unknown action kind")
 
