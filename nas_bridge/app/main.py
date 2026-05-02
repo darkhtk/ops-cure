@@ -100,9 +100,6 @@ class ServiceContainer:
     session_service: SessionService
     discord_gateway: DiscordGateway
     recovery_loop_task: asyncio.Task[None] | None = None
-    # Set by lifespan when BRIDGE_AGENT_ENABLED -- in-process LLM
-    # agent runner(s). Default None means "no in-process agent".
-    agent_service: Any | None = None
     # H5: optional periodic digest poster + its task handle
     digest_scheduler: Any | None = None
     digest_loop_task: asyncio.Task[None] | None = None
@@ -314,21 +311,10 @@ async def lifespan(app: FastAPI):
         name="opscure-recovery-loop",
     )
     await services.discord_gateway.start()
-    # Agent behavior: opt-in via BRIDGE_AGENT_ENABLED. Spawns a runner
-    # subscribed to the in-process broker so events fan out from
-    # dual-write -> mirror -> _publish_v2_inbox_fanout reach the brain.
-    from .behaviors.agent.service import build_default_agent_service
-    agent_service = build_default_agent_service(
-        broker=services.subscription_broker,
-        chat_service=services.chat_conversation_service,
-        # Production brain path is pc-claude -- delegates to a worker
-        # PC running claude_executor (uses local Claude session, no
-        # API key needed on the bridge).
-        remote_claude_service=services.remote_claude_service,
-    )
-    services.agent_service = agent_service
-    if agent_service is not None:
-        await agent_service.start()
+    # NOTE: in-process agent runners were removed. Agents are external
+    # clients of the kernel: they subscribe to /v2/inbox/stream by actor
+    # handle and post speech.claim back via /v2/operations/{id}/events.
+    # See pc_launcher/connectors/claude_executor/agent_loop.py.
     # H5: digest cron loop. opt-in via BRIDGE_DIGEST_INTERVAL_SECONDS;
     # 0/unset disables. Default off to keep test env quiet; production
     # sets 86400 (daily).
@@ -356,8 +342,6 @@ async def lifespan(app: FastAPI):
         if services.recovery_loop_task is not None:
             with suppress(asyncio.CancelledError):
                 await services.recovery_loop_task
-        if getattr(services, "agent_service", None) is not None:
-            await services.agent_service.stop()
         if getattr(services, "digest_scheduler", None) is not None:
             services.digest_scheduler.stop()
         if getattr(services, "digest_loop_task", None) is not None:

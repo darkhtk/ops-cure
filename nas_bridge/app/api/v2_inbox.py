@@ -13,7 +13,7 @@ import asyncio
 import json
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import StreamingResponse
 
 from ..auth import BridgeCaller, require_bridge_caller
@@ -88,13 +88,17 @@ async def stream_inbox(
     or use them as keepalive timestamps.
     """
     handle = actor_handle if actor_handle.startswith("@") else f"@{actor_handle}"
+    # External agents subscribe by handle without prior registration. The
+    # subscribe IS the registration -- auto-provision the actor row so the
+    # caller can immediately receive routed events. Kind defaults to "ai"
+    # because the SSE consumer is automation; the human-operator handle
+    # path goes through actor_for_caller on the speech-submit side.
+    from ..kernel.v2.actor_service import ActorService
     repo = V2Repository()
     with session_scope() as db:
-        actor = repo.get_actor_by_handle(db, handle)
-        if actor is None:
-            raise HTTPException(
-                status_code=404, detail=f"actor {actor_handle!r} not registered yet",
-            )
+        actor = ActorService(repo).ensure_actor_by_handle(
+            db, handle=handle, display_name=handle.lstrip("@"), kind="ai",
+        )
         actor_id = actor.id
 
     services = request.app.state.services

@@ -1,9 +1,9 @@
-"""Agent behavior — runner dispatch round-trip via EchoBrain.
+"""Agent runner dispatch round-trip via EchoBrain (in-process).
 
 Tests cover the deterministic seam (sync ``dispatch``) so an asyncio
-loop isn't required. The async ``run_forever`` path is exercised by
-the AgentService start/stop integration test which uses TestClient
-lifespan.
+loop isn't required. AgentRunner is now used only by tests +
+protocol_test scenarios; production agents are external clients of
+/v2/inbox/stream and don't go through this path.
 """
 from __future__ import annotations
 
@@ -34,7 +34,7 @@ def _bootstrap(tmp_path, monkeypatch):
     )
     from app.behaviors.chat.models import ChatThreadModel, ChatConversationModel
     from app.behaviors.agent import (
-        AgentRunner, EchoBrain, ActionResult, AgentService,
+        AgentRunner, EchoBrain, ActionResult,
     )
     from app.kernel.subscriptions import InProcessSubscriptionBroker
     from app.kernel.v2 import V2Repository
@@ -308,27 +308,6 @@ def test_action_with_unknown_kind_records_failure(tmp_path, monkeypatch):
     assert results[0].detail == "unknown action kind"
 
 
-def test_agent_service_disabled_when_env_unset(tmp_path, monkeypatch):
-    """build_default_agent_service returns None when BRIDGE_AGENT_ENABLED
-    isn't set -- the common dev case."""
-    m = _bootstrap(tmp_path, monkeypatch)
-    monkeypatch.delenv("BRIDGE_AGENT_ENABLED", raising=False)
-    from app.behaviors.agent.service import build_default_agent_service
-    broker = m["InProcessSubscriptionBroker"]()
-    chat = m["ChatConversationService"](subscription_broker=broker)
-    svc = build_default_agent_service(broker=broker, chat_service=chat)
-    assert svc is None
-
-
-def test_agent_service_picks_echo_brain_when_configured(tmp_path, monkeypatch):
-    m = _bootstrap(tmp_path, monkeypatch)
-    monkeypatch.setenv("BRIDGE_AGENT_ENABLED", "true")
-    monkeypatch.setenv("BRIDGE_AGENT_BRAIN", "echo")
-    monkeypatch.setenv("BRIDGE_AGENT_HANDLE", "@test-bot")
-    from app.behaviors.agent.service import build_default_agent_service
-    broker = m["InProcessSubscriptionBroker"]()
-    chat = m["ChatConversationService"](subscription_broker=broker)
-    svc = build_default_agent_service(broker=broker, chat_service=chat)
-    assert svc is not None
-    assert len(svc._runners) == 1
-    assert svc._runners[0].actor_handle == "@test-bot"
+# build_default_agent_service was removed when in-process agent hosting
+# was retired. Agents now run as external clients of /v2/inbox/stream.
+# AgentRunner + brains remain available for unit + protocol_test usage.

@@ -12,6 +12,17 @@ Optional:
   CLAUDE_BRIDGE_WORKER_ID    (default: hostname-pid)
   CLAUDE_BRIDGE_POLL_SECONDS (default: 2.0)
   CLAUDE_BRIDGE_SYNC_SECONDS (default: 30.0)
+
+External-agent mode (kernel + external agent architecture):
+  CLAUDE_BRIDGE_ACTOR_HANDLE     when set (e.g. "@bridge-agent"), the
+                                 executor also subscribes to the v2
+                                 inbox SSE for that actor and runs
+                                 claude on each addressed speech.* event,
+                                 posting the result back as a speech.claim.
+  CLAUDE_BRIDGE_AGENT_CWD        cwd for agent-mode claude runs. Defaults
+                                 to current process cwd if unset.
+  CLAUDE_BRIDGE_AGENT_MODEL      override model (e.g. claude-opus-4-7)
+  CLAUDE_BRIDGE_AGENT_PERMISSION mode flag (default: acceptEdits)
 """
 
 from __future__ import annotations
@@ -22,6 +33,7 @@ import socket
 import sys
 
 from .agent import ClaudeExecutorAgent
+from .agent_loop import BridgeAgentLoop
 from .bridge_client import BridgeClient
 
 
@@ -60,11 +72,32 @@ def main(argv: list[str] | None = None) -> int:
         sync_interval_seconds=args.sync_seconds,
         poll_interval_seconds=args.poll_seconds,
     )
+
+    actor_handle = os.getenv("CLAUDE_BRIDGE_ACTOR_HANDLE", "").strip()
+    agent_loop: BridgeAgentLoop | None = None
+    if actor_handle:
+        agent_cwd = os.getenv("CLAUDE_BRIDGE_AGENT_CWD", "").strip() or os.getcwd()
+        agent_model = os.getenv("CLAUDE_BRIDGE_AGENT_MODEL", "").strip() or None
+        agent_permission = (
+            os.getenv("CLAUDE_BRIDGE_AGENT_PERMISSION", "").strip() or "acceptEdits"
+        )
+        agent_loop = BridgeAgentLoop(
+            bridge_url=args.bridge_url,
+            token=args.token,
+            actor_handle=actor_handle,
+            cwd=agent_cwd,
+            model=agent_model,
+            permission_mode=agent_permission,
+        )
+        agent_loop.start()
+
     print(f"[claude-executor] starting machine={args.machine_id} bridge={args.bridge_url}", file=sys.stderr)
     try:
         agent.run_forever()
     except KeyboardInterrupt:
         agent.stop()
+        if agent_loop is not None:
+            agent_loop.stop()
     return 0
 
 

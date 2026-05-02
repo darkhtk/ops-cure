@@ -1,16 +1,13 @@
-"""Pluggable brains for the in-process agent runner.
+"""Pluggable brains for the in-process AgentRunner used by tests +
+protocol_test scenarios. Production agents live OUTSIDE the bridge
+(see pc_launcher/connectors/claude_executor/agent_loop.py); these
+brains exist only for in-process simulations.
 
-Three concrete brains ship:
-
-  EchoBrain        deterministic stub for tests
-  PCClaudeBrain    delegates to remote_claude on a PC -- uses the
-                   PC's local Claude CLI (no API key). DEFAULT prod
-                   path on ops-cure: AI lives on the worker PC, the
-                   bridge only orchestrates.
-  ClaudeBrain      direct anthropic API. KEPT for unit tests and
-                   non-PC deployments only; the docker image does
-                   NOT bundle anthropic by default. Use PCClaudeBrain
-                   for production.
+  EchoBrain     deterministic stub
+  ClaudeBrain   direct anthropic API for unit tests that need real LLM
+                output. Not used in production. Anthropic dep is not
+                bundled in the bridge image; tests opt in by installing
+                it.
 """
 from __future__ import annotations
 
@@ -57,137 +54,6 @@ class EchoBrain:
             return None
         text = event_payload.get("text", "")
         return [{"action": "speech.claim", "text": f"echo: {text}"}]
-
-
-class PCClaudeBrain:
-    """Production brain: dispatches the inbound event to a PC running
-    claude_executor (claude CLI). The PC uses its local logged-in
-    session (Claude Pro / Max / Team account) -- no API key needed
-    on the bridge side.
-
-    Architecture:
-        bridge agent runner receives v2 inbox event ->
-        PCClaudeBrain.respond() builds prompt from event + context ->
-        remote_claude_service.enqueue_run_start(machine_id, cwd, prompt)
-        -> command sits in the queue ->
-        PC's claude_executor.agent claims, runs `claude -p ...` locally,
-        streams events back via /agent/sessions/.../events ->
-        (future) a separate reply-watcher subscribes to those events,
-        collects the text, and posts it as speech.claim back into the
-        originating op.
-
-    V1 (this commit): respond() enqueues + returns no immediate action.
-    The actual reply round-trip is wired by the reply-watcher (next
-    commit). Operator can also see the run progress in the existing
-    remote_claude SSE / dashboard surfaces in the meantime.
-    """
-    handle = "@pc-claude"
-    description = "delegates to PC-installed claude CLI"
-
-    def __init__(
-        self,
-        *,
-        remote_claude_service,
-        machine_id: str,
-        cwd: str,
-        actor_handle: str = "@pc-claude",
-        model: str | None = None,
-        permission_mode: str = "acceptEdits",
-        history_limit: int = 12,
-        reply_watcher: Any = None,
-    ) -> None:
-        self._remote = remote_claude_service
-        self._machine_id = machine_id
-        self._cwd = cwd
-        self._handle = actor_handle
-        self._model = model
-        self._permission_mode = permission_mode
-        self._history_limit = history_limit
-        # When set, brain registers each dispatched command with the
-        # watcher so PC results round-trip back as speech.claim into
-        # the originating op.
-        self._reply_watcher = reply_watcher
-
-    def _build_prompt(
-        self,
-        event_payload: dict[str, Any],
-        context: dict[str, Any],
-    ) -> str:
-        """Compress recent op events + the current trigger into a
-        single prompt the PC's claude CLI can answer in one shot."""
-        op = context.get("operation", {}) or {}
-        recent = context.get("recent_events", []) or []
-        lines: list[str] = [
-            f"You are an AI agent (handle: {context.get('viewer_actor_handle', self._handle)}) "
-            f"in an ops-cure collaboration room.",
-            f"Operation: {op.get('kind', 'unknown')} -- {op.get('title', '')}",
-        ]
-        if op.get("intent"):
-            lines.append(f"Intent: {op['intent']}")
-        lines.append("")
-        lines.append("Recent events (oldest first):")
-        for ev in recent[-self._history_limit:]:
-            actor = ev.get("actor_id", "?")
-            kind = ev.get("kind", "")
-            text = (ev.get("payload") or {}).get("text") or ""
-            if not text:
-                continue
-            lines.append(f"  - [{kind}] {actor}: {text}")
-        lines.append("")
-        trigger = event_payload.get("text") or "(no text)"
-        lines.append(f"You are now addressed. The latest message is:\n{trigger}")
-        lines.append("")
-        lines.append(
-            "Reply concisely (1-3 sentences). When uncertain, say so. "
-            "Do not fabricate evidence."
-        )
-        return "\n".join(lines)
-
-    def respond(
-        self,
-        event_payload: dict[str, Any],
-        context: dict[str, Any],
-    ) -> list[dict[str, Any]] | None:
-        if not context.get("event_kind", "").startswith("chat.speech."):
-            return None
-        prompt = self._build_prompt(event_payload, context)
-        op_id = (context.get("operation") or {}).get("id")
-        try:
-            response = self._remote.enqueue_run_start(
-                machine_id=self._machine_id,
-                cwd=self._cwd,
-                prompt=prompt,
-                model=self._model,
-                permission_mode=self._permission_mode,
-                requested_by={
-                    "actor_handle": self._handle,
-                    "operation_id": op_id,
-                },
-            )
-        except Exception:  # noqa: BLE001 -- logged, nothing to retry here
-            logger.exception(
-                "PCClaudeBrain failed to enqueue run on machine=%s",
-                self._machine_id,
-            )
-            return None
-        # Register the (command_id, op) mapping with the watcher so the
-        # PC result -- when it arrives via remote_claude session events --
-        # gets posted back as speech.claim into this op.
-        if self._reply_watcher is not None and op_id:
-            cmd_id = (response.get("command") or {}).get("id") or (
-                response.get("command") or {}
-            ).get("commandId")
-            if cmd_id:
-                self._reply_watcher.register_dispatch(
-                    command_id=cmd_id,
-                    machine_id=self._machine_id,
-                    operation_id=op_id,
-                    actor_handle=self._handle,
-                )
-        # No immediate action -- the PC's run posts back via the reply
-        # watcher (separate component). Returning None means the brain
-        # silently kicked off a remote dispatch.
-        return None
 
 
 DEFAULT_SYSTEM_PROMPT = (

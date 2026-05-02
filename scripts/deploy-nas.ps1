@@ -84,9 +84,15 @@ set -e
 export PATH=/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin
 mkdir -p '$DeployPath'
 find '$DeployPath' -mindepth 1 -maxdepth 1 ! -name '.env' ! -name 'data' -exec rm -rf {} +
-tar -xf '$remoteArchive' -C '$DeployPath'
+# tar warns on future timestamps (small clock skew between dev box and NAS);
+# silence stderr so PowerShell's native-command stderr trap doesn't abort
+# the deploy on cosmetic warnings.
+tar -xf '$remoteArchive' -C '$DeployPath' 2>/dev/null
 cd '$DeployPath'
-echo '$sudoPassEsc' | sudo -S docker compose -f '$ComposeFile' up -d --build
+# Merge docker compose stderr into stdout so PowerShell's native-command
+# stderr handling doesn't trip on routine progress output ("Container Foo
+# Recreate"). The remote shell's `set -e` still aborts on real failures.
+echo '$sudoPassEsc' | sudo -S docker compose -f '$ComposeFile' up -d --build 2>&1
 rm -f '$remoteArchive'
 "@
 
