@@ -94,6 +94,7 @@ class PCClaudeBrain:
         model: str | None = None,
         permission_mode: str = "acceptEdits",
         history_limit: int = 12,
+        reply_watcher: Any = None,
     ) -> None:
         self._remote = remote_claude_service
         self._machine_id = machine_id
@@ -102,6 +103,10 @@ class PCClaudeBrain:
         self._model = model
         self._permission_mode = permission_mode
         self._history_limit = history_limit
+        # When set, brain registers each dispatched command with the
+        # watcher so PC results round-trip back as speech.claim into
+        # the originating op.
+        self._reply_watcher = reply_watcher
 
     def _build_prompt(
         self,
@@ -146,8 +151,9 @@ class PCClaudeBrain:
         if not context.get("event_kind", "").startswith("chat.speech."):
             return None
         prompt = self._build_prompt(event_payload, context)
+        op_id = (context.get("operation") or {}).get("id")
         try:
-            self._remote.enqueue_run_start(
+            response = self._remote.enqueue_run_start(
                 machine_id=self._machine_id,
                 cwd=self._cwd,
                 prompt=prompt,
@@ -155,7 +161,7 @@ class PCClaudeBrain:
                 permission_mode=self._permission_mode,
                 requested_by={
                     "actor_handle": self._handle,
-                    "operation_id": (context.get("operation") or {}).get("id"),
+                    "operation_id": op_id,
                 },
             )
         except Exception:  # noqa: BLE001 -- logged, nothing to retry here
@@ -164,6 +170,20 @@ class PCClaudeBrain:
                 self._machine_id,
             )
             return None
+        # Register the (command_id, op) mapping with the watcher so the
+        # PC result -- when it arrives via remote_claude session events --
+        # gets posted back as speech.claim into this op.
+        if self._reply_watcher is not None and op_id:
+            cmd_id = (response.get("command") or {}).get("id") or (
+                response.get("command") or {}
+            ).get("commandId")
+            if cmd_id:
+                self._reply_watcher.register_dispatch(
+                    command_id=cmd_id,
+                    machine_id=self._machine_id,
+                    operation_id=op_id,
+                    actor_handle=self._handle,
+                )
         # No immediate action -- the PC's run posts back via the reply
         # watcher (separate component). Returning None means the brain
         # silently kicked off a remote dispatch.

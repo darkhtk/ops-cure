@@ -164,6 +164,46 @@ def test_agent_service_picks_pc_claude_brain_when_configured(tmp_path, monkeypat
     assert runner.actor_handle == "@bridge-agent"
 
 
+class _RecordingWatcher:
+    def __init__(self):
+        self.registered = []
+
+    def register_dispatch(self, **kwargs):
+        self.registered.append(kwargs)
+
+
+def test_pc_claude_brain_registers_dispatch_with_watcher():
+    """Watcher receives command_id + op + actor on every successful
+    enqueue, so the eventual PC result can be routed back."""
+    from app.behaviors.agent import PCClaudeBrain
+    fake = _FakeRemoteClaudeService()
+    # Force the fake to return a command id so brain can pass it on.
+    fake.calls = []
+    watcher = _RecordingWatcher()
+    brain = PCClaudeBrain(
+        remote_claude_service=fake,
+        machine_id="pc-A", cwd="/x",
+        actor_handle="@bridge-agent",
+        reply_watcher=watcher,
+    )
+    brain.respond(
+        {"text": "?"},
+        {
+            "event_kind": "chat.speech.question",
+            "viewer_actor_id": "x",
+            "operation": {"id": "op-99", "kind": "inquiry",
+                          "title": "T", "state": "open", "participants": []},
+            "recent_events": [],
+        },
+    )
+    assert len(watcher.registered) == 1
+    reg = watcher.registered[0]
+    assert reg["operation_id"] == "op-99"
+    assert reg["machine_id"] == "pc-A"
+    assert reg["actor_handle"] == "@bridge-agent"
+    assert reg["command_id"] == "cmd-fake"
+
+
 def test_pc_claude_brain_disabled_without_machine_id(tmp_path, monkeypatch):
     """BRIDGE_AGENT_BRAIN=pc-claude without machine_id -> service None +
     warning log (not crash)."""

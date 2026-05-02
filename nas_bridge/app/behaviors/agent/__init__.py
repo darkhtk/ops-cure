@@ -38,6 +38,7 @@ from .brains import (  # noqa: F401
     _build_claude_tools, _tool_uses_to_actions,
 )
 from .runner import AgentRunner, ActionResult  # noqa: F401
+from .reply_watcher import RemoteClaudeReplyWatcher  # noqa: F401
 from .service import AgentService  # noqa: F401
 
 __all__ = [

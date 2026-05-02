@@ -15,17 +15,23 @@ logger = logging.getLogger("opscure.agent.service")
 
 
 class AgentService:
-    """Owns a list of AgentRunners and starts/stops their async tasks
-    alongside the FastAPI lifespan."""
+    """Owns AgentRunners + an optional RemoteClaudeReplyWatcher and
+    starts/stops their async tasks alongside the FastAPI lifespan."""
 
     def __init__(self) -> None:
         self._runners: list[AgentRunner] = []
         self._tasks: list[asyncio.Task] = []
+        self._reply_watcher = None
 
     def add_runner(self, runner: AgentRunner) -> None:
         self._runners.append(runner)
 
+    def set_reply_watcher(self, watcher) -> None:
+        self._reply_watcher = watcher
+
     async def start(self) -> None:
+        if self._reply_watcher is not None:
+            await self._reply_watcher.start()
         for runner in self._runners:
             task = asyncio.create_task(
                 runner.run_forever(),
@@ -46,6 +52,8 @@ class AgentService:
             with suppress(asyncio.CancelledError):
                 await task
         self._tasks.clear()
+        if self._reply_watcher is not None:
+            await self._reply_watcher.stop()
 
 
 def build_default_agent_service(
@@ -54,6 +62,9 @@ def build_default_agent_service(
     chat_service,
     remote_claude_service=None,
 ) -> AgentService | None:
+    """Returns AgentService with runner + (for pc-claude brain) reply
+    watcher already wired. Caller awaits svc.start() in lifespan.
+    """
     """Reads BRIDGE_AGENT_* env to decide whether to spawn an agent
     in this process. Returns ``None`` when disabled (the common dev
     case).
@@ -97,6 +108,13 @@ def build_default_agent_service(
         permission = os.environ.get(
             "BRIDGE_AGENT_PC_PERMISSION_MODE", "acceptEdits"
         ).strip()
+        from .reply_watcher import RemoteClaudeReplyWatcher
+
+        watcher = RemoteClaudeReplyWatcher(
+            broker=broker,
+            chat_service=chat_service,
+            machine_ids=[machine_id],
+        )
         brain = PCClaudeBrain(
             remote_claude_service=remote_claude_service,
             machine_id=machine_id,
@@ -104,6 +122,7 @@ def build_default_agent_service(
             actor_handle=handle,
             model=model,
             permission_mode=permission,
+            reply_watcher=watcher,
         )
     elif brain_kind == "claude":
         api_key = os.environ.get("BRIDGE_ANTHROPIC_API_KEY", "").strip()
@@ -129,4 +148,10 @@ def build_default_agent_service(
     )
     svc = AgentService()
     svc.add_runner(runner)
+    # If pc-claude path created a watcher, attach it -- AgentService.start()
+    # will spawn its tasks.
+    if brain_kind == "pc-claude":
+        watcher = getattr(brain, "_reply_watcher", None)
+        if watcher is not None:
+            svc.set_reply_watcher(watcher)
     return svc
