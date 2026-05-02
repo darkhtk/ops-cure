@@ -150,7 +150,7 @@ addressed_to: @operator
 payload.lifecycle: {kind: proposal, intent: "PII redaction + tracing..."}
 ```
 
-#### seq=2 · `chat.speech.proposal` · @claude-pca
+#### seq=2 · `chat.speech.propose` · @claude-pca
 ```
 payload.text: "제안: structlog + python-json-logger. 모든 서비스에 contextvars 로 trace_id/span_id/actor 자동 주입. 기존 logging.* 호출은 monkey-patch 로 호환."
 ```
@@ -290,15 +290,11 @@ op-9b21.state = blocked_approval
 > StateMachine: `executing → blocked_approval` 통과.
 > CapabilityService 가 @operator 의 `task.approve.destructive` capability 확인. operator 는 human kind default 에 그게 없음 -- explicit grant 필요.
 
-#### seq=8 · `chat.speech.claim` · @operator
-```
-payload.text: "잠깐 -- approve.destructive 권한 셀프 grant"
-```
+> 운영자 사이드: out-of-band 로 `CapabilityService.grant(@operator,
+> [task.approve.destructive])` 호출 (admin side-channel -- v2 events
+> 로그에 남지 않는다. 거버넌스 변경은 별도 audit 으로). 그 후:
 
-> 사이드 이펙트: `CapabilityService.grant(@operator, [task.approve.destructive])`.
-> v2 actor 에 capability list 갱신, audit log 는 내부 operations 가 아닌 system audit 으로.
-
-#### seq=9 · `chat.task.approval.resolve` · @operator
+#### seq=8 · `chat.task.approval.resolve` · @operator
 ```
 replies_to: ev-7
 payload.text: {decision: approved, by: @operator}
@@ -308,7 +304,7 @@ payload.text: {decision: approved, by: @operator}
 op-9b21.state = executing
 ```
 
-#### seq=10 · `chat.task.evidence` · @claude-pca
+#### seq=9 · `chat.task.evidence` · @claude-pca
 ```
 payload.lifecycle: {evidenceKind: deploy_log, summary: "rollout phase-1: 1 worker"}
 artifact:
@@ -317,18 +313,18 @@ artifact:
     sha256=cd71...
 ```
 
-#### seq=11 · `chat.task.heartbeat` · @claude-pca
+#### seq=10 · `chat.task.heartbeat` · @claude-pca
 ```
 payload.text: "canary worker 90s 관측: regex 호출 평균 0.4ms (pre: timeout). 본격 rollout 진행"
 ```
 
-#### seq=12 · `chat.task.note` · @claude-pca · *whisper to @operator*
+#### seq=11 · `chat.task.note` · @claude-pca · *whisper to @operator*
 ```
 private_to: [@operator]
 payload.text: "(부언: lease 종료 30분 임박. 이후는 30분 단위 모니터링이라 codex 로 handoff 하는 게 효율적. 데이터 fetching 자동화는 codex 가 더 잘 함.)"
 ```
 
-#### seq=13 · `chat.task.handoff` · @claude-pca
+#### seq=12 · `chat.task.handoff` · @claude-pca
 ```
 addressed_to: @codex-pcc
 payload.text: {previous_owner: @claude-pca, new_owner: @codex-pcc, reason: "lease 만료 + 모니터링 단계"}
@@ -337,12 +333,12 @@ payload.text: {previous_owner: @claude-pca, new_owner: @codex-pcc, reason: "leas
 > v2 op participants 에 @codex-pcc 가 role=addressed 로 자동 등록.
 > StateMachine: `executing → claimed` (다른 lease 로 이동) 통과.
 
-#### seq=14 · `chat.task.claim` · @codex-pcc
+#### seq=13 · `chat.task.claim` · @codex-pcc
 ```
 payload.text: {actor: codex-pcc, lease_token: lt-9b21-b, lease_seconds: 3600}
 ```
 
-#### seq=15 · `chat.task.evidence` · @codex-pcc
+#### seq=14 · `chat.task.evidence` · @codex-pcc
 ```
 payload.lifecycle: {evidenceKind: metric_snapshot, summary: "p99 latency 30min window"}
 artifact:
@@ -352,7 +348,7 @@ artifact:
     label="grafana p99 30min @ api-prod-3, ReDoS gone"
 ```
 
-#### seq=16 · `chat.task.evidence` · @codex-pcc
+#### seq=15 · `chat.task.evidence` · @codex-pcc
 ```
 payload.lifecycle: {evidenceKind: log_excerpt, summary: "py-spy 30s post-rollout"}
 artifact:
@@ -361,7 +357,7 @@ artifact:
     sha256=ff03...
 ```
 
-#### seq=17 · `chat.speech.claim` · @codex-pcc
+#### seq=16 · `chat.speech.claim` · @codex-pcc
 ```
 addressed_to: @operator
 payload.text: "success_criteria 2개 모두 달성:
@@ -370,7 +366,7 @@ payload.text: "success_criteria 2개 모두 달성:
 complete 진행하겠음"
 ```
 
-#### seq=18 · `chat.task.complete` · @codex-pcc
+#### seq=17 · `chat.task.complete` · @codex-pcc
 ```
 payload.text: {actor: codex-pcc, lease_token: lt-9b21-b, summary: "ReDoS patched, p99 회복 30min 확인"}
 ```
@@ -382,7 +378,10 @@ op-9b21.closed_by  = @codex-pcc
 ```
 
 > StateMachine: `executing → completed` (task vocab) 통과.
-> 자동 effect: parent op-3a4f 의 metadata 에 children_resolved 카운터 +1 (Scenario 1 inquiry 가 이미 closed 라 시각적 효과만, 향후 G5 hierarchy 에서 의미 갖는다).
+> NOTE: parent_operation_id 컬럼은 존재하나 현재 `POST /v2/operations` 가
+> 그 파라미터를 노출하지 않는다 (G5 후보). 위 trace 처럼 부모-자식 op
+> 연결을 만들려면 직접 V2Repository.insert_operation 호출 필요. 부모로
+> 효과를 propagate (children_resolved 같은 카운터) 하는 것도 G5 영역.
 
 ---
 
@@ -391,13 +390,13 @@ op-9b21.closed_by  = @codex-pcc
 |                                  | Scenario 1 | Scenario 2 | Scenario 3 |
 |----------------------------------|:---:|:---:|:---:|
 | operations_v2 (kind 다양)        | inquiry | proposal | task w/ parent |
-| operation_events_v2 (seq 단조)   | 12 | 9 | 18 |
+| operation_events_v2 (seq 단조)   | 12 | 9 | 17 |
 | participants 자동 등록 (addressed)| ✓ | ✓ | ✓ |
 | whisper (private_to_actor_ids)   | 1 | 2 | 1 |
 | operation_artifacts_v2 첨부      | 2 | 0 | 4 |
 | reply chain (replies_to_event_id)| ✓ | ✓ | ✓ |
 | StateMachine close vocab 검증    | answered | accepted | completed |
-| Capability 동적 grant (G1+F9)    | -- | -- | task.approve.destructive |
+| Capability 동적 grant (G1+F9)    | -- | -- | task.approve.destructive (admin side-channel, 이벤트 로그엔 미기록) |
 | broker fan-out per-actor (G3)    | 3 actors | 3 actors | 4 actors |
 | inbox redaction (v2 reader)      | claude-pcb 1건 | operator 2건 | claude-pcb 1건 |
 | v1 reader redaction (G4)         | 자동 | 자동 | 자동 |

@@ -178,6 +178,43 @@ class OperationMirror:
         )
         return ev.id
 
+    def transition_state(
+        self,
+        db: Session,
+        *,
+        v2_operation_id: str | None,
+        to_state: str,
+    ) -> None:
+        """Mirror a task lifecycle transition (claim/executing/blocked_
+        approval/verifying) onto operations_v2.state.
+
+        Validates the transition via OperationStateMachine.assert_transition
+        so v2 keeps state-graph integrity. ``state=closed`` does NOT go
+        through here -- mirror_conversation_close handles that with
+        resolution semantics.
+        """
+        if not v2_operation_id:
+            return
+        op = self._repo.get_operation(db, v2_operation_id)
+        if op is None:
+            return
+        if op.state == to_state:
+            return  # idempotent no-op
+        # State machine assertion. If the v1 path took us through a
+        # transition the v2 graph doesn't allow, raise loudly so the
+        # bug surfaces -- the rules in state_machine.py SHOULD already
+        # mirror what task_coordinator + remote_task_service permit.
+        self._sm.assert_transition(
+            kind=op.kind,
+            from_state=op.state,
+            to_state=to_state,
+        )
+        self._repo.transition_operation_state(
+            db,
+            operation_id=v2_operation_id,
+            to_state=to_state,
+        )
+
     def attach_artifact(
         self,
         db: Session,

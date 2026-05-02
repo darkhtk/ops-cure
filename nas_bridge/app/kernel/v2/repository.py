@@ -159,6 +159,28 @@ class V2Repository:
         stmt = stmt.order_by(OperationV2Model.created_at.desc()).limit(max(1, min(int(limit), 1000)))
         return list(db.scalars(stmt))
 
+    def transition_operation_state(
+        self,
+        db: Session,
+        *,
+        operation_id: str,
+        to_state: str,
+    ) -> "OperationV2Model | None":
+        """Move an operation to a new non-terminal state. Caller is
+        responsible for validating the transition with
+        OperationStateMachine.assert_transition first; this is the
+        write-only repo half.
+
+        Does not flip ``state=closed`` -- use ``close_operation`` for
+        that since it carries resolution semantics.
+        """
+        row = db.get(OperationV2Model, operation_id)
+        if row is None:
+            return None
+        row.state = to_state
+        db.flush()
+        return row
+
     def close_operation(
         self,
         db: Session,

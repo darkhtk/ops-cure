@@ -132,6 +132,7 @@ class ChatTaskCoordinator:
             },
             new_owner=request.actor_name,
             new_expected_speaker=request.actor_name,
+            new_v2_state="claimed",
         )
         return self._build_response(conversation_id=conversation_id, task=task)
 
@@ -218,6 +219,8 @@ class ChatTaskCoordinator:
         artifact_meta = None
         if isinstance(request.payload.get("artifact"), dict):
             artifact_meta = dict(request.payload["artifact"])
+        # First evidence flips claimed -> executing. Subsequent evidence
+        # is idempotent (transition_state is no-op when already in target).
         self._update_owner_and_emit(
             conversation_id=conversation_id,
             actor_name=request.actor_name,
@@ -229,6 +232,7 @@ class ChatTaskCoordinator:
                 "summary": request.summary,
             },
             artifact=artifact_meta,
+            new_v2_state="executing",
         )
         return self._build_response(conversation_id=conversation_id, task=task)
 
@@ -355,6 +359,7 @@ class ChatTaskCoordinator:
                 "reason": request.reason,
                 "note": request.note,
             },
+            new_v2_state="blocked_approval",
         )
         return self._build_response(conversation_id=conversation_id, task=task)
 
@@ -387,6 +392,7 @@ class ChatTaskCoordinator:
                 "resolution": request.resolution,
                 "note": request.note,
             },
+            new_v2_state="executing" if request.resolution == "approved" else None,
         )
         # On 'denied', auto-close the bound conversation as cancelled.
         if request.resolution == "denied":
@@ -501,6 +507,7 @@ class ChatTaskCoordinator:
         new_expected_speaker: str | None = None,
         new_expected_speaker_to_none: bool = False,
         artifact: dict[str, Any] | None = None,
+        new_v2_state: str | None = None,
     ) -> None:
         envelope: EventEnvelope | None = None
         with session_scope() as db:
@@ -537,6 +544,16 @@ class ChatTaskCoordinator:
                     v2_operation_id=row.v2_operation_id,
                     v2_event_id=event_message.v2_event_id,
                     artifact=artifact,
+                )
+            # G2-followup (#2 fix): wire task lifecycle into operations_v2.state
+            # so /v2/inbox?state=executing & friends actually return what
+            # callers expect. State machine assertion in mirror catches
+            # invalid transitions (programmer error in mapping below).
+            if new_v2_state is not None and row.v2_operation_id is not None:
+                mirror.transition_state(
+                    db,
+                    v2_operation_id=row.v2_operation_id,
+                    to_state=new_v2_state,
                 )
             envelope = make_message_envelope(
                 space_id=row.thread_id,
