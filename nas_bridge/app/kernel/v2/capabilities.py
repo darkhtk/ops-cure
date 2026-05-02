@@ -36,37 +36,21 @@ from sqlalchemy.orm import Session
 from .actor_service import ActorService
 from .repository import V2Repository
 
-CAP_CONVERSATION_OPEN = "conversation.open"
-CAP_CONVERSATION_CLOSE = "conversation.close"
-CAP_CONVERSATION_CLOSE_OPENER = "conversation.close.opener"
-CAP_CONVERSATION_HANDOFF = "conversation.handoff"
-CAP_SPEECH_SUBMIT = "speech.submit"
-CAP_TASK_CLAIM = "task.claim"
-CAP_TASK_COMPLETE = "task.complete"
-CAP_TASK_FAIL = "task.fail"
-CAP_TASK_APPROVE_DESTRUCTIVE = "task.approve.destructive"
+# γ migration: cap names + default sets read from the single contract.
+from . import contract as _contract
 
+CAP_CONVERSATION_OPEN = _contract.CAP_CONVERSATION_OPEN
+CAP_CONVERSATION_CLOSE = _contract.CAP_CONVERSATION_CLOSE
+CAP_CONVERSATION_CLOSE_OPENER = _contract.CAP_CONVERSATION_CLOSE_OPENER
+CAP_CONVERSATION_HANDOFF = _contract.CAP_CONVERSATION_HANDOFF
+CAP_SPEECH_SUBMIT = _contract.CAP_SPEECH_SUBMIT
+CAP_TASK_CLAIM = _contract.CAP_TASK_CLAIM
+CAP_TASK_COMPLETE = _contract.CAP_TASK_COMPLETE
+CAP_TASK_FAIL = _contract.CAP_TASK_FAIL
+CAP_TASK_APPROVE_DESTRUCTIVE = _contract.CAP_TASK_APPROVE_DESTRUCTIVE
 
-ALL_DEFAULT_HUMAN: tuple[str, ...] = (
-    CAP_CONVERSATION_OPEN,
-    CAP_CONVERSATION_CLOSE,
-    CAP_CONVERSATION_CLOSE_OPENER,
-    CAP_CONVERSATION_HANDOFF,
-    CAP_SPEECH_SUBMIT,
-    CAP_TASK_CLAIM,
-    CAP_TASK_COMPLETE,
-    CAP_TASK_FAIL,
-)
-
-ALL_DEFAULT_AI: tuple[str, ...] = (
-    CAP_CONVERSATION_OPEN,
-    CAP_CONVERSATION_CLOSE_OPENER,
-    CAP_CONVERSATION_HANDOFF,
-    CAP_SPEECH_SUBMIT,
-    CAP_TASK_CLAIM,
-    CAP_TASK_COMPLETE,
-    CAP_TASK_FAIL,
-)
+ALL_DEFAULT_HUMAN = _contract.DEFAULT_CAPABILITIES_HUMAN
+ALL_DEFAULT_AI = _contract.DEFAULT_CAPABILITIES_AI
 
 
 def _normalize_handle(value: str) -> str:

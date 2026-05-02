@@ -29,6 +29,7 @@ from .models import (  # noqa: F401
     OperationArtifactV2Model,
 )
 from .repository import V2Repository  # noqa: F401
+from . import contract  # noqa: F401  -- single-source vocab module
 from .actor_service import ActorService, DEFAULT_OPERATOR_HANDLE  # noqa: F401
 from .operation_mirror import OperationMirror  # noqa: F401
 from .state_machine import (  # noqa: F401

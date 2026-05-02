@@ -32,49 +32,27 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-KIND_GENERAL = "general"
-KIND_INQUIRY = "inquiry"
-KIND_PROPOSAL = "proposal"
-KIND_TASK = "task"
+# γ migration: vocab + state graph live in the single contract module.
+# Everything below this line works off the imported names so that
+# adding a kind / state / resolution requires editing exactly one file.
+from . import contract as _contract
 
-STATE_OPEN = "open"
-STATE_CLAIMED = "claimed"
-STATE_EXECUTING = "executing"
-STATE_BLOCKED_APPROVAL = "blocked_approval"
-STATE_VERIFYING = "verifying"
-STATE_CLOSED = "closed"
+# Re-export so existing call sites (`from kernel.v2 import KIND_TASK`)
+# keep working during the migration window.
+KIND_GENERAL = _contract.KIND_GENERAL
+KIND_INQUIRY = _contract.KIND_INQUIRY
+KIND_PROPOSAL = _contract.KIND_PROPOSAL
+KIND_TASK = _contract.KIND_TASK
 
+STATE_OPEN = _contract.STATE_OPEN
+STATE_CLAIMED = _contract.STATE_CLAIMED
+STATE_EXECUTING = _contract.STATE_EXECUTING
+STATE_BLOCKED_APPROVAL = _contract.STATE_BLOCKED_APPROVAL
+STATE_VERIFYING = _contract.STATE_VERIFYING
+STATE_CLOSED = _contract.STATE_CLOSED
 
-# Per-kind allowed resolutions for a CLOSE transition. Mirrors v1's
-# ALLOWED_RESOLUTIONS_BY_KIND (conversation_schemas.py) so v2's state
-# machine doesn't disagree with the authoritative v1 path during the
-# dual-write era. ``abandoned`` is added on top of the v1 vocab for
-# every closeable kind because the system-bypass auto-abandon path
-# (idle sweeper) closes with that resolution regardless of kind.
-ALLOWED_RESOLUTIONS: dict[str, frozenset[str]] = {
-    KIND_INQUIRY: frozenset({"answered", "dropped", "escalated", "abandoned"}),
-    KIND_PROPOSAL: frozenset({"accepted", "rejected", "withdrawn", "superseded", "abandoned"}),
-    KIND_TASK: frozenset({"completed", "failed", "cancelled", "abandoned"}),
-    KIND_GENERAL: frozenset(),  # general doesn't close
-}
-
-
-# Per-kind allowed (from_state, to_state) transitions, NOT including the
-# "close" leg which is governed separately by ALLOWED_RESOLUTIONS.
-ALLOWED_TRANSITIONS: dict[str, dict[str, frozenset[str]]] = {
-    KIND_GENERAL: {STATE_OPEN: frozenset()},
-    KIND_INQUIRY: {STATE_OPEN: frozenset()},
-    KIND_PROPOSAL: {STATE_OPEN: frozenset()},
-    KIND_TASK: {
-        STATE_OPEN: frozenset({STATE_CLAIMED}),
-        STATE_CLAIMED: frozenset({STATE_EXECUTING, STATE_OPEN}),  # release re-opens
-        STATE_EXECUTING: frozenset({
-            STATE_BLOCKED_APPROVAL, STATE_VERIFYING, STATE_CLAIMED,
-        }),
-        STATE_BLOCKED_APPROVAL: frozenset({STATE_EXECUTING, STATE_CLAIMED}),
-        STATE_VERIFYING: frozenset({STATE_EXECUTING}),
-    },
-}
+ALLOWED_RESOLUTIONS = _contract.ALLOWED_RESOLUTIONS
+ALLOWED_TRANSITIONS = _contract.ALLOWED_TRANSITIONS
 
 
 class StateMachineError(ValueError):

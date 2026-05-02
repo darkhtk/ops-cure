@@ -66,22 +66,38 @@ ConversationKind = Literal["inquiry", "proposal", "task", "general"]
 ConversationState = Literal["open", "resolving", "closed"]
 
 
-# Per-kind resolution vocabulary. Closing a conversation with a
-# resolution outside the allowed set for its kind is rejected so the
-# semantic layer cannot drift via free-form strings (the previous v0.1
-# accepted any string).
-ALLOWED_RESOLUTIONS_BY_KIND: dict[str, frozenset[str]] = {
-    "inquiry": frozenset({"answered", "dropped", "escalated"}),
-    "proposal": frozenset({"accepted", "rejected", "withdrawn", "superseded"}),
-    "task": frozenset({"completed", "failed", "cancelled", "abandoned"}),
-}
+# γ migration: vocab is now sourced from kernel.v2.contract. The
+# v1 chat layer and the v2 state machine MUST agree on these sets;
+# importing from the contract is the single mechanism that prevents
+# drift.
+from ...kernel.v2 import contract as _v2_contract
+
+ALLOWED_RESOLUTIONS_BY_KIND: dict[str, frozenset[str]] = _v2_contract.ALLOWED_RESOLUTIONS
 
 
 def is_resolution_allowed(*, kind: str, resolution: str) -> bool:
     allowed = ALLOWED_RESOLUTIONS_BY_KIND.get(kind)
-    if allowed is None:
-        return True  # general or unknown kind: skip enforcement
+    if not allowed:
+        # general (empty set) or unknown kind: skip enforcement
+        return True
     return resolution in allowed
+
+
+# Drift detector: pydantic Literal types can't be built from runtime
+# data, but we can assert the value list matches contract on module
+# load. Adding a new SpeechKind / EvidenceKind requires updating BOTH
+# the Literal here AND the contract; this guard makes the failure
+# loud and immediate.
+def _assert_literal_matches_contract(literal_alias, contract_set, label: str) -> None:
+    from typing import get_args
+    schema_args = set(get_args(literal_alias))
+    if schema_args != set(contract_set):
+        only_schema = schema_args - set(contract_set)
+        only_contract = set(contract_set) - schema_args
+        raise AssertionError(
+            f"{label} drift: only-in-schema={sorted(only_schema)}, "
+            f"only-in-contract={sorted(only_contract)}"
+        )
 
 
 # ----- summaries / responses --------------------------------------------------
@@ -330,6 +346,13 @@ class ChatTaskNoteResponse(BaseModel):
     """Notes are coordination-only; they do not change task state."""
     conversation: ConversationSummary
     note: dict[str, Any]
+
+
+# γ migration -- run at module import. If a future PR adds a value to
+# either the Literal or the contract without updating the other, the
+# bridge fails to start with a clear error pointing at the offender.
+_assert_literal_matches_contract(SpeechKind, _v2_contract.SPEECH_KINDS, "SpeechKind")
+_assert_literal_matches_contract(EvidenceKind, _v2_contract.EVIDENCE_KINDS, "EvidenceKind")
 
 
 # ----- handoff & idle-sweep --------------------------------------------------
