@@ -17,33 +17,15 @@ $sudoPassEsc = if ($sudoPass) { $sudoPass.Replace("'", "'\''") } else { "" }
 
 $remote = @"
 set +e
-export PATH=/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin
-cd /volume1/docker/discord-bridge
-echo '=== inject agent env vars (echo brain, no API key needed) ==='
-if grep -q '^BRIDGE_AGENT_ENABLED' .env; then
-  echo 'agent env already present'
-else
-  cat >> .env <<'EOF'
-
-# Smoke -- echo agent for live behavior verification
-BRIDGE_AGENT_ENABLED=true
-BRIDGE_AGENT_HANDLE=@bridge-agent
-BRIDGE_AGENT_BRAIN=echo
-EOF
-  echo 'agent env appended'
-fi
-echo '--- current .env (BRIDGE_AGENT_*) ---'
-grep '^BRIDGE_AGENT_' .env || echo 'none'
-echo
-echo '=== compose up -d (reloads .env) ==='
-echo '$sudoPassEsc' | sudo -S docker compose up -d 2>&1 | tail -10
-sleep 4
-echo
-echo '=== status ==='
-echo '$sudoPassEsc' | sudo -S docker ps --filter name=nas-bridge --format 'table {{.Names}}\t{{.Status}}'
-echo
-echo '=== logs (full last 40 lines) ==='
-echo '$sudoPassEsc' | sudo -S docker logs nas-bridge --tail 40 2>&1
+export PATH=/usr/local/bin:`$PATH
+echo '=== bridge logs (anything mentioning enqueue / run_start / brain / watcher) ==='
+echo '$sudoPassEsc' | sudo -S docker logs nas-bridge --tail 2000 2>&1 | grep -iE 'enqueue|run_start|brain|watcher|pc-claude|pc_claude|PCClaudeBrain|RemoteClaudeReplyWatcher|forward_event|publish_event' | tail -80
+echo ''
+echo '=== bridge logs (errors / exceptions, last 60) ==='
+echo '$sudoPassEsc' | sudo -S docker logs nas-bridge --tail 2000 2>&1 | grep -iE 'error|exception|traceback' | tail -60
+echo ''
+echo '=== bridge logs (run_start dispatch endpoints) ==='
+echo '$sudoPassEsc' | sudo -S docker logs nas-bridge --tail 2000 2>&1 | grep -iE 'POST /api/remote-claude/(commands|sessions)|POST /api/remote-claude/agent/' | grep -v '/agent/commands/claim ' | grep -v '/agent/sync ' | tail -40
 "@
 
 & ssh -p $config["SSH_PORT"] "$($config["SSH_USER"])@$($config["SSH_HOST"])" $remote 2>&1

@@ -59,23 +59,46 @@ class RemoteClaudeReplyWatcher:
         broker,
         chat_service,
         machine_ids: list[str],
+        remote_claude_state_service=None,
     ) -> None:
         self._broker = broker
         self._chat = chat_service
         self._machine_ids = list(machine_ids)
+        self._state = remote_claude_state_service
         self._stopping = False
         self._machine_tasks: list[asyncio.Task] = []
         self._session_tasks: dict[str, asyncio.Task] = {}
         # Set by PCClaudeBrain at enqueue time. Each entry is a small
-        # dict {operation_id, actor_handle, machine_id}.
+        # dict {operation_id, actor_handle, machine_id}. Insertion-ordered
+        # — we bind the oldest unbound cid to the next-seen session for
+        # that machine (FIFO, matching the bridge's claim ordering).
         self._cmd_to_op: dict[str, dict[str, Any]] = {}
         # Filled in once we observe the command in a machine event with
         # session_id populated. Drained when we post the reply.
         self._session_to_op: dict[str, dict[str, Any]] = {}
+        # Per-machine record of session_ids we have already routed (or
+        # noticed pre-binding). Prevents binding the same session twice
+        # when the executor re-publishes session metadata via _do_sync.
+        self._known_sessions: dict[str, set[str]] = {}
 
     # ---- lifecycle ----------------------------------------------------
 
     async def start(self) -> None:
+        # Seed _known_sessions with sessions that already exist for each
+        # configured machine. Without this seed, the executor's next
+        # _do_sync (which republishes ALL sessions) would let an old
+        # session_id win the FIFO bind for the first new dispatch.
+        if self._state is not None:
+            for machine_id in self._machine_ids:
+                try:
+                    sessions = self._state.list_sessions(machine_id, limit=500)
+                except Exception:  # noqa: BLE001
+                    sessions = []
+                seen = self._known_sessions.setdefault(machine_id, set())
+                for s in sessions:
+                    sid = s.get("sessionId")
+                    if sid:
+                        seen.add(sid)
         for machine_id in self._machine_ids:
             task = asyncio.create_task(
                 self._machine_loop(machine_id),
@@ -83,8 +106,9 @@ class RemoteClaudeReplyWatcher:
             )
             self._machine_tasks.append(task)
         logger.info(
-            "remote_claude reply watcher started for machines=%s",
+            "remote_claude reply watcher started for machines=%s seeded=%s",
             self._machine_ids,
+            {m: len(self._known_sessions.get(m, ())) for m in self._machine_ids},
         )
 
     async def stop(self) -> None:
@@ -140,23 +164,59 @@ class RemoteClaudeReplyWatcher:
             sub.close()
 
     def _handle_machine_event(self, envelope, machine_id: str) -> None:
-        # remote_claude.command.<status> events carry the command + session_id
-        if not envelope.event.kind.startswith("remote_claude.command."):
-            return
+        kind = envelope.event.kind
         try:
             payload = json.loads(envelope.event.content)
         except (ValueError, TypeError):
+            return
+        if kind == "remote_claude.session":
+            self._handle_session_announce(payload, machine_id)
+            return
+        if not kind.startswith("remote_claude.command."):
             return
         command = payload.get("command") or {}
         cid = command.get("commandId")
         session_id = command.get("sessionId")
         if not cid or not session_id:
-            return
+            return  # command not yet linked to a session — wait for the
+            # paired remote_claude.session event handled above
         ctx = self._cmd_to_op.pop(cid, None)
         if ctx is None:
             return  # not one of ours
+        self._bind_session(machine_id, session_id, ctx)
+
+    def _handle_session_announce(self, payload: dict[str, Any], machine_id: str) -> None:
+        """RUN_START completes before claude emits a session_id, so the
+        bridge command row never has it. The executor's next sync publishes
+        a kind=remote_claude.session event for the new session — that's
+        when we bind to the oldest pending dispatch on this machine.
+        """
+        session = payload.get("session") or {}
+        sid = session.get("sessionId")
+        if not sid:
+            return
+        seen = self._known_sessions.setdefault(machine_id, set())
+        if sid in seen:
+            return
+        seen.add(sid)
+        # Find the oldest unbound dispatch for this machine (FIFO claim).
+        for cid, ctx in self._cmd_to_op.items():
+            if ctx.get("machine_id") == machine_id:
+                self._cmd_to_op.pop(cid)
+                logger.info(
+                    "watcher: bound op=%s actor=%s -> machine=%s session=%s",
+                    ctx.get("operation_id"), ctx.get("actor_handle"),
+                    machine_id, sid,
+                )
+                self._bind_session(machine_id, sid, ctx)
+                return
+
+    def _bind_session(
+        self, machine_id: str, session_id: str, ctx: dict[str, Any]
+    ) -> None:
         ctx["session_id"] = session_id
         self._session_to_op[session_id] = ctx
+        self._known_sessions.setdefault(machine_id, set()).add(session_id)
         if session_id not in self._session_tasks:
             self._session_tasks[session_id] = asyncio.create_task(
                 self._session_loop(machine_id, session_id),

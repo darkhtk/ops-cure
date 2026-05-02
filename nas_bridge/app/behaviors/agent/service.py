@@ -114,6 +114,9 @@ def build_default_agent_service(
             broker=broker,
             chat_service=chat_service,
             machine_ids=[machine_id],
+            remote_claude_state_service=getattr(
+                remote_claude_service, "state_service", None
+            ),
         )
         brain = PCClaudeBrain(
             remote_claude_service=remote_claude_service,
