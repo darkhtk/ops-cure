@@ -1452,6 +1452,7 @@ class ChatConversationService:
         conversation_id: str,
         recent: int = 30,
         kinds: list[str] | None = None,
+        viewer_actor: str | None = None,
     ) -> ConversationDetailResponse:
         """Return the conversation summary plus the last ``recent`` events.
 
@@ -1459,7 +1460,17 @@ class ChatConversationService:
         in the list (case-sensitive exact match). Useful for clients
         that want, e.g., only ``chat.task.evidence`` rows or only
         ``chat.speech.*`` without lifecycle noise.
+
+        G4: when ``viewer_actor`` is provided, whisper messages
+        (private_to_actor_ids set on the v2 mirror) are stripped out
+        unless the viewer is in the recipient list or is the speaker.
+        Without ``viewer_actor`` the legacy behavior remains -- all
+        messages returned regardless of v2 privacy. Callers that care
+        about whisper enforcement on the v1 surface MUST pass
+        ``viewer_actor``.
         """
+        from ...kernel.v2 import V2Repository
+        from ...kernel.v2.models import OperationEventV2Model
         with session_scope() as db:
             row = db.get(ChatConversationModel, conversation_id)
             if row is None:
@@ -1474,6 +1485,41 @@ class ChatConversationService:
             stmt = stmt.order_by(ChatMessageModel.created_at.desc()).limit(recent)
             messages = list(db.scalars(stmt))
             messages.reverse()
+
+            if viewer_actor is not None:
+                viewer_handle = (
+                    viewer_actor if viewer_actor.startswith("@") else f"@{viewer_actor}"
+                )
+                repo = V2Repository()
+                viewer_actor_row = repo.get_actor_by_handle(db, viewer_handle)
+                viewer_id = viewer_actor_row.id if viewer_actor_row else None
+                speaker_handles = {viewer_actor.lstrip("@")}
+                filtered: list[ChatMessageModel] = []
+                for msg in messages:
+                    # Speaker always sees their own message (covers cases
+                    # where viewer_actor matches the v1 actor_name even
+                    # before the v2 actor row has been resolved).
+                    if msg.actor_name in speaker_handles:
+                        filtered.append(msg)
+                        continue
+                    if msg.v2_event_id is None:
+                        # Legacy row that pre-dates F4 mirroring -- treat
+                        # as public (no v2 privacy info to enforce).
+                        filtered.append(msg)
+                        continue
+                    ev = db.get(OperationEventV2Model, msg.v2_event_id)
+                    if ev is None:
+                        filtered.append(msg)
+                        continue
+                    private_to = repo.event_private_to(ev)
+                    if private_to is None:
+                        filtered.append(msg)
+                        continue
+                    if viewer_id is not None and viewer_id in private_to:
+                        filtered.append(msg)
+                    # else: redact
+                messages = filtered
+
             return ConversationDetailResponse(
                 conversation=self._summary(row),
                 recent_speech=[

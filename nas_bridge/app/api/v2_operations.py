@@ -327,11 +327,11 @@ def append_event(
     from ..behaviors.chat.conversation_service import (
         ChatConversationNotFoundError, ChatConversationStateError, ChatActorIdentityError,
     )
-    text = str(payload.payload.get("text", "") or payload.payload.get("content", ""))
+    text = str(payload.payload.get("text", ""))
     if not text:
         raise HTTPException(
             status_code=400,
-            detail="payload.text (or payload.content) is required for speech.* events",
+            detail="payload.text is required for speech.* events",
         )
     try:
         speech = services.chat_conversation_service.submit_speech(

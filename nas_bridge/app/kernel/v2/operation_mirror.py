@@ -10,6 +10,7 @@ can locate the mirror without scanning ``metadata_json``.
 """
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
@@ -152,12 +153,25 @@ class OperationMirror:
                     continue
                 row = self._actors.ensure_actor_by_handle(db, handle=handle_norm)
                 private_actor_ids.append(row.id)
+        # G4: unify payload schema -- every event has ``text`` (human-
+        # readable form). For lifecycle events whose v1 content is a
+        # JSON blob, also expose the parsed object under ``lifecycle``
+        # so consumers can read structured fields without re-parsing
+        # ``text``.
+        payload_dict: dict[str, object] = {"text": content}
+        if not event_kind.startswith("chat.speech."):
+            try:
+                parsed = json.loads(content)
+                if isinstance(parsed, dict):
+                    payload_dict["lifecycle"] = parsed
+            except (ValueError, TypeError):
+                pass
         ev = self._repo.insert_event(
             db,
             operation_id=v2_operation_id,
             actor_id=actor.id,
             kind=event_kind,
-            payload={"text": content} if event_kind.startswith("chat.speech.") else {"content": content},
+            payload=payload_dict,
             addressed_to_actor_ids=addressed_actor_ids or None,
             replies_to_event_id=replies_to_v2_event_id,
             private_to_actor_ids=private_actor_ids,

@@ -274,32 +274,55 @@ class V2Repository:
         addressed_to_actor_ids: list[str] | None = None,
         replies_to_event_id: str | None = None,
         private_to_actor_ids: list[str] | None = None,
+        max_retries: int = 3,
     ) -> OperationEventV2Model:
         # Allocate next seq for this operation. SQLite serializes
-        # writes in the default isolation, so MAX(seq)+1 is safe; the
-        # (operation_id, seq) UNIQUE catches any race that slipped
-        # past serialization.
-        max_seq = db.scalar(
-            select(func.coalesce(func.max(OperationEventV2Model.seq), 0))
-            .where(OperationEventV2Model.operation_id == operation_id)
-        ) or 0
-        next_seq = int(max_seq) + 1
+        # writes in the default isolation, so MAX(seq)+1 is safe under
+        # SQLite. Under Postgres / MySQL with concurrent writers two
+        # callers can both compute next_seq=N before either INSERTs;
+        # the (operation_id, seq) UNIQUE then surfaces an IntegrityError
+        # on the loser. G4: catch it, savepoint-rollback, recompute the
+        # next seq, retry up to max_retries times.
+        from sqlalchemy.exc import IntegrityError as _IntegrityError
+        last_error: _IntegrityError | None = None
+        for attempt in range(max_retries):
+            sp = db.begin_nested()
+            try:
+                max_seq = db.scalar(
+                    select(func.coalesce(func.max(OperationEventV2Model.seq), 0))
+                    .where(OperationEventV2Model.operation_id == operation_id)
+                ) or 0
+                next_seq = int(max_seq) + 1
 
-        row = OperationEventV2Model(
-            operation_id=operation_id,
-            actor_id=actor_id,
-            seq=next_seq,
-            kind=kind,
-            payload_json=_dumps(payload or {}),
-            addressed_to_actor_ids_json=_dumps(addressed_to_actor_ids or []),
-            replies_to_event_id=replies_to_event_id,
-            private_to_actor_ids_json=(
-                _dumps(private_to_actor_ids) if private_to_actor_ids else None
-            ),
-        )
-        db.add(row)
-        db.flush()
-        return row
+                row = OperationEventV2Model(
+                    operation_id=operation_id,
+                    actor_id=actor_id,
+                    seq=next_seq,
+                    kind=kind,
+                    payload_json=_dumps(payload or {}),
+                    addressed_to_actor_ids_json=_dumps(addressed_to_actor_ids or []),
+                    replies_to_event_id=replies_to_event_id,
+                    private_to_actor_ids_json=(
+                        _dumps(private_to_actor_ids) if private_to_actor_ids else None
+                    ),
+                )
+                db.add(row)
+                db.flush()
+                sp.commit()
+                return row
+            except _IntegrityError as exc:
+                sp.rollback()
+                last_error = exc
+                # If something other than the seq UNIQUE tripped (e.g.
+                # FK violation), surface it immediately rather than
+                # retrying -- retry won't help.
+                msg = str(exc.orig).lower() if exc.orig is not None else ""
+                if "seq" not in msg and "unique" not in msg:
+                    raise
+                if attempt == max_retries - 1:
+                    raise
+        # Unreachable -- last attempt either returns or raises.
+        raise last_error if last_error else RuntimeError("insert_event retry exhausted")
 
     def list_events(
         self,

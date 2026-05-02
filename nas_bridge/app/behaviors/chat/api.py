@@ -183,6 +183,14 @@ async def get_conversation(
     request: Request,
     recent: int = Query(default=30, ge=1, le=200),
     kinds: list[str] | None = Query(default=None),
+    viewer_actor: str | None = Query(
+        default=None,
+        description=(
+            "Actor handle (with or without leading '@') of the requester. "
+            "When set, v2 whisper events the viewer is not entitled to "
+            "see are stripped. Without it, legacy behavior is preserved."
+        ),
+    ),
 ) -> ConversationDetailResponse:
     services = request.app.state.services
     try:
@@ -190,6 +198,7 @@ async def get_conversation(
             conversation_id=conversation_id,
             recent=recent,
             kinds=kinds,
+            viewer_actor=viewer_actor,
         )
     except ChatConversationNotFoundError:
         raise HTTPException(status_code=404, detail="Conversation not found.")
