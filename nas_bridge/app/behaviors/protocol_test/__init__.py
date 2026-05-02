@@ -56,6 +56,11 @@ from .adversarial import (  # noqa: F401
 )
 from .load import LoadScenarioRunner, LoadObservation  # noqa: F401
 from .race import RaceClaimBrain, EagerReplierBrain, RaceCloseBrain  # noqa: F401
+from .chaos import (  # noqa: F401
+    ChaosExceptionBrain,
+    ChaosMalformedBrain,
+    ChaosOversizedBrain,
+)
 from .driver import (  # noqa: F401
     ScenarioDriver,
     ProtocolObservation,
