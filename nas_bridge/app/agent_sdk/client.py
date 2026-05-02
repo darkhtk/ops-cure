@@ -76,6 +76,19 @@ class BridgeV2Client:
         )
         return int(body.get("unread_total", 0))
 
+    def stream_inbox(self, *, heartbeat_seconds: float = 15.0):
+        """G3: open an SSE stream of v2 events for this actor's inbox.
+
+        Yields parsed event dicts. Heartbeat events are filtered out.
+        Caller is responsible for breaking the loop on shutdown -- the
+        underlying HTTP request stays open until then.
+        """
+        return _SseInboxIterator(
+            client=self,
+            actor_handle=self._actor_handle,
+            heartbeat_seconds=heartbeat_seconds,
+        )
+
     # ---- operation reads ----
 
     def get_operation(self, operation_id: str) -> dict[str, Any]:
@@ -213,6 +226,12 @@ class BridgeV2Client:
         r = self._http.post(path, json=json, params=params)
         return self._unwrap(r)
 
+    def _http_stream_get(self, path: str, *, params: dict[str, Any]):
+        """Open a streaming GET against the underlying transport. Used
+        by SSE consumers; httpx.Client.stream returns a context-manager
+        Response we surface back."""
+        return self._http.stream("GET", path, params=params)
+
     @staticmethod
     def _unwrap(r: httpx.Response) -> dict[str, Any]:
         if r.status_code >= 400:
@@ -224,3 +243,56 @@ class BridgeV2Client:
         if not r.content:
             return {}
         return r.json()
+
+
+class _SseInboxIterator:
+    """Iterator-like wrapper around an SSE GET. Yields parsed v2.event
+    payload dicts from the bridge's /v2/inbox/stream. Heartbeats and
+    open events are skipped. Use with `for ev in client.stream_inbox():`
+    or via `iter(...)`."""
+
+    def __init__(
+        self,
+        *,
+        client: "BridgeV2Client",
+        actor_handle: str,
+        heartbeat_seconds: float,
+    ) -> None:
+        self._client = client
+        self._actor_handle = actor_handle
+        self._heartbeat = heartbeat_seconds
+
+    def __iter__(self):
+        params = {
+            "actor_handle": self._actor_handle,
+            "heartbeat_seconds": self._heartbeat,
+        }
+        with self._client._http_stream_get("/v2/inbox/stream", params=params) as resp:
+            if resp.status_code >= 400:
+                resp.read()
+                try:
+                    detail = resp.json()
+                except ValueError:
+                    detail = resp.text
+                raise BridgeV2Error(resp.status_code, detail)
+            event_kind: str | None = None
+            data_lines: list[str] = []
+            for line in resp.iter_lines():
+                if line == "":
+                    if event_kind == "v2.event" and data_lines:
+                        try:
+                            yield json.loads("".join(data_lines))
+                        except (ValueError, TypeError):
+                            pass
+                    event_kind = None
+                    data_lines = []
+                    continue
+                if line.startswith("event:"):
+                    event_kind = line.split(":", 1)[1].strip()
+                elif line.startswith("data:"):
+                    data_lines.append(line.split(":", 1)[1].lstrip())
+
+
+# json import needed for the iterator. Put it at top normally; placed
+# here to keep the diff focused on the SSE feature.
+import json  # noqa: E402

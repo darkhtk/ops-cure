@@ -180,6 +180,66 @@ def _speech_event_kind(kind: str) -> str:
     return f"chat.speech.{kind}"
 
 
+def _publish_v2_inbox_fanout(
+    broker: Any | None,
+    operation_id: str | None,
+    v2_event_id: str | None,
+) -> None:
+    """G3: fan out a v2 OperationEvent to every participant's inbox
+    stream as an EventEnvelope on space_id ``v2:inbox:<actor_id>``.
+
+    Privacy: when the event has ``private_to_actor_ids`` set, only
+    those actors (plus the speaker) get it. Public events go to all
+    participants.
+
+    Called AFTER session_scope commits so subscribers don't see events
+    that get rolled back. The v2_event_id is captured before session
+    exit and looked up here in a fresh session.
+    """
+    if broker is None or not operation_id or not v2_event_id:
+        return
+    from ...kernel.v2 import V2Repository
+    from ...kernel.v2.models import OperationEventV2Model
+    from ...kernel.events import EventEnvelope, EventSummary, encode_event_cursor
+
+    with session_scope() as db:
+        ev = db.get(OperationEventV2Model, v2_event_id)
+        if ev is None:
+            return
+        repo = V2Repository()
+        participants = repo.list_participants(db, operation_id=operation_id)
+        private_to = repo.event_private_to(ev)
+        # G3: pack operation_id into the envelope content alongside the
+        # event payload so SSE consumers can route to the right op
+        # without an extra GET /v2/operations/{id} round-trip.
+        wrapped = {
+            "operation_id": operation_id,
+            "seq": ev.seq,
+            "payload": repo.event_payload(ev),
+            "addressed_to_actor_ids": repo.event_addressed_to(ev),
+            "private_to_actor_ids": repo.event_private_to(ev),
+            "replies_to_event_id": ev.replies_to_event_id,
+        }
+        content_json = json.dumps(wrapped, ensure_ascii=False)
+        cursor = encode_event_cursor(created_at=ev.created_at, event_id=ev.id)
+        for p in participants:
+            if private_to is not None:
+                if p.actor_id not in private_to and p.actor_id != ev.actor_id:
+                    continue
+            envelope = EventEnvelope(
+                cursor=cursor,
+                space_id=f"v2:inbox:{p.actor_id}",
+                event=EventSummary(
+                    id=ev.id,
+                    kind=ev.kind,
+                    actor_name=ev.actor_id,
+                    content=content_json,
+                    created_at=ev.created_at,
+                ),
+            )
+            broker.publish(space_id=envelope.space_id, item=envelope)
+
+
 def _mirror_v1_message_to_v2(
     db,
     msg: "ChatMessageModel",
@@ -447,9 +507,12 @@ class ChatConversationService:
             _mirror_v1_message_to_v2(db, event_message, row, self._operation_mirror)
             envelope = self._envelope_for(thread_row.id, event_message)
             summary = self._summary(row)
+            v2_op_id = row.v2_operation_id
+            v2_event_id = event_message.v2_event_id
 
         self._metrics.record_conversation_opened()
         self._publish(envelope)
+        _publish_v2_inbox_fanout(self._broker, v2_op_id, v2_event_id)
         return summary
 
     def close_conversation(
@@ -558,9 +621,12 @@ class ChatConversationService:
             _mirror_v1_message_to_v2(db, event_message, row, self._operation_mirror)
             envelope = self._envelope_for(row.thread_id, event_message)
             result = self._summary(row)
+            v2_op_id = row.v2_operation_id
+            v2_event_id = event_message.v2_event_id
 
         self._metrics.record_conversation_closed(resolution=resolution)
         self._publish(envelope)
+        _publish_v2_inbox_fanout(self._broker, v2_op_id, v2_event_id)
         return result
 
     # -------- speech ---------------------------------------------------------
@@ -677,11 +743,18 @@ class ChatConversationService:
 
             envelope = self._envelope_for(row.thread_id, message)
             summary = self._speech_summary(message)
+            v2_op_id = row.v2_operation_id
+            v2_event_id = message.v2_event_id
+            v2_over_event_id = (
+                over_msg.v2_event_id if over_speech_envelope is not None else None
+            )
 
         self._metrics.record_speech(kind=request.kind)
         self._publish(envelope)
+        _publish_v2_inbox_fanout(self._broker, v2_op_id, v2_event_id)
         if over_speech_envelope is not None:
             self._publish(over_speech_envelope)
+            _publish_v2_inbox_fanout(self._broker, v2_op_id, v2_over_event_id)
         return summary
 
     # -------- handoff -------------------------------------------------------
@@ -752,9 +825,12 @@ class ChatConversationService:
             _mirror_v1_message_to_v2(db, event_message, row, self._operation_mirror)
             envelope = self._envelope_for(row.thread_id, event_message)
             result = self._summary(row)
+            v2_op_id = row.v2_operation_id
+            v2_event_id = event_message.v2_event_id
 
         self._metrics.record_handoff()
         self._publish(envelope)
+        _publish_v2_inbox_fanout(self._broker, v2_op_id, v2_event_id)
         return result
 
     # -------- idle sweep ----------------------------------------------------
@@ -785,6 +861,7 @@ class ChatConversationService:
 
         flagged: list[ConversationSummary] = []
         envelopes: list[EventEnvelope] = []
+        v2_idle_pubs: list[tuple[str | None, str | None]] = []
         abandon_ids: list[tuple[str, str, dict[str, object]]] = []
         now = _utcnow()
 
@@ -855,6 +932,7 @@ class ChatConversationService:
                     db.flush()
                     _mirror_v1_message_to_v2(db, event_message, row, self._operation_mirror)
                     envelopes.append(self._envelope_for(row.thread_id, event_message))
+                    v2_idle_pubs.append((row.v2_operation_id, event_message.v2_event_id))
                     if row.idle_warning_emitted_at is None:
                         row.idle_warning_emitted_at = now
                     row.idle_warning_count = next_tier
@@ -876,6 +954,8 @@ class ChatConversationService:
         # stays consistent with the rest of the service.
         for envelope in envelopes:
             self._publish(envelope)
+        for op_id, ev_id in v2_idle_pubs:
+            _publish_v2_inbox_fanout(self._broker, op_id, ev_id)
 
         for conversation_id, last_active_iso, payload in abandon_ids:
             summary = "auto-abandoned: tier-3 idle threshold exceeded"

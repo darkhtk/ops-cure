@@ -9,9 +9,12 @@ operation_participants_v2 + operations_v2.
 """
 from __future__ import annotations
 
+import asyncio
+import json
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import StreamingResponse
 
 from ..auth import BridgeCaller, require_bridge_caller
 from ..db import session_scope
@@ -66,6 +69,84 @@ def get_inbox(
         for op, role in pairs:
             items.append(_serialize_operation(op, role, repo))
     return {"actor_handle": handle, "items": items}
+
+
+@router.get("/inbox/stream")
+async def stream_inbox(
+    request: Request,
+    actor_handle: str = Query(..., description="Actor handle, e.g. '@bob'"),
+    heartbeat_seconds: float = Query(default=15.0, ge=1.0, le=120.0),
+    caller: BridgeCaller = Depends(require_bridge_caller),  # noqa: ARG001
+):
+    """G3: server-sent events stream of every v2 OperationEvent that
+    lands in this actor's inbox. Each event is delivered with privacy
+    redaction already applied (whisper events the actor isn't in are
+    never published to its space).
+
+    Heartbeat events ('event: heartbeat\\ndata: {}\\n\\n') keep the
+    connection alive across idle periods. Clients should ignore them
+    or use them as keepalive timestamps.
+    """
+    handle = actor_handle if actor_handle.startswith("@") else f"@{actor_handle}"
+    repo = V2Repository()
+    with session_scope() as db:
+        actor = repo.get_actor_by_handle(db, handle)
+        if actor is None:
+            raise HTTPException(
+                status_code=404, detail=f"actor {actor_handle!r} not registered yet",
+            )
+        actor_id = actor.id
+
+    services = request.app.state.services
+    broker = services.subscription_broker
+    space_id = f"v2:inbox:{actor_id}"
+    subscription = broker.subscribe(
+        space_id=space_id,
+        subscriber_id=f"sse:{actor_id}",
+    )
+
+    async def gen():
+        try:
+            yield (
+                f"event: open\ndata: {json.dumps({'space_id': space_id, 'actor_id': actor_id})}\n\n"
+            )
+            while True:
+                envelope = await subscription.next_event(
+                    timeout_seconds=heartbeat_seconds,
+                )
+                if envelope is None:
+                    yield "event: heartbeat\ndata: {}\n\n"
+                    continue
+                wrapped = _try_json(envelope.event.content)
+                if not isinstance(wrapped, dict):
+                    wrapped = {"payload": wrapped}
+                payload = {
+                    "operation_id": wrapped.get("operation_id"),
+                    "event_id": envelope.event.id,
+                    "seq": wrapped.get("seq"),
+                    "kind": envelope.event.kind,
+                    "actor_id": envelope.event.actor_name,
+                    "payload": wrapped.get("payload"),
+                    "addressed_to_actor_ids": wrapped.get("addressed_to_actor_ids", []),
+                    "private_to_actor_ids": wrapped.get("private_to_actor_ids"),
+                    "replies_to_event_id": wrapped.get("replies_to_event_id"),
+                    "created_at": envelope.event.created_at.isoformat() if envelope.event.created_at else None,
+                    "cursor": envelope.cursor,
+                }
+                yield f"event: v2.event\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+        except asyncio.CancelledError:
+            raise
+        finally:
+            subscription.close()
+
+    return StreamingResponse(gen(), media_type="text/event-stream")
+
+
+def _try_json(value: str) -> Any:
+    try:
+        return json.loads(value)
+    except (ValueError, TypeError):
+        return value
 
 
 @router.get("/inbox/unread-count")
