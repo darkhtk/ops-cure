@@ -63,6 +63,23 @@ class AgentRunner:
         self._stopping = False
         self._actor_id: str | None = None
         self._subscription = None
+        # H5: lightweight per-runner counters surfaced via .metrics.
+        # Diagnostic endpoint aggregates these across all runners.
+        self._counters: dict[str, int] = {
+            "envelopes_seen": 0,
+            "skipped_self": 0,
+            "skipped_unaddressed": 0,
+            "skipped_redacted": 0,
+            "brain_invocations": 0,
+            "brain_errors": 0,
+            "actions_delivered": 0,
+            "actions_failed": 0,
+        }
+
+    @property
+    def metrics(self) -> dict[str, int]:
+        """Snapshot of in-process counters. Read-only copy."""
+        return dict(self._counters)
 
     # ---- identity bootstrap ---------------------------------------------
 
@@ -115,8 +132,10 @@ class AgentRunner:
 
     def dispatch(self, envelope: EventEnvelope) -> list[ActionResult]:
         actor_id = self._resolve_actor_id()
+        self._counters["envelopes_seen"] += 1
         # Don't react to my own events (loop prevention).
         if envelope.event.actor_name == actor_id:
+            self._counters["skipped_self"] += 1
             return []
 
         try:
@@ -135,6 +154,7 @@ class AgentRunner:
         # every speech in a busy room.
         addressed = list(wrapped.get("addressed_to_actor_ids") or [])
         if addressed and actor_id not in addressed:
+            self._counters["skipped_unaddressed"] += 1
             return []
 
         # Privacy: if the event is private and we're not in the recipient
@@ -142,6 +162,7 @@ class AgentRunner:
         # depth.
         private_to = wrapped.get("private_to_actor_ids")
         if private_to is not None and actor_id not in private_to:
+            self._counters["skipped_redacted"] += 1
             return []
 
         context = self._build_context(operation_id, envelope)
@@ -150,12 +171,22 @@ class AgentRunner:
         # (e.g. WhisperLeakerBrain detects "this came to me as a whisper").
         context["private_to_actor_ids"] = wrapped.get("private_to_actor_ids")
         context["addressed_to_actor_ids"] = wrapped.get("addressed_to_actor_ids") or []
-        actions = self._brain.respond(wrapped.get("payload") or {}, context) or []
+        self._counters["brain_invocations"] += 1
+        try:
+            actions = self._brain.respond(wrapped.get("payload") or {}, context) or []
+        except Exception:  # noqa: BLE001
+            self._counters["brain_errors"] += 1
+            logger.exception("agent brain raised; treated as no-action")
+            return []
         results: list[ActionResult] = []
         for action in actions:
             result = self._execute_action(operation_id, action)
             if result is not None:
                 results.append(result)
+                if result.delivered:
+                    self._counters["actions_delivered"] += 1
+                else:
+                    self._counters["actions_failed"] += 1
         return results
 
     # ---- context + action dispatch --------------------------------------

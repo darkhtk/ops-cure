@@ -21,5 +21,6 @@ The behavior is purely additive: removing it leaves v1+v2 unaffected.
 Tests cover both close-time card and rollup compose.
 """
 from .service import DigestService, ARTIFACT_KIND_SUMMARY  # noqa: F401
+from .scheduler import DigestSchedulerLoop  # noqa: F401
 
-__all__ = ["DigestService", "ARTIFACT_KIND_SUMMARY"]
+__all__ = ["DigestService", "ARTIFACT_KIND_SUMMARY", "DigestSchedulerLoop"]

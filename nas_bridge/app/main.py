@@ -9,7 +9,7 @@ from typing import Any
 
 from fastapi import FastAPI
 
-from .api import actors, behaviors, events, health, kernel_approvals, kernel_scratch, kernel_tasks, presence, remote_tasks, sessions, spaces, v2_inbox, v2_operations, verification, workers
+from .api import actors, behaviors, events, health, kernel_approvals, kernel_scratch, kernel_tasks, presence, remote_tasks, sessions, spaces, v2_diagnostics, v2_inbox, v2_operations, verification, workers
 from .behaviors.catalog import BehaviorCatalogService
 from .behaviors.chat import api as chat_api
 from .behaviors.remote_codex import api as remote_codex_api
@@ -103,6 +103,9 @@ class ServiceContainer:
     # Set by lifespan when BRIDGE_AGENT_ENABLED -- in-process LLM
     # agent runner(s). Default None means "no in-process agent".
     agent_service: Any | None = None
+    # H5: optional periodic digest poster + its task handle
+    digest_scheduler: Any | None = None
+    digest_loop_task: asyncio.Task[None] | None = None
 
 
 def build_services(settings: Settings) -> ServiceContainer:
@@ -322,6 +325,26 @@ async def lifespan(app: FastAPI):
     services.agent_service = agent_service
     if agent_service is not None:
         await agent_service.start()
+    # H5: digest cron loop. opt-in via BRIDGE_DIGEST_INTERVAL_SECONDS;
+    # 0/unset disables. Default off to keep test env quiet; production
+    # sets 86400 (daily).
+    import os as _os
+    digest_interval_raw = _os.environ.get("BRIDGE_DIGEST_INTERVAL_SECONDS", "0")
+    try:
+        digest_interval = int(digest_interval_raw)
+    except ValueError:
+        digest_interval = 0
+    if digest_interval > 0:
+        from .behaviors.digest import DigestSchedulerLoop
+        digest_scheduler = DigestSchedulerLoop(
+            chat_service=services.chat_conversation_service,
+            interval_seconds=digest_interval,
+        )
+        services.digest_scheduler = digest_scheduler
+        services.digest_loop_task = asyncio.create_task(
+            digest_scheduler.run_forever(),
+            name="opscure-digest-loop",
+        )
     try:
         yield
     finally:
@@ -331,6 +354,12 @@ async def lifespan(app: FastAPI):
                 await services.recovery_loop_task
         if getattr(services, "agent_service", None) is not None:
             await services.agent_service.stop()
+        if getattr(services, "digest_scheduler", None) is not None:
+            services.digest_scheduler.stop()
+        if getattr(services, "digest_loop_task", None) is not None:
+            services.digest_loop_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await services.digest_loop_task
         await services.discord_gateway.stop()
 
 
@@ -352,4 +381,5 @@ app.include_router(spaces.router)
 app.include_router(verification.router)
 app.include_router(v2_inbox.router)
 app.include_router(v2_operations.router)
+app.include_router(v2_diagnostics.router)
 app.include_router(workers.router)
