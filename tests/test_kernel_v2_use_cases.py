@@ -415,11 +415,13 @@ def test_S3_task_full_lifecycle_with_approval_gate(tmp_path, monkeypatch):
         assert op.resolution == "completed"
 
     # ---- invariants ----
-    # (1) artifacts 2개 누적
+    # (1) artifacts: 2 evidence 첨부 (log, patch) + close 시 digest 가
+    #     붙인 summary card 1개 = 총 3개. summary 는 close 직후
+    #     자동 부여됨 (behaviors/digest).
     with db.session_scope() as s:
         artifacts = repo.list_artifacts_for_operation(s, operation_id=op_id)
         kinds = sorted(a.kind for a in artifacts)
-        assert kinds == ["log", "patch"]
+        assert kinds == ["log", "patch", "summary"]
 
     # (2) event sequence: opened, claim, evidence, approval.req, approval.resolve,
     #     evidence, complete, closed

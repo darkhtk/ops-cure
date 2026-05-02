@@ -326,6 +326,7 @@ class ChatConversationService:
         actor_authorizer: ActorAuthorizer | None = None,
         policy: "ChatPolicyConfig | None" = None,
         operation_mirror: OperationMirror | None = None,
+        digest_service: Any | None = None,
     ) -> None:
         self._broker = subscription_broker
         self._remote_task_service = remote_task_service
@@ -340,6 +341,14 @@ class ChatConversationService:
         # tables fill up automatically; tests that bootstrap their own
         # DB get the mirror writing into v2 alongside v1.
         self._operation_mirror = operation_mirror or OperationMirror()
+        # Behavior plugin: digest. Default-instantiated so close paths
+        # always attach a summary card unless the caller opts out by
+        # passing False or a no-op. Pass an explicit instance to share
+        # state across services.
+        if digest_service is None:
+            from ..digest import DigestService
+            digest_service = DigestService()
+        self._digest_service = digest_service
 
     def _check_actor(self, actor_name: str, *, caller_context: Any = None) -> None:
         if self._actor_authorizer is None:
@@ -619,6 +628,17 @@ class ChatConversationService:
             db.add(event_message)
             db.flush()
             _mirror_v1_message_to_v2(db, event_message, row, self._operation_mirror)
+            # digest behavior: attach a summary card artifact within the
+            # same close transaction. If the digest service is misconfigured,
+            # we'd rather know loudly than silently drop the snapshot --
+            # mirror_close has already written so a partial state would be
+            # surfaced in failed regression.
+            if self._digest_service is not None and row.v2_operation_id and event_message.v2_event_id:
+                self._digest_service.record_close(
+                    db,
+                    v2_operation_id=row.v2_operation_id,
+                    v2_close_event_id=event_message.v2_event_id,
+                )
             envelope = self._envelope_for(row.thread_id, event_message)
             result = self._summary(row)
             v2_op_id = row.v2_operation_id
