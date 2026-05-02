@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from contextlib import suppress
 import asyncio
+from typing import Any
 
 from fastapi import FastAPI
 
@@ -99,6 +100,9 @@ class ServiceContainer:
     session_service: SessionService
     discord_gateway: DiscordGateway
     recovery_loop_task: asyncio.Task[None] | None = None
+    # Set by lifespan when BRIDGE_AGENT_ENABLED -- in-process LLM
+    # agent runner(s). Default None means "no in-process agent".
+    agent_service: Any | None = None
 
 
 def build_services(settings: Settings) -> ServiceContainer:
@@ -315,6 +319,17 @@ async def lifespan(app: FastAPI):
         name="opscure-recovery-loop",
     )
     await services.discord_gateway.start()
+    # Agent behavior: opt-in via BRIDGE_AGENT_ENABLED. Spawns a runner
+    # subscribed to the in-process broker so events fan out from
+    # dual-write -> mirror -> _publish_v2_inbox_fanout reach the brain.
+    from .behaviors.agent.service import build_default_agent_service
+    agent_service = build_default_agent_service(
+        broker=services.subscription_broker,
+        chat_service=services.chat_conversation_service,
+    )
+    services.agent_service = agent_service
+    if agent_service is not None:
+        await agent_service.start()
     try:
         yield
     finally:
@@ -322,6 +337,8 @@ async def lifespan(app: FastAPI):
         if services.recovery_loop_task is not None:
             with suppress(asyncio.CancelledError):
                 await services.recovery_loop_task
+        if getattr(services, "agent_service", None) is not None:
+            await services.agent_service.stop()
         await services.discord_gateway.stop()
 
 
