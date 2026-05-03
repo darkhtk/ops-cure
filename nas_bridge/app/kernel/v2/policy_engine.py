@@ -99,7 +99,12 @@ class PolicyEngine:
 
         # Reply-kind whitelist enforcement: when the trigger event
         # declared expected_response.kinds, the reply must satisfy it.
-        if replies_to_event_id:
+        # ``defer`` is universally admissible -- it is the "I cannot
+        # answer in the requested form" signal, including the auto-
+        # defer the policy_sweeper emits when by_round_seq elapses.
+        # Without this carve-out, a tight ``kinds=[answer]`` whitelist
+        # would prevent the sweeper from doing its job.
+        if speech_kind != "defer" and replies_to_event_id:
             trigger = db.get(OperationEventV2Model, replies_to_event_id)
             if trigger is not None:
                 ex = self._repo.event_expected_response(trigger)

@@ -72,6 +72,7 @@ from .policy_engine import (  # noqa: F401
     CODE_CLOSE_NEEDS_QUORUM,
     CODE_CLOSE_NEEDS_PARTICIPANT,
 )
+from .policy_sweeper import PolicySweeper  # noqa: F401
 
 __all__ = [
     "ActorV2Model",
@@ -102,4 +103,5 @@ __all__ = [
     "CODE_CLOSE_NEEDS_OPERATOR",
     "CODE_CLOSE_NEEDS_QUORUM",
     "CODE_CLOSE_NEEDS_PARTICIPANT",
+    "PolicySweeper",
 ]

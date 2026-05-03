@@ -4,7 +4,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Iterator
 
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from .config import get_settings
@@ -18,6 +18,26 @@ settings = get_settings()
 connect_args = {"check_same_thread": False} if settings.database_url.startswith("sqlite") else {}
 engine = create_engine(settings.database_url, future=True, connect_args=connect_args)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
+
+
+# SQLite contention mitigation. The default ``journal_mode=DELETE`` allows
+# only one connection at a time; with multiple SSE subscribers + agent
+# claim polling + smoke driver polling we hit ``database is locked``
+# immediately. WAL allows concurrent readers + one writer, ``synchronous
+# NORMAL`` keeps fsync semantics for crash-safety while skipping the
+# extra fsync on every commit, and ``busy_timeout`` lets concurrent
+# writers wait briefly on a lock instead of failing fast.
+if settings.database_url.startswith("sqlite"):
+    @event.listens_for(engine, "connect")
+    def _set_sqlite_pragma(dbapi_connection, connection_record):  # noqa: ANN001
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA synchronous=NORMAL")
+            cursor.execute("PRAGMA busy_timeout=5000")
+            cursor.execute("PRAGMA foreign_keys=ON")
+        finally:
+            cursor.close()
 
 
 @dataclass(frozen=True, slots=True)

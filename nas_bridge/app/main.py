@@ -103,6 +103,9 @@ class ServiceContainer:
     # H5: optional periodic digest poster + its task handle
     digest_scheduler: Any | None = None
     digest_loop_task: asyncio.Task[None] | None = None
+    # v3 phase 2.5: by_round_seq auto-DEFER sweeper
+    policy_sweeper: Any | None = None
+    policy_sweeper_task: asyncio.Task[None] | None = None
 
 
 def build_services(settings: Settings) -> ServiceContainer:
@@ -335,6 +338,26 @@ async def lifespan(app: FastAPI):
             digest_scheduler.run_forever(),
             name="opscure-digest-loop",
         )
+    # v3 phase 2.5: by_round_seq auto-DEFER sweeper. Default 30s
+    # cadence; opt out by setting BRIDGE_POLICY_SWEEPER_SECONDS=0.
+    policy_sweeper_raw = _os.environ.get("BRIDGE_POLICY_SWEEPER_SECONDS", "30")
+    try:
+        policy_sweeper_interval = float(policy_sweeper_raw)
+    except ValueError:
+        policy_sweeper_interval = 30.0
+    if policy_sweeper_interval > 0:
+        from .kernel.v2 import PolicySweeper
+        from .db import session_scope as _session_scope_factory
+        policy_sweeper = PolicySweeper(
+            chat_service=services.chat_conversation_service,
+            session_scope=_session_scope_factory,
+            interval_seconds=policy_sweeper_interval,
+        )
+        services.policy_sweeper = policy_sweeper
+        services.policy_sweeper_task = asyncio.create_task(
+            policy_sweeper.run_forever(),
+            name="opscure-policy-sweeper",
+        )
     try:
         yield
     finally:
@@ -348,6 +371,12 @@ async def lifespan(app: FastAPI):
             services.digest_loop_task.cancel()
             with suppress(asyncio.CancelledError):
                 await services.digest_loop_task
+        if getattr(services, "policy_sweeper", None) is not None:
+            services.policy_sweeper.stop()
+        if getattr(services, "policy_sweeper_task", None) is not None:
+            services.policy_sweeper_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await services.policy_sweeper_task
         await services.discord_gateway.stop()
 
 
