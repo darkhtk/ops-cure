@@ -200,18 +200,73 @@ gaps that prevent multi-turn collaboration from drifting silently.
    agent-level heartbeat (`actor.last_seen_at` already exists in
    the schema; just nothing updates it from the agent side).
 
-## Phase 3 — deprecate the shims (TODO)
+## Phase 3 — deprecate the shims (DONE)
 
-Once phase 2 ships:
+| Change | State |
+|---|---|
+| `CLAUDE_BRIDGE_AGENT_BROADCAST` env retired | ✅ ignored with warning; cascade prevention is now mechanical via `expected_response` |
+| `CLAUDE_BRIDGE_AGENT_MAX_PER_OP` env retired | ✅ ignored with warning; replaced by `policy.max_rounds` |
+| `agent_loop` broadcast/cap fallback removed | ✅ `_enqueue_event` accepts events only when `expected_response.from_actor_handles` lists me, or `addressed_to_actor_ids` lists me. Empty addressing → no auto-reply. |
+| `_responses_per_op` per-op cap removed | ✅ bridge-side `policy.max_rounds` is the single source of truth |
+| `start-personas.ps1` cleaned | ✅ no longer sets retired env |
 
-- Remove `CLAUDE_BRIDGE_AGENT_BROADCAST` env (replaced by `expected_response`)
-- Remove `CLAUDE_BRIDGE_AGENT_MAX_PER_OP` env (replaced by `policy.max_rounds`)
-- Remove `addressed_to_many` thinking — the canonical "who must respond"
-  is `expected_response.from_actor_handles`. `addressed_to_many` stays
-  as a label for UI rendering only.
-- Remove the post-stamp fallback for `replies_to_event_id` in
-  `api/v2_operations.py` — every v3 caller should pass `replies_to_v2_event_id`
-  through the submit path.
+`addressed_to_many` semantics and the `replies_to_event_id` post-stamp
+fallback are kept for now — they're harmless and removing them is a
+behavior change for clients still on v2 mental model.
+
+## Phase 3.x — Identity layer (DONE)
+
+**Closes the C-cluster gap** (rubric: identity 2/10 → 7/10) that was
+the largest single weakness in the v3 evaluation.
+
+### What's new
+
+| Component | Purpose |
+|---|---|
+| `actor_tokens_v2` table | sha256-hashed long-lived bearer per actor; soft-revocable |
+| `app.auth.hash_actor_token` | stable hash function used at issue + verify |
+| `app.auth.verify_actor_handle_claim` | enforces token ↔ handle binding when `X-Actor-Token` header is present; gates on `BRIDGE_REQUIRE_ACTOR_TOKEN` for hard mode |
+| `POST /v2/actors/{handle}/tokens` | mint a token bound to actor; plaintext returned ONCE |
+| `GET /v2/actors/{handle}/tokens` | list tokens (metadata only, no plaintext) |
+| `POST /v2/actors/{handle}/tokens/{id}/revoke` | soft-revoke a token |
+| `agent_loop.actor_token` | optional per-actor bearer the executor sends as `X-Actor-Token` on all mutating + SSE requests |
+
+### Three modes
+
+| Mode | When | Behavior |
+|---|---|---|
+| Legacy | No `X-Actor-Token`, `BRIDGE_REQUIRE_ACTOR_TOKEN` unset | shared bearer + asserted handle, current Discord-internal usage |
+| Mixed | `X-Actor-Token` present, `BRIDGE_REQUIRE_ACTOR_TOKEN` unset | token verified IF supplied; otherwise legacy. Catches squatting on a per-request basis. |
+| Strict | `BRIDGE_REQUIRE_ACTOR_TOKEN=1` | every actor-claiming endpoint demands `X-Actor-Token`; legacy fallback off. **Required before external exposure.** |
+
+### Wire points
+
+- `POST /v2/operations` — opener_actor_handle verified
+- `POST /v2/operations/{id}/events` — actor_handle verified
+- `POST /v2/operations/{id}/close` — actor_handle verified
+- `GET /v2/inbox/stream` — `?actor_handle=` verified (most attractive impersonation surface — anyone could otherwise read another agent's inbox)
+
+### Live verification (post-deploy)
+
+| Probe | Result |
+|---|---|
+| Issue token → 64-char plaintext returned ONCE | ✅ |
+| List tokens → metadata only, no plaintext | ✅ |
+| Open op as bound handle | ✅ HTTP 201 |
+| Token claims wrong handle | ✅ HTTP 403 `"X-Actor-Token is bound to '@A', cannot speak as '@B'"` |
+| Revoked token re-use | ✅ HTTP 401 `"X-Actor-Token is invalid or revoked"` |
+
+### What's still left (not closed by Phase 3.x)
+
+- **Per-actor scopes / capability tokens.** Today the bound token grants
+  the actor's full handle authority. Finer-grained scopes (read-only,
+  speak-only, admin) would map onto the existing `CapabilityService`
+  but aren't wired.
+- **Token rotation UX.** Re-issue + revoke is supported, but no built-in
+  "revoke everything for this handle" / "revoke older than N days" UX.
+- **Audit log of token use.** We log issuance and revocation; we do
+  not log "which token id authenticated this request" on each call.
+  Useful for incident investigation when added later.
 
 ## Mapping back to the 20-problem list
 
@@ -280,8 +335,9 @@ Phase 3 retires the shims after a deprecation window.
 | Phase 1 (additive primitives) | ✅ Done |
 | Phase 2 (policy enforcement) | ✅ Done — max_rounds, kind whitelist, close policy |
 | Phase 2.5 (multi-turn safety net) | ✅ Done — sweeper, JOIN/INVITE, closed-op skip, late-join privacy, discovery, WAL |
-| Phase 3 (legacy cleanup) | ⏸ Pending — BROADCAST env, max_per_op env, addressed_to_many semantics |
-| Out of scope | rolling_summary (needs `@summarizer` agent), agent presence/heartbeat, identity hardening |
+| Phase 3 (legacy cleanup) | ✅ Done — BROADCAST + max_per_op env retired, agent_loop fallback removed |
+| Phase 3.x (identity layer) | ✅ Done — per-actor token table, issue/list/revoke API, `verify_actor_handle_claim`, agent_loop X-Actor-Token wiring; live-verified |
+| Out of scope (this cycle) | rolling_summary (needs `@summarizer` agent), agent presence/heartbeat, capability-scoped tokens |
 
 ### Test counts
 
@@ -296,7 +352,8 @@ Phase 3 retires the shims after a deprecation window.
 | + v3 phase 2.5 join/invite (`test_kernel_v3_join_invite.py`) | +5 | passed |
 | + v3 phase 2.5 late-join privacy (`test_kernel_v3_late_join_privacy.py`) | +2 | passed |
 | + v3 phase 2.5 discovery (`test_kernel_v3_discovery.py`) | +5 | passed |
-| **Aggregate** | **512** | **passed** (1 skipped = live LLM opt-in) |
+| + v3 phase 3.x identity (`test_kernel_v3_actor_tokens.py`) | +5 | passed |
+| **Aggregate** | **517** | **passed** (1 skipped = live LLM opt-in) |
 
 ### Live verification snapshots (5/5 PASS)
 
@@ -316,8 +373,13 @@ passed end-to-end via real claude CLI personas through external
 - **Adversarial robustness at the message-semantics layer is real.**
   7 negative-path tests confirm the gates reject misbehavior, not
   just allow good behavior.
-- **Identity / authentication remains the gaping hole.** Single
-  shared bearer token; any caller can claim any handle. The
-  capability model exists in code but is functionally a no-op
-  because there's no per-actor principal. Production exposure
-  outside a trusted LAN requires Phase 3.x identity work first.
+- **Identity binding now exists** (Phase 3.x). Per-actor tokens are
+  hash-stored, soft-revocable, and verified on every actor-claiming
+  endpoint when supplied. ``BRIDGE_REQUIRE_ACTOR_TOKEN=1`` flips
+  the bridge into strict mode where the legacy "shared bearer +
+  self-asserted handle" path is rejected. Live-verified: issue ✓,
+  bind ✓, impersonation reject 403 ✓, revoke 401 ✓.
+- **Capability scoping remains coarse.** A bound token grants the
+  actor's full handle authority. Finer-grained scope tokens (read,
+  speak, admin) would map onto the existing capability service but
+  aren't wired in this cycle.
