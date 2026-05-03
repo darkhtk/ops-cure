@@ -330,6 +330,36 @@ DEFAULT_OPERATION_POLICY: dict = {
 }
 
 
+def validate_artifacts_list(value: object) -> list[dict] | None:
+    """P9.3 / D11 — normalize the *plural* ``payload.artifacts`` form
+    into a list of validated artifact dicts.
+
+    Returns ``None`` when the field is absent, an empty list when an
+    explicit empty list was provided (caller may treat as no-op),
+    or a list of normalized artifact dicts. Raises ``ValueError``
+    on shape violations of any element.
+
+    Singular ``payload.artifact`` is preserved for back-compat — see
+    :func:`validate_artifact_payload`.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise ValueError("payload.artifacts must be a list")
+    out: list[dict] = []
+    for i, item in enumerate(value):
+        try:
+            normalized = validate_artifact_payload(item)
+        except ValueError as exc:
+            raise ValueError(f"payload.artifacts[{i}]: {exc}") from exc
+        if normalized is None:
+            raise ValueError(
+                f"payload.artifacts[{i}]: not a valid artifact dict"
+            )
+        out.append(normalized)
+    return out
+
+
 def validate_artifact_payload(value: object) -> dict | None:
     """Normalize an artifact descriptor on ``speech.evidence.payload``.
 

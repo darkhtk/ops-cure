@@ -43,6 +43,9 @@ class _StubLoop:
         self._actor_handle = "@operator"
         self._system_prompt = "Test system prompt."
         self._last_post_rejection: dict[str, dict[str, str]] = {}
+        # P9.4 / D14: _build_prompt now also reads this map to surface
+        # claude-run failures into the next prompt.
+        self._last_run_failure: dict[str, dict[str, str]] = {}
         self._history_limit = 0
         self._log_lines: list[str] = []
 
@@ -164,6 +167,7 @@ def test_d2_rejection_clears_after_successful_post():
         _history_limit = 0
         _log_lines: list = []
         _last_post_rejection: dict = {}
+        _last_run_failure: dict = {}  # P9.4 / D14
         # _post_claim's success branch does:
         #   self._last_post_rejection.pop(op_id, None)
         # we can't run the full method without HTTP, but the clear

@@ -312,6 +312,7 @@ class V2FailRequest(BaseModel):
 def open_operation(
     payload: V2OpenOperationRequest,
     request: Request,
+    background_tasks: BackgroundTasks,
     caller: BridgeCaller = Depends(require_bridge_caller),  # noqa: ARG001
     x_actor_token: str | None = Header(default=None),
 ) -> dict[str, Any]:
@@ -381,6 +382,29 @@ def open_operation(
                 detail="open succeeded but v2 mirror missing -- check dual-write",
             )
         op = repo.get_operation(db, v1.v2_operation_id)
+        # P9.5 — forward an op-opened marker to the parent Discord
+        # thread so operators see the lifecycle, not just the
+        # speech inside it. Best-effort.
+        from ..behaviors.chat.models import ChatThreadModel
+        thread_row = db.get(ChatThreadModel, v1.thread_id)
+        discord_thread_id = thread_row.discord_thread_id if thread_row else None
+        if discord_thread_id:
+            policy_summary = repo.operation_policy(op) or {}
+            short = (
+                f"close={policy_summary.get('close_policy','?')}"
+                + (f"/quorum={policy_summary.get('min_ratifiers')}"
+                   if policy_summary.get('close_policy') == 'quorum' else "")
+                + (" /req-artifact" if policy_summary.get('requires_artifact') else "")
+            )
+            forwarded = (
+                f"📣 **op opened** _{op.kind}_ — `{op.title}`\n"
+                f"opener: {payload.opener_actor_handle} · policy: {short}\n"
+                f"id: `{op.id[:8]}…`"
+            )
+            background_tasks.add_task(
+                _post_to_discord_safely,
+                services.thread_manager, discord_thread_id, forwarded,
+            )
         return _serialize_operation(op, repo) | {"id": op.id}
 
 
@@ -428,6 +452,42 @@ def append_event(
             status_code=400,
             detail="payload.text is required for speech.* events",
         )
+    # P9.7 / D3 — warn (best-effort) when expected_response invites
+    # handles that don't resolve to existing actors. Reviewers
+    # have been seen inventing handles like @autoplayer1 / @auditor
+    # which silently waste obligation slots and pollute routing.
+    # Soft-only: log + ignore. Strict mode (reject 400) gated by
+    # ``BRIDGE_REQUIRE_KNOWN_HANDLES=1``.
+    ex = payload.expected_response or {}
+    inv_handles = ex.get("from_actor_handles") or []
+    if inv_handles:
+        from ..kernel.v2 import V2Repository as _V2Repo
+        _vrepo = _V2Repo()
+        unknown: list[str] = []
+        with session_scope() as _db:
+            for h in inv_handles:
+                norm = h if str(h).startswith("@") else f"@{h}"
+                if _vrepo.get_actor_by_handle(_db, norm) is None:
+                    unknown.append(norm)
+        if unknown:
+            import os as _os
+            import logging as _logging
+            strict = _os.environ.get(
+                "BRIDGE_REQUIRE_KNOWN_HANDLES", ""
+            ).strip().lower() in {"1", "true", "yes", "on"}
+            if strict:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"expected_response.from_actor_handles contains "
+                        f"unknown actor(s): {unknown}"
+                    ),
+                )
+            _logging.getLogger(__name__).warning(
+                "expected_response invites unknown actor handles "
+                "%s on op=%s; obligation slot(s) will not match any "
+                "registered actor", unknown, operation_id,
+            )
     try:
         speech = services.chat_conversation_service.submit_speech(
             conversation_id=v1_id,
@@ -476,11 +536,18 @@ def append_event(
         # bridge auto-creates an OperationArtifact row tied to this
         # event so collab-task ops have a formal audit trail of what
         # was produced. Other kinds ignore the field.
+        #
+        # P9.3 / D11 — also accept the *plural* ``payload.artifacts``
+        # list form so a single evidence event can attach multiple
+        # deliverables (exe + log + source code, for example). Both
+        # forms may appear together; the bridge attaches every
+        # normalized artifact in document order.
         if speech_kind == "evidence":
             from ..kernel.v2 import contract as _v2_contract
             from ..kernel.v2 import OperationMirror as _OperationMirror
+            mirror = _OperationMirror()
             try:
-                artifact = _v2_contract.validate_artifact_payload(
+                singular = _v2_contract.validate_artifact_payload(
                     payload.payload.get("artifact")
                 )
             except ValueError as exc:
@@ -488,13 +555,47 @@ def append_event(
                     status_code=400,
                     detail=f"invalid payload.artifact: {exc}",
                 )
-            if artifact is not None:
-                _OperationMirror().attach_artifact(
+            try:
+                plural = _v2_contract.validate_artifacts_list(
+                    payload.payload.get("artifacts")
+                )
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"invalid payload.artifacts: {exc}",
+                )
+            attach_list: list[dict] = []
+            if singular is not None:
+                attach_list.append(singular)
+            if plural:
+                attach_list.extend(plural)
+            for art in attach_list:
+                mirror.attach_artifact(
                     db,
                     v2_operation_id=operation_id,
                     v2_event_id=v2_event_id,
-                    artifact=artifact,
+                    artifact=art,
                 )
+        # P9.1 / D9 — preserve `intent` on speech.ratify so the
+        # quorum gate can distinguish close-intent from spec-ack
+        # ratifies. The v1 mirror path strips arbitrary payload
+        # keys (only `text` flows through), so we patch the v2
+        # event's payload_json directly.
+        if speech_kind == "ratify":
+            intent = payload.payload.get("intent")
+            if isinstance(intent, str) and intent.strip():
+                import json as _json
+                ev_row = db.get(OperationEventV2Model, v2_event_id)
+                if ev_row is not None:
+                    try:
+                        existing = _json.loads(ev_row.payload_json or "{}")
+                    except Exception:  # noqa: BLE001
+                        existing = {}
+                    if not isinstance(existing, dict):
+                        existing = {}
+                    existing["intent"] = intent.strip()
+                    ev_row.payload_json = _json.dumps(existing, ensure_ascii=False)
+                    db.flush()
         op = repo.get_operation(db, operation_id)
         ev = db.get(OperationEventV2Model, v2_event_id)
         # Discord visibility for v3 op events. The v1 chat path posts
@@ -553,6 +654,7 @@ def close_operation(
     operation_id: str,
     payload: V2CloseRequest,
     request: Request,
+    background_tasks: BackgroundTasks,
     caller: BridgeCaller = Depends(require_bridge_caller),  # noqa: ARG001
     x_actor_token: str | None = Header(default=None),
 ) -> dict[str, Any]:
@@ -581,6 +683,30 @@ def close_operation(
     repo = V2Repository()
     with session_scope() as db:
         op = repo.get_operation(db, operation_id)
+        # P9.5 — forward an op-closed marker so operators see the
+        # lifecycle terminate in Discord. Best-effort.
+        from ..behaviors.chat.models import ChatConversationModel, ChatThreadModel
+        v1_conv = db.get(ChatConversationModel, v1_id)
+        discord_thread_id = None
+        if v1_conv is not None:
+            thread_row = db.get(ChatThreadModel, v1_conv.thread_id)
+            if thread_row is not None:
+                discord_thread_id = thread_row.discord_thread_id
+        if discord_thread_id:
+            arts = repo.list_artifacts_for_operation(db, operation_id=op.id)
+            n_events = len(repo.list_events(db, operation_id=op.id, limit=10000))
+            forwarded = (
+                f"✅ **op closed** _{op.kind}_ — `{op.title}`\n"
+                f"resolution: **{op.resolution}** "
+                f"by {payload.actor_handle}\n"
+                f"events: {n_events} · artifacts: {len(arts)}"
+            )
+            if op.resolution_summary:
+                forwarded += f"\n_summary:_ {op.resolution_summary[:300]}"
+            background_tasks.add_task(
+                _post_to_discord_safely,
+                services.thread_manager, discord_thread_id, forwarded,
+            )
         return _serialize_operation(op, repo)
 
 

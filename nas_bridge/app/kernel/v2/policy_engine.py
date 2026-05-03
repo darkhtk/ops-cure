@@ -273,9 +273,33 @@ class PolicyEngine:
     def _ratify_events_by_actor(
         self, db: Session, *, op: OperationV2Model
     ) -> dict[str, OperationEventV2Model]:
-        """Map of actor_id -> their most recent ``chat.speech.ratify``
-        event on this op (None entries dropped). De-duped so the same
-        actor double-ratifying doesn't inflate quorum counts."""
+        """Map of actor_id -> their most recent CLOSE-INTENT
+        ``chat.speech.ratify`` event on this op. De-duped so the same
+        actor double-ratifying doesn't inflate quorum counts.
+
+        D9 (rev 9) — `ratify` is overloaded: agents use it both to
+        agree with a spec proposal AND to vote for closing the op.
+        Quorum should count ONLY the latter, otherwise spec
+        consensus on early proposals trips a premature close
+        attempt that gets blocked by ``requires_artifact`` and
+        burns retry cycles. (Observed in Unity arcade smoke
+        2026-05-04: 3 ratifiers within 64s on a spec proposal,
+        op stalled for an hour because no one then built anything.)
+
+        A ratify event is treated as close-intent when ANY hold:
+
+          - ``payload.intent == "close"`` (explicit, recommended)
+          - ``replies_to_event_id`` points at a ``chat.speech.move_close``
+          - ``replies_to_event_id`` points at an event that has at
+            least one attached ``OperationArtifact`` (i.e., the
+            ratifier is endorsing a deliverable)
+
+        Spec ratifies (no replies_to / replies to a plain propose)
+        are still recorded — they just don't count toward quorum.
+        Reference clients are encouraged to send
+        ``payload.intent="close"`` explicitly; the heuristic above
+        is the back-compat fallback.
+        """
         events = self._repo.list_events(
             db,
             operation_id=op.id,
@@ -284,8 +308,65 @@ class PolicyEngine:
         )
         latest: dict[str, OperationEventV2Model] = {}
         for ev in events:
+            if not self._is_close_intent_ratify(db, ev):
+                continue
             latest[ev.actor_id] = ev
         return latest
+
+    def _is_close_intent_ratify(
+        self, db: Session, ev: OperationEventV2Model,
+    ) -> bool:
+        """D9 helper: classify a ratify event as voting for close.
+
+        Checked in order:
+          1) explicit ``payload.intent == "close"``
+          2) ``replies_to_event_id`` → ``chat.speech.move_close``
+          3) ``replies_to_event_id`` → event has an attached artifact
+          4) op has ANY artifact attached AT OR BEFORE this ratify's
+             seq (back-compat heuristic: a ratify that lands after
+             evidence-with-artifact has been delivered is presumed
+             to be voting on the deliverable, not on a stale spec)
+
+        Otherwise: spec ratify (recorded but not counted).
+        """
+        # 1) explicit close-intent flag
+        try:
+            payload = self._repo.event_payload(ev) or {}
+            if isinstance(payload, dict):
+                intent = payload.get("intent")
+                if isinstance(intent, str) and intent.lower() == "close":
+                    return True
+        except Exception:  # noqa: BLE001
+            pass
+
+        # 2) + 3) trigger-based signals
+        if ev.replies_to_event_id:
+            trigger = db.get(OperationEventV2Model, ev.replies_to_event_id)
+            if trigger is not None:
+                if trigger.kind == "chat.speech.move_close":
+                    return True
+                try:
+                    if self._repo.list_artifacts_for_event(db, event_id=trigger.id):
+                        return True
+                except Exception:  # noqa: BLE001
+                    pass
+
+        # 4) back-compat heuristic: any artifact already attached to
+        #    this op before the ratify event was written
+        try:
+            arts = self._repo.list_artifacts_for_operation(
+                db, operation_id=ev.operation_id,
+            )
+            for a in arts:
+                # If the artifact's source event seq is ≤ the ratify
+                # seq, the ratifier had visibility on the deliverable.
+                src = db.get(OperationEventV2Model, a.event_id)
+                if src is not None and src.seq <= ev.seq:
+                    return True
+        except Exception:  # noqa: BLE001
+            pass
+
+        return False
 
     def _require_role_ratify(
         self, db: Session, *, op: OperationV2Model, role: str,

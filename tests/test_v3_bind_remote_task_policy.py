@@ -152,13 +152,18 @@ def test_v3_collab_task_op_closes_cleanly_under_quorum(tmp_path, monkeypatch):
         )
 
         # Two distinct ratifiers post chat.speech.ratify.
+        # D9 (rev 9): ratifies count toward quorum only when they
+        # carry close-intent. Easiest signal: ``payload.intent='close'``.
         for handle in ("@reviewer", "@operator"):
             r = client.post(
                 f"/v2/operations/{op_id}/events",
                 json={
                     "actor_handle": handle,
                     "kind": "speech.ratify",
-                    "payload": {"text": f"[RATIFY] {handle} approves."},
+                    "payload": {
+                        "text": f"[RATIFY] {handle} approves.",
+                        "intent": "close",
+                    },
                 },
             )
             assert r.status_code == 201, r.text

@@ -67,13 +67,40 @@ def _open(chat, m, discord, *, opener="alice", policy=None, addressed_to=None):
     )
 
 
-def _say(chat, m, conv_id, *, actor="alice", kind="claim", content="hi", **kwargs):
-    return chat.submit_speech(
+def _say(chat, m, conv_id, *, actor="alice", kind="claim", content="hi",
+         close_intent: bool = False, **kwargs):
+    """Submit a speech act. When ``close_intent=True`` and the kind
+    is ratify, the helper additionally stamps ``payload.intent="close"``
+    on the just-written v2 event so D9's quorum gate counts the
+    vote. The chat-service path does not carry arbitrary payload
+    keys (only ``content``→``text``); the patch applied here is
+    the same shape the production code does in
+    ``v2_operations.append_event``."""
+    summary = chat.submit_speech(
         conversation_id=conv_id,
         request=m["SpeechActSubmitRequest"](
             actor_name=actor, kind=kind, content=content, **kwargs,
         ),
     )
+    if close_intent and kind == "ratify":
+        import json as _json
+        from app.behaviors.chat.models import ChatMessageModel
+        from app.kernel.v2.models import OperationEventV2Model
+        with m["db"].session_scope() as _db:
+            v1_msg = _db.get(ChatMessageModel, summary.id)
+            if v1_msg is not None and v1_msg.v2_event_id:
+                v2_ev = _db.get(OperationEventV2Model, v1_msg.v2_event_id)
+                if v2_ev is not None:
+                    try:
+                        existing = _json.loads(v2_ev.payload_json or "{}")
+                    except Exception:
+                        existing = {}
+                    if not isinstance(existing, dict):
+                        existing = {}
+                    existing["intent"] = "close"
+                    v2_ev.payload_json = _json.dumps(existing, ensure_ascii=False)
+                    _db.flush()
+    return summary
 
 
 # ============================================================================
@@ -278,11 +305,14 @@ def test_operator_ratify_blocks_close_until_operator_ratifies(tmp_path, monkeypa
             conversation_id=summary.id, closed_by="alice", resolution="answered",
         )
 
-    # Now operator posts speech.ratify -> close passes.
+    # Now operator posts speech.ratify with close intent -> close passes.
+    # (D9 / rev 9: ratify only counts when the bridge can detect
+    # close-intent; explicit `payload.intent="close"` is the simplest.)
     _say(
         chat, m, summary.id,
         actor="operator", kind="ratify",
         content="I ratify the close.",
+        close_intent=True,
     )
     closed = chat.close_conversation(
         conversation_id=summary.id, closed_by="alice", resolution="answered",
@@ -313,20 +343,25 @@ def test_quorum_close_requires_min_ratifiers(tmp_path, monkeypatch):
         chat.close_conversation(
             conversation_id=summary.id, closed_by="alice", resolution="answered",
         )
-    # 1 ratifier -> still blocked
-    _say(chat, m, summary.id, actor="bob", kind="ratify", content="ok")
+    # 1 ratifier -> still blocked. (D9: close_intent=True so D9's
+    # gate counts the vote; without it, every ratify here would be
+    # treated as a spec-ack and never reach quorum.)
+    _say(chat, m, summary.id, actor="bob", kind="ratify", content="ok",
+         close_intent=True)
     with pytest.raises(m["ChatConversationStateError"], match="quorum"):
         chat.close_conversation(
             conversation_id=summary.id, closed_by="alice", resolution="answered",
         )
     # Same actor double-ratifying does NOT bump the count (de-dup)
-    _say(chat, m, summary.id, actor="bob", kind="ratify", content="still ok")
+    _say(chat, m, summary.id, actor="bob", kind="ratify",
+         content="still ok", close_intent=True)
     with pytest.raises(m["ChatConversationStateError"], match="quorum"):
         chat.close_conversation(
             conversation_id=summary.id, closed_by="alice", resolution="answered",
         )
     # 2 distinct ratifiers -> passes
-    _say(chat, m, summary.id, actor="carol", kind="ratify", content="seconded")
+    _say(chat, m, summary.id, actor="carol", kind="ratify",
+         content="seconded", close_intent=True)
     closed = chat.close_conversation(
         conversation_id=summary.id, closed_by="alice", resolution="answered",
     )

@@ -114,6 +114,13 @@ class BridgeAgentLoop:
         # LLM has no idea its prior speech act was dropped 400.
         # Mapping: op_id → {"detail": str, "rejected_kind": str}.
         self._last_post_rejection: dict[str, dict[str, str]] = {}
+        # P9.4 / D14 — claude run that returned no terminal result
+        # (LLM hung / timed out / crashed). Same surface pattern as
+        # D2 but for the *upstream* failure: agent didn't get to
+        # post anything. Without this, the LLM's next turn doesn't
+        # realize its previous run was dropped.
+        # Mapping: op_id → {"detail": str, "ts": str, "trigger_event_id": str}.
+        self._last_run_failure: dict[str, dict[str, str]] = {}
 
     # ---- lifecycle ----------------------------------------------------
 
@@ -340,8 +347,22 @@ class BridgeAgentLoop:
             return
         result_text = self._run_claude_blocking(prompt)
         if not result_text:
+            # P9.4 / D14 — record the run failure so the next time
+            # this op surfaces an event, the prompt can include a
+            # ⚠️ marker. Without it the LLM has no idea its prior
+            # turn produced no output and is liable to repeat the
+            # same heavy prompt that hung.
+            self._last_run_failure[op_id] = {
+                "detail": "Your previous claude run produced no terminal result "
+                          "(timed out or crashed before emitting a reply). "
+                          "Try a smaller scope this turn or split the work into "
+                          "narrower [EVIDENCE] events.",
+                "trigger_event_id": ev.get("event_id") or "",
+                "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            }
             self._log(
-                f"agent loop: run produced no result for op={op_id} ev={ev.get('event_id')}"
+                f"agent loop: run produced no result for op={op_id} "
+                f"ev={ev.get('event_id')} (recorded for next-turn surface)"
             )
             return
         # v3-additive: link reply to the trigger event so the bridge's
@@ -453,6 +474,23 @@ class BridgeAgentLoop:
                 "[OBJECT] / [DEFER] / [EVIDENCE] (universal carve-outs), "
                 "or rephrase if the bridge cited a payload-shape error."
             )
+        # P9.4 / D14 — surface the prior run-failure (claude hung
+        # / timed out / produced no terminal text). Same pattern as
+        # D2 but for the upstream LLM hang rather than the
+        # downstream bridge rejection.
+        run_fail = self._last_run_failure.get(op_id)
+        if run_fail:
+            lines.append("")
+            lines.append(
+                "⚠️ Your PREVIOUS claude run on this op did not produce "
+                "any output (LLM hang / timeout / crash):"
+            )
+            lines.append(f"  {run_fail.get('detail','')}")
+            lines.append(
+                "Don't repeat the same heavy prompt. Pick a smaller "
+                "deliverable for this turn, or [DEFER→@<someone>] if "
+                "you need help."
+            )
         if history:
             lines.append("")
             lines.append("Recent op transcript (oldest first):")
@@ -481,7 +519,15 @@ class BridgeAgentLoop:
             lines.append("")
         lines.append(
             "Respond in 1-3 sentences. The prefix controls the speech "
-            "kind AND the next-responder contract:\n"
+            "kind AND the next-responder contract.\n"
+            "\n"
+            "🔒 STRICT FORMAT: the `[KIND]` prefix MUST be the very\n"
+            "FIRST non-whitespace characters of your reply. The parser\n"
+            "only reads position 0. Anything before the `[` (even an\n"
+            "intro sentence) makes the parser fall back to plain CLAIM\n"
+            "and your `[EVIDENCE]` / `[PROPOSE]` etc. becomes prose. If\n"
+            "your message has multiple structured prefixes, post them\n"
+            "as separate events.\n"
             "\n"
             "  [KIND] body...                — TERMINAL. No specific\n"
             "                                  next-responder; the reply\n"
@@ -647,6 +693,32 @@ class BridgeAgentLoop:
 
     _ARTIFACT_HEADER_PREFIX = "ARTIFACT:"
 
+    def _maybe_extract_artifacts(
+        self, body: str,
+    ) -> tuple[list[dict[str, Any]], str]:
+        """P9.3 / D11 — consume CONSECUTIVE ``ARTIFACT: ...`` header
+        lines from the start of ``body`` and return the list of
+        normalized artifact dicts plus the remaining body text.
+
+        The single-artifact form (T1.2) is preserved as the special
+        case ``len(out) == 1``. Pre-P9.3 callers received a tuple
+        ``(dict | None, rest)``; the new shape is ``(list, rest)``.
+        Update call sites in ``_post_claim`` accordingly.
+        """
+        artifacts: list[dict[str, Any]] = []
+        rest = body
+        while rest.startswith(self._ARTIFACT_HEADER_PREFIX):
+            art, rest = self._maybe_extract_artifact(rest)
+            if art is None:
+                # The line started with ``ARTIFACT:`` but didn't
+                # parse to a usable dict (missing path, unreadable
+                # file). _maybe_extract_artifact already stripped
+                # the malformed header line and logged a warning;
+                # don't keep looping on whatever rest now starts with.
+                break
+            artifacts.append(art)
+        return artifacts, rest
+
     def _maybe_extract_artifact(
         self, body: str,
     ) -> tuple[dict[str, Any] | None, str]:
@@ -760,16 +832,23 @@ class BridgeAgentLoop:
         # v3 phase 6: prefix carries kind AND optional next-responder
         # contract. See _parse_reply_prefix for the grammar.
         kind, expected_response, cleaned = self._parse_reply_prefix(cleaned)
-        # T1.2: evidence may carry an out-of-band ARTIFACT header on the
-        # first body line. Strip + stat it before posting so the bridge
-        # auto-creates an OperationArtifact row.
-        artifact_payload: dict[str, Any] | None = None
+        # T1.2 + P9.3 / D11: evidence may carry ONE OR MORE
+        # out-of-band ``ARTIFACT: path=...`` headers on consecutive
+        # leading body lines. Strip + stat each before posting so
+        # the bridge auto-creates one OperationArtifact row per
+        # listed file.
+        artifacts: list[dict[str, Any]] = []
         if kind == "evidence":
-            artifact_payload, cleaned = self._maybe_extract_artifact(cleaned)
+            artifacts, cleaned = self._maybe_extract_artifacts(cleaned)
         url = f"{self._bridge_url}/v2/operations/{op_id}/events"
         payload: dict[str, Any] = {"text": cleaned}
-        if artifact_payload is not None:
-            payload["artifact"] = artifact_payload
+        if len(artifacts) == 1:
+            # Preserve the singular ``payload.artifact`` shape on the
+            # wire when there's only one — keeps existing T1.2
+            # consumers happy without forcing them to handle the list.
+            payload["artifact"] = artifacts[0]
+        elif len(artifacts) > 1:
+            payload["artifacts"] = artifacts
         body: dict[str, Any] = {
             "actor_handle": self._actor_handle,
             "kind": f"speech.{kind}",
@@ -814,6 +893,10 @@ class BridgeAgentLoop:
             # next prompt doesn't carry stale "your last reply was
             # rejected" warnings into a fresh conversation turn.
             self._last_post_rejection.pop(op_id, None)
+            # P9.4 / D14 — same idea for the upstream run-failure
+            # marker. A successful post implies the run produced
+            # text this time; the prior hang is no longer relevant.
+            self._last_run_failure.pop(op_id, None)
             return True
         except urllib.error.HTTPError as e:
             try:

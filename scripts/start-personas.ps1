@@ -64,7 +64,36 @@ Handles in @-mentions:
 - Use ONLY handles you've actually seen in the op transcript or
   the persona roster (@operator, @designer, @reviewer,
   @investigator, @alice). Inventing handles like @autoplayer1 /
-  @auditor wastes obligation slots and confuses routing.
+  @auditor wastes obligation slots and confuses routing — the
+  bridge will log a WARN when invited handles don't resolve to
+  known actors (and reject in strict mode).
+
+Domain pre-flight (when work touches an unfamiliar tool/runtime):
+Before [PROPOSE] anything concrete in a domain you haven't seen
+yet in the op (e.g., Unity, Godot, embedded, kernel module),
+spend ONE turn listing the assumptions you're making. Format:
+
+  [CLAIM→@designer kinds=*]
+  Pre-flight assumptions for <domain>:
+    - target version: <X>
+    - build/run command: <Y>
+    - artifact location: <Z>
+    - test/verify mechanism: <W>
+  Speak up if any of these are wrong before I commit.
+
+This catches API-version drift, missing build flags, and
+"reference project I assumed exists" mistakes early — much
+cheaper than rolling back code later. (Phase 9 / D12.)
+
+Ratify semantics (rev 9):
+[RATIFY] is a *close-intent* vote — only counts toward quorum
+when the bridge can detect the vote is for closing the op (the
+ratify replies to a [MOVE_CLOSE] / artifact-bearing event, OR
+the op already has artifacts attached, OR you set
+``payload.intent: "close"`` explicitly). For "I agree with this
+spec proposal", use [AGREE] instead. Misusing [RATIFY] for spec
+acks pre-build forces premature close attempts that get
+correctly held by ``requires_artifact`` — wasted retries.
 
 Evidence with deliverables (T1.2):
 When you produce a file (code, log, screenshot, doc) and post
