@@ -148,10 +148,14 @@ def test_reply_chain_n_deep(tmp_path, monkeypatch):
             c.replies_to_speech_id, d.replies_to_speech_id) == (None, a.id, b.id, c.id)
 
 
-def test_reply_to_nonexistent_id_persists_anyway(tmp_path, monkeypatch):
-    """Cross-conversation references are accepted (the FK ON DELETE
-    SET NULL handles the cleanup case). The receiving service does
-    not validate scope -- the reference is informational."""
+def test_reply_to_nonexistent_id_is_rejected_by_fk(tmp_path, monkeypatch):
+    """Dangling reply references are rejected at write time. v3 phase
+    2.5 turned ``PRAGMA foreign_keys=ON`` (alongside WAL) which
+    promoted this from "silently persisted" to "IntegrityError".
+    The new behavior is the correct one — a reply pointer is a hard
+    reference, not informational."""
+    import pytest
+    from sqlalchemy.exc import IntegrityError
     modules = _bootstrap(tmp_path, monkeypatch)
     schemas = modules["schemas"]
     chat, conv = _build(modules)
@@ -162,16 +166,11 @@ def test_reply_to_nonexistent_id_persists_anyway(tmp_path, monkeypatch):
             kind="inquiry", title="?", opener_actor="alice",
         ),
     )
-    # Reply to an id that doesn't exist. SQLite without enforced
-    # FKs will accept it; the column stores the dangling reference.
-    speech = conv.submit_speech(
-        conversation_id=inquiry.id,
-        request=schemas.SpeechActSubmitRequest(
-            actor_name="alice", kind="claim", content="ref'ing a stale id",
-            replies_to_speech_id="nonexistent-message-id",
-        ),
-    )
-    # We accept this as a soft reference; the persistence layer
-    # records it but the FK isn't enforced under SQLite without
-    # PRAGMA foreign_keys=ON. This documents current behavior.
-    assert speech.replies_to_speech_id == "nonexistent-message-id"
+    with pytest.raises(IntegrityError):
+        conv.submit_speech(
+            conversation_id=inquiry.id,
+            request=schemas.SpeechActSubmitRequest(
+                actor_name="alice", kind="claim", content="ref'ing a stale id",
+                replies_to_speech_id="nonexistent-message-id",
+            ),
+        )
