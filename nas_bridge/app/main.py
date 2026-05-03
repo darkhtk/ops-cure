@@ -9,7 +9,7 @@ from typing import Any
 
 from fastapi import FastAPI
 
-from .api import actors, behaviors, events, health, kernel_approvals, kernel_scratch, kernel_tasks, presence, remote_tasks, sessions, spaces, v2_actor_tokens, v2_diagnostics, v2_inbox, v2_operations, v3_schema, verification, workers
+from .api import actors, behaviors, events, health, kernel_approvals, kernel_scratch, kernel_tasks, presence, remote_tasks, sessions, spaces, v2_actor_tokens, v2_diagnostics, v2_inbox, v2_operations, v2_test_fixtures, v3_schema, verification, workers
 from .behaviors.catalog import BehaviorCatalogService
 from .behaviors.chat import api as chat_api
 from .behaviors.remote_codex import api as remote_codex_api
@@ -411,4 +411,5 @@ app.include_router(v2_inbox.router)
 app.include_router(v2_operations.router)
 app.include_router(v2_diagnostics.router)
 app.include_router(v3_schema.router)
+app.include_router(v2_test_fixtures.router)
 app.include_router(workers.router)

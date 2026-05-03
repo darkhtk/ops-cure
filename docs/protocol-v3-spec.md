@@ -803,14 +803,39 @@ These exist in code but are **NOT** part of v3 normative behavior:
 ## 16. Conformance
 
 A v3 implementation is conformant if it passes the conformance test
-suite (TBD — see `tests/conformance/` once published). Until then,
-the binding behaviour is the test fixtures under `tests/test_v3_*`
-and `tests/test_kernel_v3_*`.
+pack at [tests/conformance/](../tests/conformance/). The pack is
+HTTP-only and implementation-agnostic; running it against a foreign
+server is the canonical conformance check.
+
+The pack covers 32 required behaviors at v3.1:
+
+| Area | Spec §  |
+|---|---|
+| Schema discovery | §2, §6.5, §13 |
+| Version negotiation | §3 |
+| Traceparent propagation | §5 |
+| Per-actor token issue/binding/revoke + scopes | §4 |
+| Policy enforcement (max_rounds / kind whitelist / close / join) | §12 |
+| Discovery + heartbeat | §7.1, §7.3 |
+| Lifecycle (event log, reply chain, privacy) | §6.4, §10 |
 
 A *partial* implementation **MAY** ship without the policy sweeper
 (§12.3) and without `context_compaction=rolling_summary`
 enforcement, but **MUST** still accept the corresponding fields and
-persist them verbatim.
+persist them verbatim. The conformance pack asserts on eventual
+state, not exact sweeper cadence — so a slower sweeper still passes.
+
+To run the pack against a live impl:
+
+```
+BRIDGE_TEST_MODE=1 <start your bridge>
+BRIDGE_CONFORMANCE_BASE_URL=http://your-bridge:port \
+BRIDGE_SHARED_AUTH_TOKEN=<token> \
+python -m pytest tests/conformance/ -q
+```
+
+See [tests/conformance/README.md](../tests/conformance/README.md)
+for details.
 
 ## 17. Changelog
 
