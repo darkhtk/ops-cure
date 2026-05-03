@@ -556,8 +556,12 @@ class BridgeAgentLoop:
             return "claim", None, cleaned
         # Find matching `]` within a bounded prefix window. Prefix may
         # legitimately include `→`, `@handle`, `kinds=...`; cap at 200
-        # chars to avoid pathological inputs.
-        end = cleaned.find("]", 1, 200)
+        # chars (inclusive of `]`) to avoid pathological inputs.
+        # ``str.find(s, 1, 201)`` searches indices 1..200, matching the
+        # TS reference impl which accepts `end <= 200`. Pre-T1.1 the
+        # bound was 200 exclusive, which produced cross-impl drift on
+        # the exact-200 boundary (probe A in parser-probe.test.ts).
+        end = cleaned.find("]", 1, 201)
         if end == -1:
             return "claim", None, cleaned
         inside = cleaned[1:end].strip()

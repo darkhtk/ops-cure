@@ -1,0 +1,425 @@
+[
+  {
+    "label": "T01-no-prefix",
+    "input": "just a claim",
+    "expected": {
+      "kind": "claim",
+      "expected_response": null,
+      "body": "just a claim"
+    }
+  },
+  {
+    "label": "T02-empty-string",
+    "input": "",
+    "expected": {
+      "kind": "claim",
+      "expected_response": null,
+      "body": ""
+    }
+  },
+  {
+    "label": "T03-terminal-claim",
+    "input": "[CLAIM] hello world",
+    "expected": {
+      "kind": "claim",
+      "expected_response": null,
+      "body": "hello world"
+    }
+  },
+  {
+    "label": "T04-terminal-object",
+    "input": "[OBJECT] no",
+    "expected": {
+      "kind": "object",
+      "expected_response": null,
+      "body": "no"
+    }
+  },
+  {
+    "label": "T05-terminal-react",
+    "input": "[REACT] +1",
+    "expected": {
+      "kind": "react",
+      "expected_response": null,
+      "body": "+1"
+    }
+  },
+  {
+    "label": "T06-terminal-ratify",
+    "input": "[RATIFY] ack",
+    "expected": {
+      "kind": "ratify",
+      "expected_response": null,
+      "body": "ack"
+    }
+  },
+  {
+    "label": "T07-unicode-arrow-single",
+    "input": "[QUESTION→@operator] what next?",
+    "expected": {
+      "kind": "question",
+      "expected_response": {
+        "from_actor_handles": [
+          "@operator"
+        ]
+      },
+      "body": "what next?"
+    }
+  },
+  {
+    "label": "T08-unicode-arrow-multi",
+    "input": "[PROPOSE→@reviewer,@alice] do this",
+    "expected": {
+      "kind": "propose",
+      "expected_response": {
+        "from_actor_handles": [
+          "@reviewer",
+          "@alice"
+        ]
+      },
+      "body": "do this"
+    }
+  },
+  {
+    "label": "T09-ascii-arrow-single",
+    "input": "[QUESTION->@operator] what next?",
+    "expected": {
+      "kind": "question",
+      "expected_response": {
+        "from_actor_handles": [
+          "@operator"
+        ]
+      },
+      "body": "what next?"
+    }
+  },
+  {
+    "label": "T10-ascii-arrow-multi",
+    "input": "[INVITE->@a,@b,@c] join us",
+    "expected": {
+      "kind": "invite",
+      "expected_response": {
+        "from_actor_handles": [
+          "@a",
+          "@b",
+          "@c"
+        ]
+      },
+      "body": "join us"
+    }
+  },
+  {
+    "label": "T11-no-arrow-at-only",
+    "input": "[INVITE@bob] hi",
+    "expected": {
+      "kind": "invite",
+      "expected_response": {
+        "from_actor_handles": [
+          "@bob"
+        ]
+      },
+      "body": "hi"
+    }
+  },
+  {
+    "label": "T12-no-arrow-at-only-multi",
+    "input": "[JOIN@a,@b] welcome",
+    "expected": {
+      "kind": "join",
+      "expected_response": {
+        "from_actor_handles": [
+          "@a",
+          "@b"
+        ]
+      },
+      "body": "welcome"
+    }
+  },
+  {
+    "label": "T13-kinds-whitelist",
+    "input": "[PROPOSE→@a kinds=ratify,object] vote please",
+    "expected": {
+      "kind": "propose",
+      "expected_response": {
+        "from_actor_handles": [
+          "@a"
+        ],
+        "kinds": [
+          "ratify",
+          "object"
+        ]
+      },
+      "body": "vote please"
+    }
+  },
+  {
+    "label": "T14-kinds-wildcard",
+    "input": "[QUESTION→@x kinds=*] open ended",
+    "expected": {
+      "kind": "question",
+      "expected_response": {
+        "from_actor_handles": [
+          "@x"
+        ],
+        "kinds": [
+          "*"
+        ]
+      },
+      "body": "open ended"
+    }
+  },
+  {
+    "label": "T15-handles-deduped",
+    "input": "[PROPOSE→@bob,@bob,@alice] x",
+    "expected": {
+      "kind": "propose",
+      "expected_response": {
+        "from_actor_handles": [
+          "@bob",
+          "@alice"
+        ]
+      },
+      "body": "x"
+    }
+  },
+  {
+    "label": "T16-unknown-kind-fallback",
+    "input": "[NOTAKIND] body",
+    "expected": {
+      "kind": "claim",
+      "expected_response": null,
+      "body": "[NOTAKIND] body"
+    }
+  },
+  {
+    "label": "T17-malformed-no-close",
+    "input": "[PROPOSE@a missing close",
+    "expected": {
+      "kind": "claim",
+      "expected_response": null,
+      "body": "[PROPOSE@a missing close"
+    }
+  },
+  {
+    "label": "T18-skip-sentinel",
+    "input": "SKIP",
+    "expected": {
+      "kind": "claim",
+      "expected_response": null,
+      "body": "SKIP"
+    }
+  },
+  {
+    "label": "T19-extra-whitespace-in-prefix",
+    "input": "[PROPOSE→ @a , @b  kinds= ratify, object ] body",
+    "expected": {
+      "kind": "propose",
+      "expected_response": {
+        "from_actor_handles": [
+          "@a",
+          "@b"
+        ],
+        "kinds": [
+          "ratify",
+          "object"
+        ]
+      },
+      "body": "body"
+    }
+  },
+  {
+    "label": "T20-body-mentions-handles-not-invite",
+    "input": "[CLAIM] reaching out to @bob and @alice in body",
+    "expected": {
+      "kind": "claim",
+      "expected_response": null,
+      "body": "reaching out to @bob and @alice in body"
+    }
+  },
+  {
+    "label": "T21-empty-body",
+    "input": "[CLAIM]",
+    "expected": {
+      "kind": "claim",
+      "expected_response": null,
+      "body": ""
+    }
+  },
+  {
+    "label": "T22-empty-body-with-invite",
+    "input": "[INVITE→@a]",
+    "expected": {
+      "kind": "invite",
+      "expected_response": {
+        "from_actor_handles": [
+          "@a"
+        ]
+      },
+      "body": ""
+    }
+  },
+  {
+    "label": "T23-leading-whitespace-trimmed",
+    "input": "   [CLAIM] hi",
+    "expected": {
+      "kind": "claim",
+      "expected_response": null,
+      "body": "hi"
+    }
+  },
+  {
+    "label": "T24-trailing-whitespace-in-body-kept",
+    "input": "[CLAIM] body with trailing  ",
+    "expected": {
+      "kind": "claim",
+      "expected_response": null,
+      "body": "body with trailing"
+    }
+  },
+  {
+    "label": "T25-lowercase-kind",
+    "input": "[claim] lower",
+    "expected": {
+      "kind": "claim",
+      "expected_response": null,
+      "body": "lower"
+    }
+  },
+  {
+    "label": "T26-mixed-case-kind",
+    "input": "[ProPoSe→@a] mixed",
+    "expected": {
+      "kind": "propose",
+      "expected_response": {
+        "from_actor_handles": [
+          "@a"
+        ]
+      },
+      "body": "mixed"
+    }
+  },
+  {
+    "label": "T27-move-close-kind",
+    "input": "[MOVE_CLOSE→@operator] time",
+    "expected": {
+      "kind": "move_close",
+      "expected_response": {
+        "from_actor_handles": [
+          "@operator"
+        ]
+      },
+      "body": "time"
+    }
+  },
+  {
+    "label": "T28-multibyte-body",
+    "input": "[CLAIM] 한국어 body 포함",
+    "expected": {
+      "kind": "claim",
+      "expected_response": null,
+      "body": "한국어 body 포함"
+    }
+  },
+  {
+    "label": "T29-tab-in-prefix",
+    "input": "[PROPOSE→\t@a] tabular",
+    "expected": {
+      "kind": "propose",
+      "expected_response": {
+        "from_actor_handles": [
+          "@a"
+        ]
+      },
+      "body": "tabular"
+    }
+  },
+  {
+    "label": "T30-bare-bracket-empty",
+    "input": "[]",
+    "expected": {
+      "kind": "claim",
+      "expected_response": null,
+      "body": "[]"
+    }
+  },
+  {
+    "label": "T31-handle-with-dash",
+    "input": "[INVITE→@claude-pca] hi",
+    "expected": {
+      "kind": "invite",
+      "expected_response": {
+        "from_actor_handles": [
+          "@claude-pca"
+        ]
+      },
+      "body": "hi"
+    }
+  },
+  {
+    "label": "T32-handle-with-dot",
+    "input": "[INVITE→@bot.alice] hi",
+    "expected": {
+      "kind": "invite",
+      "expected_response": {
+        "from_actor_handles": [
+          "@bot.alice"
+        ]
+      },
+      "body": "hi"
+    }
+  },
+  {
+    "label": "T33-bracket-at-idx-200-accepted",
+    "input": "[CLAIM                                                                                                                                                                                                  ]body",
+    "expected": {
+      "kind": "claim",
+      "expected_response": null,
+      "body": "body"
+    }
+  },
+  {
+    "label": "T34-bracket-at-idx-201-rejected",
+    "input": "[CLAIM                                                                                                                                                                                                   ]body",
+    "expected": {
+      "kind": "claim",
+      "expected_response": null,
+      "body": "[CLAIM                                                                                                                                                                                                   ]body"
+    }
+  },
+  {
+    "label": "T35-nbsp-in-prefix-tail",
+    "input": "[PROPOSE -> @a, @b] body",
+    "expected": {
+      "kind": "propose",
+      "expected_response": {
+        "from_actor_handles": [
+          "@a",
+          "@b"
+        ]
+      },
+      "body": "body"
+    }
+  },
+  {
+    "label": "T36-arrow-with-empty-handles",
+    "input": "[PROPOSE->] body",
+    "expected": {
+      "kind": "propose",
+      "expected_response": null,
+      "body": "body"
+    }
+  },
+  {
+    "label": "T37-kinds-empty-value-after-arrow",
+    "input": "[PROPOSE->@a kinds=] body",
+    "expected": {
+      "kind": "propose",
+      "expected_response": {
+        "from_actor_handles": [
+          "@a"
+        ]
+      },
+      "body": "body"
+    }
+  }
+]

@@ -1,6 +1,6 @@
 # Opscure Bridge Protocol v3 — Normative Specification
 
-**Status**: Normative (rev 4, 2026-05-03). This document is the
+**Status**: Normative (rev 5, 2026-05-03). This document is the
 authoritative description of Opscure Bridge protocol v3.x. Where it
 disagrees with code, the spec is wrong and a clarifying patch is
 welcome — but in the meantime, the **wire test fixtures**
@@ -653,7 +653,13 @@ Reference clients are encouraged to expose a compact reply-prefix
 grammar to their backing model (e.g. `[KIND→@a,@b kinds=ratify]
 body...`) that translates directly to `expected_response` on the
 outgoing event. The grammar is a *client convenience*, not a wire
-form.
+form. The reference Python (`agent_loop.py`) and TypeScript
+(`agent.ts`) parsers cap the prefix at **200 chars (inclusive of
+the closing `]`)**. Inputs whose `]` lands at index ≤ 200 are
+parsed; longer inputs fall back to a TERMINAL `claim` with the
+original text as the body. Both implementations agree at the exact
+boundary — see fixture cases `T33` / `T34` in
+`tests/fixtures/reply_prefix_cases.json`.
 
 ### 8.2 Governance acts
 
@@ -971,6 +977,7 @@ for details.
 | 2 | 2026-05-03 | Patches from interop sprint with TS reference client. Clarified: timestamp precision (§1), per-actor token verbatim (§3.4), traceparent on streaming responses (§5), inbox envelope shape + SSE line-termination + comment-line tolerance (§7.2), heartbeat body shape (§7.3), error response shape (§13). See [protocol-v3-interop-findings.md](./protocol-v3-interop-findings.md). |
 | 3 | 2026-05-03 | Phase 6: §8.1.1 added — INVITING vs TERMINAL reply distinction. Bridges **MUST NOT** synthesize default `expected_response` from speech kind; workflow shape is a speaker-level choice. The protocol stays workflow-agnostic; clients use a compact prefix grammar (`[KIND→@a,@b kinds=…] body`) at their convenience. See `tests/test_v3_next_responder_parser.py` for the grammar. |
 | 4 | 2026-05-03 | T1.1: `policy.bind_remote_task` field added to `OperationPolicy` (§6.1). New §9.1 "Choosing `kind`" makes the collab-task vs executor-task distinction normative. `/v2/operations` defaults `bind_remote_task=false` for `kind=task`; the v1 `/api/chat` path keeps the legacy `true` default. §9.4 documents the task-bound close guard (only fires when `bind_remote_task=true`). Sub-section 9.2/9.3 renumbered. Tests: `tests/test_v3_bind_remote_task_policy.py`. |
+| 5 | 2026-05-03 | Cross-impl parser conformance: 37-case JSON fixture at `tests/fixtures/reply_prefix_cases.json` exercised by Python (`tests/test_v3_parser_cross_impl_fixture.py`) and TypeScript (`clients/ts-agent-loop/src/parser-fixture.test.ts`). Fixed Python parser drift on prefix-length boundary — `]` at exact idx 200 was rejected by Python but accepted by TS. Both impls now agree on **≤ 200 chars (inclusive)**, documented in §8.1.1. |
 
 ## Appendix A — Error code catalog (machine-readable)
 
