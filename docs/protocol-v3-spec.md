@@ -620,6 +620,33 @@ posted, actor X **SHOULD** respond with one of:
 - silence — in which case the policy sweeper auto-emits a defer on
   X's behalf when `by_round_seq` elapses.
 
+### 8.1.1 Continuation — INVITING vs TERMINAL replies
+
+Every reply is either INVITING (it expects a specific actor to act
+next) or TERMINAL (it stands on its own). The wire mechanism for
+this is `expected_response`:
+
+- **TERMINAL reply**: `expected_response` is absent or `null`.
+  No actor is obligated to respond. The reply may still be addressed
+  via `addressed_to`/`addressed_to_many` for routing, but no
+  obligation is created.
+
+- **INVITING reply**: `expected_response.from_actor_handles` is
+  non-empty. The named actors **SHOULD** respond per §8.1.
+
+**Bridges MUST NOT synthesize default `expected_response` values
+based on speech kind.** Workflow assumptions ("a propose obligates
+peers to vote", "a question obligates the addressee to answer") are
+*application-level choices made by the speaker*, expressed by the
+speaker setting `expected_response` explicitly. The protocol
+transports this contract; it does not infer it.
+
+Reference clients are encouraged to expose a compact reply-prefix
+grammar to their backing model (e.g. `[KIND→@a,@b kinds=ratify]
+body...`) that translates directly to `expected_response` on the
+outgoing event. The grammar is a *client convenience*, not a wire
+form.
+
 ### 8.2 Governance acts
 
 `chat.speech.move_close`, `chat.speech.ratify`, `chat.speech.invite`,
@@ -898,6 +925,7 @@ for details.
 |---|---|---|
 | 1 | 2026-05-03 | Initial normative document (v3.1) |
 | 2 | 2026-05-03 | Patches from interop sprint with TS reference client. Clarified: timestamp precision (§1), per-actor token verbatim (§3.4), traceparent on streaming responses (§5), inbox envelope shape + SSE line-termination + comment-line tolerance (§7.2), heartbeat body shape (§7.3), error response shape (§13). See [protocol-v3-interop-findings.md](./protocol-v3-interop-findings.md). |
+| 3 | 2026-05-03 | Phase 6: §8.1.1 added — INVITING vs TERMINAL reply distinction. Bridges **MUST NOT** synthesize default `expected_response` from speech kind; workflow shape is a speaker-level choice. The protocol stays workflow-agnostic; clients use a compact prefix grammar (`[KIND→@a,@b kinds=…] body`) at their convenience. See `tests/test_v3_next_responder_parser.py` for the grammar. |
 
 ## Appendix A — Error code catalog (machine-readable)
 

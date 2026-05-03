@@ -439,10 +439,34 @@ class BridgeAgentLoop:
         lines.append(text)
         lines.append("")
         lines.append(
-            "Respond in 1-3 sentences. You may prefix your reply with one "
-            "of [CLAIM] [QUESTION] [PROPOSE] [AGREE] [OBJECT] [REACT] to "
-            "control the speech kind (default: CLAIM). If you have nothing "
-            "useful to add, reply with exactly: SKIP"
+            "Respond in 1-3 sentences. The prefix controls the speech "
+            "kind AND the next-responder contract:\n"
+            "\n"
+            "  [KIND] body...                — TERMINAL. No specific\n"
+            "                                  next-responder; the reply\n"
+            "                                  stands on its own.\n"
+            "\n"
+            "  [KIND→@a,@b] body...          — INVITING. Names actors\n"
+            "                                  that should respond next.\n"
+            "                                  Use when your reply only\n"
+            "                                  matters if someone acts.\n"
+            "\n"
+            "  [KIND→@a kinds=ratify,object] — INVITING + restrict reply\n"
+            "                                  kinds (optional).\n"
+            "\n"
+            "KIND ∈ [CLAIM] [QUESTION] [PROPOSE] [AGREE] [OBJECT] [REACT]\n"
+            "       [RATIFY] [MOVE_CLOSE] [DEFER] [INVITE] [JOIN]. Default CLAIM.\n"
+            "\n"
+            "Use INVITING when:\n"
+            "  - you propose something (name who should agree/object/ratify)\n"
+            "  - you ask a question (name the addressee)\n"
+            "  - you finish a sub-step (name who picks up next)\n"
+            "Use TERMINAL when:\n"
+            "  - chiming in / observing / acknowledging\n"
+            "  - the conversation is complete\n"
+            "When in doubt, prefer TERMINAL. Silence > false invitation.\n"
+            "\n"
+            "If you have nothing useful to add, reply with exactly: SKIP"
         )
         return "\n".join(lines)
 
@@ -500,7 +524,86 @@ class BridgeAgentLoop:
         "evidence", "block", "defer", "summarize", "react",
         # v3 governance acts.
         "move_close", "ratify",
+        # v3 phase 2.5 membership acts.
+        "invite", "join",
     }
+
+    @classmethod
+    def _parse_reply_prefix(
+        cls, text: str
+    ) -> tuple[str, dict[str, Any] | None, str]:
+        """Parse the agent's reply prefix into ``(kind, expected_response, body)``.
+
+        Recognized forms:
+
+        - ``[KIND] body``                          — TERMINAL, expected_response=None
+        - ``[KIND@a,@b] body``                     — INVITING, from=[@a,@b]
+        - ``[KIND→@a,@b] body``                    — same (unicode arrow)
+        - ``[KIND→@a kinds=foo,bar] body``         — INVITING + kind whitelist
+        - ``[KIND→@a kinds=*] body``               — INVITING + any kind
+
+        If KIND isn't recognized, the prefix is left as part of the body
+        and ``kind="claim"`` is returned (legacy fallback). If no prefix
+        at all, also legacy claim with no expected_response.
+
+        This parser is the *only* protocol-aware step in the reply path:
+        it converts free-form LLM output into a structured speech event
+        + optional reply contract. The protocol itself does not bake
+        any workflow assumptions; the agent's prefix declares them.
+        """
+        cleaned = text.strip()
+        if not cleaned.startswith("["):
+            return "claim", None, cleaned
+        # Find matching `]` within a bounded prefix window. Prefix may
+        # legitimately include `→`, `@handle`, `kinds=...`; cap at 200
+        # chars to avoid pathological inputs.
+        end = cleaned.find("]", 1, 200)
+        if end == -1:
+            return "claim", None, cleaned
+        inside = cleaned[1:end].strip()
+        body = cleaned[end + 1 :].lstrip()
+        # Split into kind + arrow-tail. Both `→` and `->` accepted.
+        # `[KIND@a,@b]` (no arrow) is also tolerated.
+        for sep in ("→", "->", "@"):
+            if sep in inside:
+                kind_raw, _, tail = inside.partition(sep)
+                tail = sep + tail if sep == "@" else tail
+                kind = kind_raw.strip().lower()
+                if kind not in cls._ALLOWED_SPEECH_KINDS:
+                    return "claim", None, cleaned
+                # Parse handles + optional kinds from tail
+                handles, allowed_kinds = cls._parse_invite_tail(tail)
+                if not handles:
+                    return kind, None, body
+                ex: dict[str, Any] = {"from_actor_handles": handles}
+                if allowed_kinds:
+                    ex["kinds"] = allowed_kinds
+                return kind, ex, body
+        # No arrow / @ marker — pure TERMINAL prefix
+        kind = inside.lower()
+        if kind not in cls._ALLOWED_SPEECH_KINDS:
+            return "claim", None, cleaned
+        return kind, None, body
+
+    @staticmethod
+    def _parse_invite_tail(tail: str) -> tuple[list[str], list[str]]:
+        """Pull ``@handle`` tokens + optional ``kinds=foo,bar`` from a
+        bracket-prefix tail. Robust against trailing whitespace and
+        comma variants."""
+        # Detect "kinds=..." segment
+        kinds: list[str] = []
+        if "kinds=" in tail:
+            head, _, kinds_str = tail.partition("kinds=")
+            tail = head
+            kinds = [k.strip() for k in kinds_str.replace(" ", ",").split(",") if k.strip()]
+        # Pull every @handle in remaining tail
+        handles: list[str] = []
+        for token in tail.replace(",", " ").split():
+            t = token.strip().rstrip(",;")
+            if t.startswith("@") and len(t) > 1:
+                if t not in handles:
+                    handles.append(t)
+        return handles, kinds
 
     def _post_claim(
         self,
@@ -516,22 +619,17 @@ class BridgeAgentLoop:
         if cleaned == "SKIP" or cleaned.upper() == "SKIP":
             self._log(f"agent loop: SKIP from {self._actor_handle} on op={op_id}")
             return False
-        # Optional [KIND] prefix lets a persona post non-claim speech
-        # (object / propose / agree / question / etc.) without each
-        # persona needing its own dispatcher. Format: "[OBJECT] body..."
-        kind = "claim"
-        if cleaned.startswith("[") and "]" in cleaned[:20]:
-            tag_end = cleaned.index("]")
-            tag = cleaned[1:tag_end].strip().lower()
-            if tag in self._ALLOWED_SPEECH_KINDS:
-                kind = tag
-                cleaned = cleaned[tag_end + 1 :].lstrip()
+        # v3 phase 6: prefix carries kind AND optional next-responder
+        # contract. See _parse_reply_prefix for the grammar.
+        kind, expected_response, cleaned = self._parse_reply_prefix(cleaned)
         url = f"{self._bridge_url}/v2/operations/{op_id}/events"
         body: dict[str, Any] = {
             "actor_handle": self._actor_handle,
             "kind": f"speech.{kind}",
             "payload": {"text": cleaned},
         }
+        if expected_response is not None:
+            body["expected_response"] = expected_response
         if in_reply_to:
             # The /v2/operations/{id}/events endpoint accepts
             # ``replies_to_event_id`` -- v3-additive: this is now always
@@ -556,8 +654,14 @@ class BridgeAgentLoop:
         try:
             with urllib.request.urlopen(req, timeout=30.0) as resp:
                 resp.read()
+            invite_summary = ""
+            if expected_response and expected_response.get("from_actor_handles"):
+                invite_summary = (
+                    f" inviting={expected_response['from_actor_handles']}"
+                )
             self._log(
-                f"agent loop: posted speech.{kind} to op={op_id} len={len(cleaned)}"
+                f"agent loop: posted speech.{kind} to op={op_id} "
+                f"len={len(cleaned)}{invite_summary}"
             )
             return True
         except urllib.error.HTTPError as e:
