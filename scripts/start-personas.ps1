@@ -44,7 +44,10 @@ foreach ($p in $personas) {
     $env:CLAUDE_BRIDGE_MACHINE_ID             = $p.Mid
     $env:CLAUDE_BRIDGE_DISPLAY_NAME           = $p.Mid
     $env:CLAUDE_BRIDGE_WORKER_ID              = "$($p.Mid)-1"
-    $env:CLAUDE_BRIDGE_POLL_SECONDS           = "1.0"
+    # Legacy /agent/commands/claim polling is unused for persona work
+    # but the runner still drives it. 10s keeps SQLite quiet without
+    # affecting the SSE-based agent_loop path.
+    $env:CLAUDE_BRIDGE_POLL_SECONDS           = "10.0"
     $env:CLAUDE_BRIDGE_ACTOR_HANDLE           = $p.Handle
     $env:CLAUDE_BRIDGE_AGENT_CWD              = $AgentCwd
     $env:CLAUDE_BRIDGE_AGENT_PERMISSION       = "acceptEdits"
