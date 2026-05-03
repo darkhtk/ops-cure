@@ -2,7 +2,7 @@
 param(
     [string]$BridgeUrl = "http://172.30.1.12:18080",
     [string]$Token     = "kmagD8TckFIFoqr7gpgMjtIWKCOqat_GmvnyraA4IEUo3nhKDMbeKKtq9VaHNgJ9",
-    [string]$AgentCwd  = "C:\Users\darkh\Projects\ops-cure-scratch\UnityArcade",
+    [string]$AgentCwd  = "C:\Users\darkh\Projects\ops-cure-scratch\GodotVolleyball",
     # v3 phase 4: when true, mint a per-actor token (scope=speak) for
     # each persona and pass it via X-Actor-Token. Required when the
     # bridge runs with BRIDGE_REQUIRE_ACTOR_TOKEN=1.
