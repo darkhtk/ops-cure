@@ -112,3 +112,90 @@ def require_bridge_permissions(*required_permissions: str) -> Callable[..., Brid
         )
 
     return dependency
+
+
+# ---- v3 phase 3.x — per-actor token authentication --------------------
+
+import hashlib as _hashlib
+import os as _os
+
+
+def hash_actor_token(plaintext: str) -> str:
+    """Stable token-hash function used by both issue and verify paths.
+
+    SHA-256 hex. Stored verbatim in ``actor_tokens_v2.token_hash``. The
+    plaintext token never reaches the DB or logs.
+    """
+    return _hashlib.sha256(plaintext.encode("utf-8")).hexdigest()
+
+
+def _resolve_actor_token_handle(token: str | None) -> str | None:
+    """If ``token`` resolves to a non-revoked ``actor_tokens_v2`` row,
+    return the bound actor's handle. Otherwise None.
+
+    Imported lazily so the ``app.auth`` module stays cheap to import
+    in environments that don't use v2 at all.
+    """
+    if not token:
+        return None
+    from .db import session_scope
+    from .kernel.v2 import V2Repository
+    from .kernel.v2.models import ActorV2Model
+    repo = V2Repository()
+    with session_scope() as db:
+        bound = repo.get_actor_token_by_hash(db, token_hash=hash_actor_token(token))
+        if bound is None:
+            return None
+        actor = db.get(ActorV2Model, bound.actor_id)
+        return actor.handle if actor else None
+
+
+def verify_actor_handle_claim(
+    request: Request,
+    *,
+    claimed_handle: str,
+    x_actor_token: str | None,
+) -> None:
+    """Reject a request whose claimed actor handle disagrees with the
+    handle bound to ``X-Actor-Token``.
+
+    Three modes (from least to most strict):
+
+    1. **No X-Actor-Token at all.** When ``BRIDGE_REQUIRE_ACTOR_TOKEN``
+       is unset / falsy: legacy mode, we accept the claimed handle
+       (bridge auth is the shared bearer the dependency already
+       checked). This is the deployment story today.
+    2. **No X-Actor-Token but BRIDGE_REQUIRE_ACTOR_TOKEN=1**: rejected.
+       Hard mode for production exposure.
+    3. **X-Actor-Token present**: we always verify. If the token
+       resolves to handle X but the request claims Y, reject with 403.
+       This catches the squatting case even in legacy mode.
+    """
+    require = _os.environ.get("BRIDGE_REQUIRE_ACTOR_TOKEN", "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+    if not x_actor_token:
+        if require:
+            _raise_auth_error(
+                request=request,
+                detail="X-Actor-Token header required (BRIDGE_REQUIRE_ACTOR_TOKEN=1)",
+                status_code=status.HTTP_401_UNAUTHORIZED,
+            )
+        return  # legacy path: trust the shared bearer
+    bound_handle = _resolve_actor_token_handle(x_actor_token)
+    if bound_handle is None:
+        _raise_auth_error(
+            request=request,
+            detail="X-Actor-Token is invalid or revoked",
+            status_code=status.HTTP_401_UNAUTHORIZED,
+        )
+    claimed_norm = claimed_handle if claimed_handle.startswith("@") else f"@{claimed_handle}"
+    if bound_handle != claimed_norm:
+        _raise_auth_error(
+            request=request,
+            detail=(
+                f"X-Actor-Token is bound to {bound_handle!r}, "
+                f"cannot speak as {claimed_norm!r}"
+            ),
+            status_code=status.HTTP_403_FORBIDDEN,
+        )

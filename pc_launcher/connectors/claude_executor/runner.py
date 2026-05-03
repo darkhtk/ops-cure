@@ -22,16 +22,20 @@ External-agent mode (kernel + external agent architecture):
   CLAUDE_BRIDGE_AGENT_CWD           cwd for agent-mode claude runs.
   CLAUDE_BRIDGE_AGENT_MODEL         override model (e.g. claude-opus-4-7)
   CLAUDE_BRIDGE_AGENT_PERMISSION    permission mode (default: acceptEdits)
-  CLAUDE_BRIDGE_AGENT_BROADCAST     "1"/"true" -> also respond to events
-                                    with no specific addressed_to (room-
-                                    wide speech). Default off.
   CLAUDE_BRIDGE_AGENT_HISTORY_LIMIT int; pre-fetch last N op events into
                                     the prompt for context. 0 = off.
-  CLAUDE_BRIDGE_AGENT_MAX_PER_OP    int; cap replies per op (loop guard
-                                    when broadcast is on). Default 5.
   CLAUDE_BRIDGE_AGENT_SYSTEM_PROMPT persona-specific system text prepended
                                     to every prompt — lets one binary host
                                     different personas via env.
+
+Retired (phase 3 cleanup):
+  CLAUDE_BRIDGE_AGENT_BROADCAST     superseded by ``expected_response``
+                                    on the speech event. Cascade prevention
+                                    is now mechanical at the contract
+                                    level, not a client-side flag.
+  CLAUDE_BRIDGE_AGENT_MAX_PER_OP    superseded by ``policy.max_rounds``
+                                    on the op. Cap is enforced server-
+                                    side by PolicyEngine.
 """
 
 from __future__ import annotations
@@ -90,19 +94,22 @@ def main(argv: list[str] | None = None) -> int:
         agent_permission = (
             os.getenv("CLAUDE_BRIDGE_AGENT_PERMISSION", "").strip() or "acceptEdits"
         )
-        broadcast = (
-            os.getenv("CLAUDE_BRIDGE_AGENT_BROADCAST", "").strip().lower()
-            in {"1", "true", "yes", "on"}
-        )
         try:
             history_limit = int(os.getenv("CLAUDE_BRIDGE_AGENT_HISTORY_LIMIT", "0"))
         except ValueError:
             history_limit = 0
-        try:
-            max_per_op = int(os.getenv("CLAUDE_BRIDGE_AGENT_MAX_PER_OP", "5"))
-        except ValueError:
-            max_per_op = 5
+        # Warn on retired env vars so operators notice when their old
+        # config does nothing. Phase 3 cleanup removed BROADCAST and
+        # MAX_PER_OP — see runner.py docstring for the v3 replacements.
+        for retired in ("CLAUDE_BRIDGE_AGENT_BROADCAST", "CLAUDE_BRIDGE_AGENT_MAX_PER_OP"):
+            if os.getenv(retired):
+                print(
+                    f"[claude-executor] ignoring retired env {retired}; "
+                    f"see runner.py docstring for the v3 replacement",
+                    file=sys.stderr,
+                )
         system_prompt = os.getenv("CLAUDE_BRIDGE_AGENT_SYSTEM_PROMPT", "").strip() or None
+        actor_token = os.getenv("CLAUDE_BRIDGE_AGENT_ACTOR_TOKEN", "").strip() or None
         agent_loop = BridgeAgentLoop(
             bridge_url=args.bridge_url,
             token=args.token,
@@ -110,10 +117,9 @@ def main(argv: list[str] | None = None) -> int:
             cwd=agent_cwd,
             model=agent_model,
             permission_mode=agent_permission,
-            broadcast=broadcast,
             history_limit=history_limit,
-            max_responses_per_op=max_per_op,
             system_prompt=system_prompt,
+            actor_token=actor_token,
         )
         agent_loop.start()
 

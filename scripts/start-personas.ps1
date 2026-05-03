@@ -51,9 +51,12 @@ foreach ($p in $personas) {
     $env:CLAUDE_BRIDGE_ACTOR_HANDLE           = $p.Handle
     $env:CLAUDE_BRIDGE_AGENT_CWD              = $AgentCwd
     $env:CLAUDE_BRIDGE_AGENT_PERMISSION       = "acceptEdits"
-    $env:CLAUDE_BRIDGE_AGENT_BROADCAST        = "true"
+    # Phase 3 cleanup: BROADCAST + MAX_PER_OP retired. Cascade prevention
+    # is now mechanical via expected_response; per-op cap lives on the
+    # bridge as policy.max_rounds. Drivers that want broadcast-style
+    # collab should set expected_response.from_actor_handles to the
+    # full persona list at op-open / question time.
     $env:CLAUDE_BRIDGE_AGENT_HISTORY_LIMIT    = "20"
-    $env:CLAUDE_BRIDGE_AGENT_MAX_PER_OP       = "3"
     $env:CLAUDE_BRIDGE_AGENT_SYSTEM_PROMPT    = $p.Sys
     $proc = Start-Process -FilePath python `
         -ArgumentList "-u","-m","pc_launcher.connectors.claude_executor.runner" `

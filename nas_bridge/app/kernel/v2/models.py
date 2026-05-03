@@ -51,6 +51,35 @@ def _utcnow() -> datetime:
 # -----------------------------------------------------------------------------
 
 
+class ActorTokenV2Model(Base):
+    """v3 phase 3.x — per-actor token issuance.
+
+    Binds a long-lived bearer token to a single actor row. The token's
+    sha256 hash is stored; the plaintext is returned exactly once at
+    issue time and never persisted. A ``revoked_at`` timestamp soft-
+    revokes a token without deleting the audit row.
+
+    The issue/revoke flow itself is gated by the shared admin bearer
+    (existing ``BRIDGE_SHARED_AUTH_TOKEN``) so a compromised actor
+    token cannot mint new tokens for itself.
+    """
+
+    __tablename__ = "actor_tokens_v2"
+    __table_args__ = (
+        Index("ix_actor_tokens_v2_token_hash", "token_hash", unique=True),
+    )
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=lambda: str(uuid.uuid4()))
+    actor_id: Mapped[str] = mapped_column(
+        ForeignKey("actors_v2.id", ondelete="CASCADE"),
+        index=True,
+    )
+    token_hash: Mapped[str] = mapped_column(Text())
+    label: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class ActorV2Model(Base):
     """First-class identity. Every speaker / claimer / approver / observer
     in v2 is a row here, looked up by ``handle`` (e.g. ``@alice``,

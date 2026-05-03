@@ -13,10 +13,10 @@ import asyncio
 import json
 from typing import Any
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, Header, Query, Request
 from fastapi.responses import StreamingResponse
 
-from ..auth import BridgeCaller, require_bridge_caller
+from ..auth import BridgeCaller, require_bridge_caller, verify_actor_handle_claim
 from ..db import session_scope
 from ..kernel.v2 import V2Repository
 
@@ -148,7 +148,14 @@ async def stream_inbox(
     actor_handle: str = Query(..., description="Actor handle, e.g. '@bob'"),
     heartbeat_seconds: float = Query(default=15.0, ge=1.0, le=120.0),
     caller: BridgeCaller = Depends(require_bridge_caller),  # noqa: ARG001
+    x_actor_token: str | None = Header(default=None),
 ):
+    # v3 phase 3.x: SSE subscribe is the most attractive impersonation
+    # surface (anyone could read another agent's inbox). Verify
+    # token↔handle binding before opening the stream.
+    verify_actor_handle_claim(
+        request, claimed_handle=actor_handle, x_actor_token=x_actor_token,
+    )
     """G3: server-sent events stream of every v2 OperationEvent that
     lands in this actor's inbox. Each event is delivered with privacy
     redaction already applied (whisper events the actor isn't in are

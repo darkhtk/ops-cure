@@ -58,36 +58,39 @@ class BridgeAgentLoop:
         model: str | None = None,
         permission_mode: str | None = "acceptEdits",
         on_log=None,
-        # Extension knobs (a/b/c from the protocol triage):
-        #   broadcast        — also respond to events with no
-        #                      addressed_to_actor_ids (room-wide speech).
-        #                      Default off; opt in for collab personas.
+        # Configuration knobs:
         #   history_limit    — pre-fetch this many recent op events
         #                      before each run so the prompt carries
-        #                      conversational context (option b). 0 = off.
-        #   max_responses_per_op — cap per-op replies as a runaway guard
-        #                          when broadcast is on. 0 = unlimited.
+        #                      conversational context. 0 = off.
         #   system_prompt    — persona-specific guidance prepended to
-        #                      every prompt. Lets one executable host
-        #                      different personas via env (option c).
-        broadcast: bool = False,
+        #                      every prompt.
+        #   actor_token      — optional v3 phase-3.x bound token. When
+        #                      set, sent as ``X-Actor-Token`` on every
+        #                      mutating request so the bridge can prove
+        #                      this loop really speaks for ``actor_handle``.
+        # Phase 3 cleanup: ``broadcast`` and ``max_responses_per_op``
+        # were retired. Cascade prevention is now mechanical via the
+        # bridge's ``expected_response.from_actor_handles`` contract;
+        # the op-level cap ``policy.max_rounds`` replaces the per-
+        # persona client guard. Callers who used those knobs before
+        # should set ``policy.max_rounds`` on the op and address
+        # responders explicitly via ``expected_response``.
         history_limit: int = 0,
-        max_responses_per_op: int = 5,
         system_prompt: str | None = None,
+        actor_token: str | None = None,
     ) -> None:
         if not actor_handle.startswith("@"):
             actor_handle = f"@{actor_handle}"
         self._bridge_url = bridge_url.rstrip("/")
         self._token = token
+        self._actor_token = actor_token
         self._actor_handle = actor_handle
         self._cwd = cwd
         self._model = model
         self._permission_mode = permission_mode
         self._on_log = on_log or (lambda msg: print(msg, file=sys.stderr))
 
-        self._broadcast = broadcast
         self._history_limit = max(0, int(history_limit))
-        self._max_responses_per_op = max(0, int(max_responses_per_op))
         self._system_prompt = (system_prompt or "").strip()
 
         self._actor_id: str | None = None
@@ -96,7 +99,6 @@ class BridgeAgentLoop:
         self._worker_thread: threading.Thread | None = None
         self._event_q: queue.Queue[dict[str, Any]] = queue.Queue()
         self._seen_event_ids: set[str] = set()  # idempotency
-        self._responses_per_op: dict[str, int] = {}  # op_id -> count
 
     # ---- lifecycle ----------------------------------------------------
 
@@ -138,13 +140,16 @@ class BridgeAgentLoop:
             f"{self._bridge_url}/v2/inbox/stream"
             f"?actor_handle={urllib.request.quote(self._actor_handle)}"
         )
+        sse_headers = {
+            "Accept": "text/event-stream",
+            "Authorization": f"Bearer {self._token}",
+        }
+        if self._actor_token:
+            sse_headers["X-Actor-Token"] = self._actor_token
         req = urllib.request.Request(
             url,
             method="GET",
-            headers={
-                "Accept": "text/event-stream",
-                "Authorization": f"Bearer {self._token}",
-            },
+            headers=sse_headers,
         )
         with urllib.request.urlopen(req, timeout=_SSE_OPEN_TIMEOUT_SECONDS) as resp:
             self._log(f"agent loop connected to {url}")
@@ -191,18 +196,16 @@ class BridgeAgentLoop:
         # Self-loop guard: never respond to my own speech.
         if self._actor_id and ev.get("actor_id") == self._actor_id:
             return
-        # v3-additive routing:
+        # v3 routing — phase 3 cleanup: response gate is now purely
+        # mechanical, no broadcast fallback.
         #
-        # If the speaker declared an explicit reply contract via
-        # ``expected_response`` (kernel.v2.contract.validate_expected_response),
-        # that wins -- respond iff my handle is listed in
-        # ``expected_response.from_actor_handles``. Otherwise the
-        # cascade-prevention is mechanical and broadcast/cap heuristics
-        # don't get to second-guess it.
-        #
-        # When expected_response is absent (legacy v2 events), fall back
-        # to the original logic: explicit address wins, empty address
-        # only triggers when ``BROADCAST=true``.
+        # 1. If the speaker declared ``expected_response`` (the
+        #    canonical path in v3): respond iff my handle is listed
+        #    in ``expected_response.from_actor_handles``.
+        # 2. Otherwise (no expected_response on the event): respond
+        #    iff I'm explicitly in ``addressed_to_actor_ids``. An
+        #    event with no addressee at all is treated as a public
+        #    announcement that does NOT obligate any agent reply.
         ex = ev.get("expected_response")
         if isinstance(ex, dict):
             wanted = ex.get("from_actor_handles") or []
@@ -210,19 +213,10 @@ class BridgeAgentLoop:
                 return
         else:
             addressed = ev.get("addressed_to_actor_ids") or []
-            if addressed:
-                if self._actor_id and self._actor_id not in addressed:
-                    return
-            elif not self._broadcast:
+            if not addressed:
+                return  # no explicit responder → no auto-reply
+            if self._actor_id and self._actor_id not in addressed:
                 return
-        # Per-op runaway guard (matters mostly when broadcast=True).
-        op_id = ev.get("operation_id")
-        if (
-            self._max_responses_per_op
-            and op_id
-            and self._responses_per_op.get(op_id, 0) >= self._max_responses_per_op
-        ):
-            return
         # Idempotency.
         eid = ev.get("event_id")
         if eid and eid in self._seen_event_ids:
@@ -269,8 +263,15 @@ class BridgeAgentLoop:
         # v3-additive: link reply to the trigger event so the bridge's
         # reply chain (replies_to_event_id) is no longer dead.
         trigger_event_id = ev.get("event_id")
-        if self._post_claim(op_id, result_text, in_reply_to=trigger_event_id):
-            self._responses_per_op[op_id] = self._responses_per_op.get(op_id, 0) + 1
+        self._post_claim(op_id, result_text, in_reply_to=trigger_event_id)
+
+    def _auth_headers(self) -> dict[str, str]:
+        """Headers used on read-only / GET-shaped requests. POST/SSE
+        paths copy these and add Content-Type / Accept as needed."""
+        h = {"Authorization": f"Bearer {self._token}"}
+        if self._actor_token:
+            h["X-Actor-Token"] = self._actor_token
+        return h
 
     def _op_is_closed(self, op_id: str) -> bool:
         """Best-effort op state probe. Returns True only when we have a
@@ -279,7 +280,7 @@ class BridgeAgentLoop:
         url = f"{self._bridge_url}/v2/operations/{urllib.request.quote(op_id)}"
         req = urllib.request.Request(
             url, method="GET",
-            headers={"Authorization": f"Bearer {self._token}"},
+            headers=self._auth_headers(),
         )
         try:
             with urllib.request.urlopen(req, timeout=5.0) as resp:
@@ -306,7 +307,7 @@ class BridgeAgentLoop:
         req = urllib.request.Request(
             url,
             method="GET",
-            headers={"Authorization": f"Bearer {self._token}"},
+            headers=self._auth_headers(),
         )
         try:
             with urllib.request.urlopen(req, timeout=15.0) as resp:
@@ -458,14 +459,17 @@ class BridgeAgentLoop:
             # bridge can reconstruct disagreement / proposal chains.
             body["replies_to_event_id"] = in_reply_to
         data = json.dumps(body).encode("utf-8")
+        post_headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self._token}",
+        }
+        if self._actor_token:
+            post_headers["X-Actor-Token"] = self._actor_token
         req = urllib.request.Request(
             url,
             data=data,
             method="POST",
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {self._token}",
-            },
+            headers=post_headers,
         )
         try:
             with urllib.request.urlopen(req, timeout=30.0) as resp:

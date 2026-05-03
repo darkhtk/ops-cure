@@ -33,6 +33,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .models import (
+    ActorTokenV2Model,
     ActorV2Model,
     OperationArtifactV2Model,
     OperationEventV2Model,
@@ -57,6 +58,59 @@ def _loads(value: str | None, default: Any) -> Any:
 class V2Repository:
     """All v2 reads/writes go through this. Used by the future v2
     service layer; F1 only proves the schema works end-to-end."""
+
+    # ---------------- actor tokens (v3 phase 3.x) ---------
+
+    def create_actor_token(
+        self,
+        db: Session,
+        *,
+        actor_id: str,
+        token_hash: str,
+        label: str | None = None,
+    ) -> ActorTokenV2Model:
+        """Issue a new actor token. Caller computes the hash; the
+        plaintext never reaches the repository."""
+        row = ActorTokenV2Model(
+            actor_id=actor_id,
+            token_hash=token_hash,
+            label=label,
+        )
+        db.add(row)
+        db.flush()
+        return row
+
+    def get_actor_token_by_hash(
+        self, db: Session, *, token_hash: str,
+    ) -> ActorTokenV2Model | None:
+        """Look up a token row by hash. Active tokens only — revoked
+        rows are excluded so revocation is immediate."""
+        return db.scalar(
+            select(ActorTokenV2Model).where(
+                ActorTokenV2Model.token_hash == token_hash,
+                ActorTokenV2Model.revoked_at.is_(None),
+            )
+        )
+
+    def list_actor_tokens(
+        self, db: Session, *, actor_id: str,
+    ) -> list[ActorTokenV2Model]:
+        return list(db.scalars(
+            select(ActorTokenV2Model)
+            .where(ActorTokenV2Model.actor_id == actor_id)
+            .order_by(ActorTokenV2Model.created_at.asc())
+        ))
+
+    def revoke_actor_token(
+        self, db: Session, *, token_id: str,
+    ) -> ActorTokenV2Model | None:
+        from datetime import datetime, timezone
+        row = db.get(ActorTokenV2Model, token_id)
+        if row is None or row.revoked_at is not None:
+            return row
+        row.revoked_at = datetime.now(timezone.utc)
+        db.flush()
+        return row
 
     # ---------------- actors ----------------
 

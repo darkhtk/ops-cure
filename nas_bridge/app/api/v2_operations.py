@@ -11,10 +11,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
-from ..auth import BridgeCaller, require_bridge_caller
+from ..auth import BridgeCaller, require_bridge_caller, verify_actor_handle_claim
 from ..db import session_scope
 from ..kernel.v2 import V2Repository
 from ..kernel.v2.models import OperationEventV2Model
@@ -308,7 +308,13 @@ def open_operation(
     payload: V2OpenOperationRequest,
     request: Request,
     caller: BridgeCaller = Depends(require_bridge_caller),  # noqa: ARG001
+    x_actor_token: str | None = Header(default=None),
 ) -> dict[str, Any]:
+    verify_actor_handle_claim(
+        request,
+        claimed_handle=payload.opener_actor_handle,
+        x_actor_token=x_actor_token,
+    )
     """Open a new operation. Delegates to ChatConversationService.open_conversation
     in the chat-only era; the response surfaces the v2 operation id
     directly so callers never need the v1 conversation id."""
@@ -369,12 +375,20 @@ def append_event(
     payload: V2EventRequest,
     request: Request,
     caller: BridgeCaller = Depends(require_bridge_caller),  # noqa: ARG001
+    x_actor_token: str | None = Header(default=None),
 ) -> dict[str, Any]:
     """Append a speech / lifecycle event to an operation. Currently the
     only kinds wired through this endpoint are speech.* (claim, question,
     proposal, etc.). Task-lifecycle and approval flows still go through
     /api/chat/conversations/.../task; G2 deliberately does not move
     those because the lease-token contract is non-trivial."""
+    # v3 phase 3.x identity check: if X-Actor-Token is present, the
+    # claimed actor_handle must match the bound actor. When
+    # BRIDGE_REQUIRE_ACTOR_TOKEN=1 the header is mandatory; otherwise
+    # legacy mode (shared bearer + asserted handle) is permitted.
+    verify_actor_handle_claim(
+        request, claimed_handle=payload.actor_handle, x_actor_token=x_actor_token,
+    )
     if not payload.kind.startswith("speech."):
         raise HTTPException(
             status_code=400,
@@ -451,7 +465,11 @@ def close_operation(
     payload: V2CloseRequest,
     request: Request,
     caller: BridgeCaller = Depends(require_bridge_caller),  # noqa: ARG001
+    x_actor_token: str | None = Header(default=None),
 ) -> dict[str, Any]:
+    verify_actor_handle_claim(
+        request, claimed_handle=payload.actor_handle, x_actor_token=x_actor_token,
+    )
     v1_id = _operation_to_v1_conversation_id(operation_id)
     services = request.app.state.services
     from ..behaviors.chat.conversation_service import (
