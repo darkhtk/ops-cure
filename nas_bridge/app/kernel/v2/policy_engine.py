@@ -53,6 +53,8 @@ CODE_REPLY_KIND_REJECTED = "policy.reply_kind_rejected"
 CODE_CLOSE_NEEDS_OPERATOR = "policy.close_needs_operator_ratify"
 CODE_CLOSE_NEEDS_QUORUM = "policy.close_needs_quorum"
 CODE_CLOSE_NEEDS_PARTICIPANT = "policy.close_needs_participant"
+CODE_JOIN_INVITE_ONLY = "policy.join_invite_only"
+CODE_INVITE_NEEDS_PARTICIPANT = "policy.invite_needs_participant"
 
 
 class PolicyEngine:
@@ -124,6 +126,61 @@ class PolicyEngine:
                                     f"declared by trigger event"
                                 ),
                             )
+
+    # ---- membership gates --------------------------------------------
+
+    def check_join_admissible(
+        self,
+        db: Session,
+        *,
+        op: OperationV2Model,
+        joiner_actor_id: str,
+        is_invited: bool,
+    ) -> None:
+        """Enforce ``policy.join_policy`` on a ``speech.join`` event.
+
+        - ``open``: anyone may join.
+        - ``self_or_invite`` (default): the joiner may join freely.
+          Equivalent to v2 behavior — kept as the default.
+        - ``invite_only``: rejected unless the joiner is already
+          listed in any participant role (typical: ``invited`` from a
+          prior ``speech.invite``).
+        """
+        policy = self._repo.operation_policy(op)
+        jp = policy.get("join_policy")
+        if jp in (
+            _contract.JOIN_POLICY_OPEN,
+            _contract.JOIN_POLICY_SELF_OR_INVITE,
+        ):
+            return
+        if jp == _contract.JOIN_POLICY_INVITE_ONLY:
+            if is_invited:
+                return
+            raise PolicyViolation(
+                code=CODE_JOIN_INVITE_ONLY,
+                detail=(
+                    "join_policy=invite_only requires a prior speech.invite "
+                    "addressing this actor before they may join"
+                ),
+            )
+
+    def check_invite_admissible(
+        self,
+        db: Session,
+        *,
+        op: OperationV2Model,
+        inviter_actor_id: str,
+    ) -> None:
+        """Only existing participants may invite. This is the
+        symmetric guard that makes ``invite_only`` join policy
+        meaningful — otherwise an outsider could invite themselves."""
+        participants = self._repo.list_participants(db, operation_id=op.id)
+        if any(p.actor_id == inviter_actor_id for p in participants):
+            return
+        raise PolicyViolation(
+            code=CODE_INVITE_NEEDS_PARTICIPANT,
+            detail="speech.invite must come from an existing participant",
+        )
 
     # ---- close gate ---------------------------------------------------
 

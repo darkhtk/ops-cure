@@ -78,6 +78,15 @@ SPEECH_KINDS: frozenset[str] = frozenset({
     # engine consults these to enforce non-unilateral close policies.
     "move_close",
     "ratify",
+    # v3 phase 2.5 membership acts.
+    # ``invite``: opener (or any participant under join_policy=open)
+    #   invites a handle to participate. Auto-adds them as role=invited
+    #   so they can subscribe + speak.
+    # ``join``: an actor declares "I'm joining this op." Honored only
+    #   when policy.join_policy permits self-join (``self_or_invite``
+    #   or ``open``).
+    "invite",
+    "join",
 })
 
 

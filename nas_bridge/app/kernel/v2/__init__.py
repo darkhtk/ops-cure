@@ -71,6 +71,8 @@ from .policy_engine import (  # noqa: F401
     CODE_CLOSE_NEEDS_OPERATOR,
     CODE_CLOSE_NEEDS_QUORUM,
     CODE_CLOSE_NEEDS_PARTICIPANT,
+    CODE_JOIN_INVITE_ONLY,
+    CODE_INVITE_NEEDS_PARTICIPANT,
 )
 from .policy_sweeper import PolicySweeper  # noqa: F401
 
@@ -103,5 +105,7 @@ __all__ = [
     "CODE_CLOSE_NEEDS_OPERATOR",
     "CODE_CLOSE_NEEDS_QUORUM",
     "CODE_CLOSE_NEEDS_PARTICIPANT",
+    "CODE_JOIN_INVITE_ONLY",
+    "CODE_INVITE_NEEDS_PARTICIPANT",
     "PolicySweeper",
 ]

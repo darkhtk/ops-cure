@@ -847,13 +847,15 @@ class ChatConversationService:
             # v3 phase 2: gate on op policy (max_rounds, reply-kind
             # whitelist) BEFORE the mirror writes. Engine is no-op for
             # ops with the default policy + no max_rounds.
+            # v3 phase 2.5: also gate join/invite on join_policy.
             from ...kernel.v2 import PolicyEngine, PolicyViolation, V2Repository
             if row.v2_operation_id:
                 _v2_repo = V2Repository()
                 _v2_op = _v2_repo.get_operation(db, row.v2_operation_id)
                 if _v2_op is not None:
+                    _engine = PolicyEngine(_v2_repo)
                     try:
-                        PolicyEngine(_v2_repo).check_speech_admissible(
+                        _engine.check_speech_admissible(
                             db,
                             op=_v2_op,
                             actor_id="",  # not used for speech gates
@@ -862,6 +864,36 @@ class ChatConversationService:
                                 request, "replies_to_v2_event_id", None,
                             ),
                         )
+                        # JOIN / INVITE membership gates.
+                        if request.kind in ("invite", "join"):
+                            _speaker_handle = (
+                                request.actor_name
+                                if request.actor_name.startswith("@")
+                                else f"@{request.actor_name}"
+                            )
+                            _speaker = self._operation_mirror._actors.ensure_actor_by_handle(
+                                db, handle=_speaker_handle,
+                                kind="ai" if request.actor_kind == "ai" else "human",
+                            )
+                            if request.kind == "invite":
+                                _engine.check_invite_admissible(
+                                    db, op=_v2_op, inviter_actor_id=_speaker.id,
+                                )
+                            elif request.kind == "join":
+                                # "is_invited" = the joiner already has
+                                # ANY participant role (typically
+                                # role=invited from a prior speech.invite).
+                                participants = _v2_repo.list_participants(
+                                    db, operation_id=_v2_op.id,
+                                )
+                                is_invited = any(
+                                    p.actor_id == _speaker.id for p in participants
+                                )
+                                _engine.check_join_admissible(
+                                    db, op=_v2_op,
+                                    joiner_actor_id=_speaker.id,
+                                    is_invited=is_invited,
+                                )
                     except PolicyViolation as exc:
                         raise ChatConversationStateError(
                             f"policy: {exc.detail}"

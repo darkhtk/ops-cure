@@ -45,6 +45,11 @@ SpeechKind = Literal[
     # specially when computing close admissibility.
     "move_close",
     "ratify",
+    # v3 phase 2.5 membership acts. ``invite`` is opener/participant
+    # admitting another handle; ``join`` is an actor self-declaring
+    # participation (gated by policy.join_policy).
+    "invite",
+    "join",
 ]
 
 
