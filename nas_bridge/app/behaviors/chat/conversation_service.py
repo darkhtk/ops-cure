@@ -706,6 +706,7 @@ class ChatConversationService:
                     try:
                         PolicyEngine(_v2_repo).check_close_admissible(
                             db, op=_v2_op, closer_actor_id=actor_row.id,
+                            resolution=resolution,
                         )
                     except PolicyViolation as exc:
                         raise ChatConversationStateError(
@@ -724,7 +725,10 @@ class ChatConversationService:
                 if task.status in TASK_NON_TERMINAL_STATUSES:
                     raise ChatConversationStateError(
                         f"task-bound conversation cannot be manually closed while "
-                        f"task is {task.status}; complete/fail the task instead",
+                        f"task is {task.status}; complete/fail the task instead, "
+                        f"OR re-open the op via /v2/operations with "
+                        f"policy.bind_remote_task=false if you want collab-task "
+                        f"semantics (no executor lifecycle binding)",
                     )
 
             now = _utcnow()

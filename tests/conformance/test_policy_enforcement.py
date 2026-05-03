@@ -17,10 +17,16 @@ def _open_op(client, *, space_id, title, policy=None, opener="@alice", addressed
 
 
 def _say(client, op_id, *, actor, kind, text, **kwargs):
+    payload = {"text": text}
+    # D9 / rev-9: ratify only counts toward quorum when carrying
+    # close-intent. Conformance suite uses ratify exclusively for
+    # quorum voting, so stamp intent=close automatically.
+    if kind == "ratify":
+        payload["intent"] = "close"
     body = {
         "actor_handle": actor,
         "kind": f"speech.{kind}",
-        "payload": {"text": text},
+        "payload": payload,
     }
     body.update(kwargs)
     return client.post(f"/v2/operations/{op_id}/events", json=body)

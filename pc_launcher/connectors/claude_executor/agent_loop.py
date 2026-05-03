@@ -121,6 +121,18 @@ class BridgeAgentLoop:
         # realize its previous run was dropped.
         # Mapping: op_id → {"detail": str, "ts": str, "trigger_event_id": str}.
         self._last_run_failure: dict[str, dict[str, str]] = {}
+        # P10.2 — ARTIFACT header was present but the file couldn't
+        # be stat'd (path missing under cwd, permission denied).
+        # The extractor logged a warning + dropped the artifact;
+        # the LLM had no idea its evidence event went out without
+        # the deliverable attached. Surface to next prompt.
+        # Mapping: op_id → {"path": str, "reason": str, "ts": str}.
+        self._last_artifact_failure: dict[str, dict[str, str]] = {}
+        # P10.6 — count consecutive 4xx rejections of the same kind
+        # on the same op so the next-prompt warning can escalate
+        # ("you're stuck in a loop — switch to object/defer/SKIP").
+        # Mapping: op_id → {kind → consecutive_count}.
+        self._consecutive_kind_failures: dict[str, dict[str, int]] = {}
 
     # ---- lifecycle ----------------------------------------------------
 
@@ -462,18 +474,43 @@ class BridgeAgentLoop:
         rejected = self._last_post_rejection.get(op_id)
         if rejected:
             lines.append("")
+            is_transient = (rejected.get("transient") == "true")
             lines.append(
                 "⚠️ Your previous reply on this op was REJECTED by "
                 f"the bridge (HTTP {rejected.get('http_status','400')}, "
-                f"kind={rejected.get('rejected_kind','?')}):"
+                f"kind={rejected.get('rejected_kind','?')}"
+                + (", transient" if is_transient else "")
+                + "):"
             )
             lines.append(f"  {rejected.get('detail','')}")
-            lines.append(
-                "Adjust your reply to satisfy that constraint. Common "
-                "moves: pick a kind on the whitelist, switch to "
-                "[OBJECT] / [DEFER] / [EVIDENCE] (universal carve-outs), "
-                "or rephrase if the bridge cited a payload-shape error."
-            )
+            # P10.6 — escalate if the LLM has been hitting the same
+            # kind-rejection multiple turns running. The first
+            # warning didn't take; spell out alternatives more
+            # forcefully.
+            rk = rejected.get("rejected_kind", "")
+            consec = self._consecutive_kind_failures.get(op_id, {}).get(rk, 0)
+            if not is_transient and consec >= 2:
+                lines.append(
+                    f"🚨 You have hit the same `{rk}` rejection "
+                    f"{consec} turns in a row. Stop trying [{rk.upper()}]. "
+                    f"Switch to [OBJECT] / [DEFER] / [EVIDENCE] (always "
+                    f"admissible) OR reply with literal SKIP if you "
+                    f"have nothing useful that satisfies the trigger's "
+                    f"constraints."
+                )
+            elif is_transient:
+                lines.append(
+                    "This is a 5xx (bridge-side) — likely transient. "
+                    "Re-state the same content this turn; if it fails "
+                    "again, [DEFER→@<someone>] and let an operator look."
+                )
+            else:
+                lines.append(
+                    "Adjust your reply to satisfy that constraint. Common "
+                    "moves: pick a kind on the whitelist, switch to "
+                    "[OBJECT] / [DEFER] / [EVIDENCE] (universal carve-outs), "
+                    "or rephrase if the bridge cited a payload-shape error."
+                )
         # P9.4 / D14 — surface the prior run-failure (claude hung
         # / timed out / produced no terminal text). Same pattern as
         # D2 but for the upstream LLM hang rather than the
@@ -490,6 +527,28 @@ class BridgeAgentLoop:
                 "Don't repeat the same heavy prompt. Pick a smaller "
                 "deliverable for this turn, or [DEFER→@<someone>] if "
                 "you need help."
+            )
+        # P10.2 — surface ARTIFACT-extract failures from the prior
+        # turn. The bridge accepted the speech.evidence event but
+        # the agent's referenced file couldn't be stat'd (path
+        # missing under cwd, permission denied, no path= field on
+        # the header). The evidence event went out WITHOUT an
+        # OperationArtifact attached — operators see prose only.
+        art_fail = self._last_artifact_failure.get(op_id)
+        if art_fail:
+            lines.append("")
+            lines.append(
+                "⚠️ Your previous evidence event referenced an ARTIFACT "
+                f"that COULD NOT BE ATTACHED:"
+            )
+            lines.append(
+                f"  path: {art_fail.get('path','?')} — {art_fail.get('reason','?')}"
+            )
+            lines.append(
+                "The evidence text was recorded but no OperationArtifact "
+                "row exists. Re-post [EVIDENCE] with the correct path "
+                "(must exist under your cwd) before the op can close "
+                "if `policy.requires_artifact=true`."
             )
         if history:
             lines.append("")
@@ -752,6 +811,11 @@ class BridgeAgentLoop:
                 "agent loop: ARTIFACT header missing path= field; ignoring "
                 f"({spec_str!r})"
             )
+            self._pending_artifact_failure = {
+                "path": "(missing)",
+                "reason": f"ARTIFACT header had no path= field: {spec_str!r}",
+                "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            }
             return None, rest.lstrip("\n") if sep else body
         cwd = Path(self._cwd) if self._cwd else Path.cwd()
         full = (cwd / path).resolve()
@@ -763,6 +827,16 @@ class BridgeAgentLoop:
                 f"agent loop: artifact path {full} unreadable ({exc}); "
                 "skipping attachment"
             )
+            # P10.2 — record so the next prompt can show the LLM that
+            # the artifact didn't actually attach. ``_op_id_in_post``
+            # would be cleaner but at this point we don't know which
+            # op this body belongs to; the caller (_post_claim) is
+            # responsible for tagging the failure with op_id.
+            self._pending_artifact_failure = {
+                "path": str(full),
+                "reason": f"unreadable: {exc}",
+                "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            }
             return None, rest.lstrip("\n") if sep else body
         try:
             h = hashlib.sha256()
@@ -832,14 +906,68 @@ class BridgeAgentLoop:
         # v3 phase 6: prefix carries kind AND optional next-responder
         # contract. See _parse_reply_prefix for the grammar.
         kind, expected_response, cleaned = self._parse_reply_prefix(cleaned)
+        # P10.1 + P10.5 — pre-flight reject when the body looks like
+        # the LLM intended a structured kind but put the prefix in
+        # the wrong position. We saw this on Unity arcade smoke
+        # (D10): operator wrote a leading paragraph then
+        # `[EVIDENCE→...]\nARTIFACT: ...` mid-body. The parser
+        # correctly fell back to plain CLAIM (per spec §8.1.1),
+        # but neither operator nor reviewer realized the artifact
+        # never attached. Catch here: if parse fell back to claim
+        # AND a recognized kind prefix appears within the first
+        # ~10 lines of the body, refuse to post and surface so the
+        # LLM can re-write with prefix at position 0.
+        if kind == "claim":
+            head_lines = cleaned.splitlines()[:10]
+            for ln in head_lines:
+                stripped = ln.lstrip()
+                if not stripped.startswith("["):
+                    continue
+                # Try to parse just this line as a prefix; if it
+                # would have matched a recognized kind, the agent's
+                # original intent was the structured form.
+                probe_kind, _, _ = self._parse_reply_prefix(stripped)
+                if probe_kind != "claim" or stripped == cleaned[:len(stripped)].lstrip():
+                    # The second clause guards against false-positive
+                    # on the very first line (which IS at position
+                    # 0 — the parser already handled it).
+                    if probe_kind != "claim":
+                        self._last_post_rejection[op_id] = {
+                            "detail": (
+                                f"Detected structured prefix [{probe_kind.upper()}] "
+                                f"mid-body. Per spec §8.1.1, [KIND] MUST be the "
+                                f"very first non-whitespace characters of your "
+                                f"reply. Re-write with the prefix at position 0; "
+                                f"any leading prose makes the parser fall back "
+                                f"to plain CLAIM and your structured intent is "
+                                f"lost."
+                            ),
+                            "rejected_kind": probe_kind,
+                            "http_status": "0-self",
+                            "transient": "false",
+                        }
+                        self._log(
+                            f"agent loop: pre-flight reject post on op={op_id} "
+                            f"— mid-body prefix [{probe_kind.upper()}] detected"
+                        )
+                        return False
         # T1.2 + P9.3 / D11: evidence may carry ONE OR MORE
         # out-of-band ``ARTIFACT: path=...`` headers on consecutive
         # leading body lines. Strip + stat each before posting so
         # the bridge auto-creates one OperationArtifact row per
         # listed file.
         artifacts: list[dict[str, Any]] = []
+        # P10.2: prep the per-call slot the extractor writes into
+        # when it can't stat a referenced path.
+        self._pending_artifact_failure = None  # type: ignore[attr-defined]
         if kind == "evidence":
             artifacts, cleaned = self._maybe_extract_artifacts(cleaned)
+        # P10.2: if the extractor recorded a failure, bind it to
+        # this op so the next prompt can surface it.
+        pend = getattr(self, "_pending_artifact_failure", None)
+        if pend:
+            self._last_artifact_failure[op_id] = pend
+            self._pending_artifact_failure = None  # type: ignore[attr-defined]
         url = f"{self._bridge_url}/v2/operations/{op_id}/events"
         payload: dict[str, Any] = {"text": cleaned}
         if len(artifacts) == 1:
@@ -897,6 +1025,22 @@ class BridgeAgentLoop:
             # marker. A successful post implies the run produced
             # text this time; the prior hang is no longer relevant.
             self._last_run_failure.pop(op_id, None)
+            # P10.2 — artifact-failure marker policy:
+            #   - The current post may have written a fresh entry to
+            #     _last_artifact_failure[op_id] (set right before the
+            #     POST in the artifacts-extraction block).
+            #   - We don't want to clear THAT one — the LLM hasn't
+            #     seen it yet. We only want to clear stale entries
+            #     from prior turns that the LLM has now had a chance
+            #     to address.
+            #   - Heuristic: if `pend` (the per-call pending failure)
+            #     was None this turn, any stored entry is stale.
+            if not pend:
+                self._last_artifact_failure.pop(op_id, None)
+            # P10.6 — successful post resets the consecutive-failure
+            # counter for this op. The LLM evidently picked a kind
+            # that satisfies the constraints.
+            self._consecutive_kind_failures.pop(op_id, None)
             return True
         except urllib.error.HTTPError as e:
             try:
@@ -904,29 +1048,36 @@ class BridgeAgentLoop:
             except Exception:  # noqa: BLE001
                 detail = ""
             self._log(f"agent loop: claim post failed op={op_id} HTTP {e.code}: {detail}")
-            # D2 — capture the rejection so the next prompt can show
-            # the LLM what went wrong. Without this the agent silently
-            # loses messages and the conversation deadlocks (RPG smoke
-            # observation 2026-05-04). 4xx is a contract violation
-            # the LLM can correct (kind whitelist, payload shape, etc.);
-            # 5xx is bridge-side, not directly actionable, so we still
-            # capture but the prompt phrasing makes that clear.
+            # D2 + P10.3 — capture the rejection so the next prompt can
+            # show the LLM what went wrong. Without this the agent
+            # silently loses messages and the conversation deadlocks
+            # (RPG smoke observation 2026-05-04).
+            #
+            # 4xx is a contract violation the LLM can correct (kind
+            # whitelist, payload shape, etc.). 5xx is bridge-side and
+            # not directly actionable but worth surfacing so the LLM
+            # knows the post didn't land — the next-turn prompt makes
+            # the distinction clear via ``transient`` flag.
+            detail_text = detail
+            try:
+                parsed = json.loads(detail or "")
+                if isinstance(parsed, dict) and "detail" in parsed:
+                    d = parsed["detail"]
+                    detail_text = d if isinstance(d, str) else json.dumps(d)
+            except Exception:  # noqa: BLE001
+                pass
+            self._last_post_rejection[op_id] = {
+                "detail": detail_text[:500],
+                "rejected_kind": kind,
+                "http_status": str(e.code),
+                "transient": "true" if e.code >= 500 else "false",
+            }
+            # P10.6 — track consecutive same-kind 4xx so the prompt
+            # surface can escalate after the LLM ignores the first
+            # warning. 5xx is transient and doesn't count.
             if 400 <= e.code < 500:
-                # Strip the typical FastAPI envelope ``{"detail": "..."}``
-                # to a flat string so the prompt isn't cluttered.
-                detail_text = detail
-                try:
-                    parsed = json.loads(detail or "")
-                    if isinstance(parsed, dict) and "detail" in parsed:
-                        d = parsed["detail"]
-                        detail_text = d if isinstance(d, str) else json.dumps(d)
-                except Exception:  # noqa: BLE001
-                    pass
-                self._last_post_rejection[op_id] = {
-                    "detail": detail_text[:500],
-                    "rejected_kind": kind,
-                    "http_status": str(e.code),
-                }
+                op_failures = self._consecutive_kind_failures.setdefault(op_id, {})
+                op_failures[kind] = op_failures.get(kind, 0) + 1
             return False
         except urllib.error.URLError as e:
             self._log(f"agent loop: claim post network error op={op_id}: {e.reason}")

@@ -78,7 +78,7 @@ def test_full_disagreement_then_quorum_close_runs_to_completion(tmp_path, monkey
     repo = m["V2Repository"]()
 
     def post(actor, kind, content, *, replies_to=None, expected_response=None):
-        return chat.submit_speech(
+        s = chat.submit_speech(
             conversation_id=summary.id,
             request=m["SpeechActSubmitRequest"](
                 actor_name=actor, kind=kind, content=content,
@@ -86,6 +86,27 @@ def test_full_disagreement_then_quorum_close_runs_to_completion(tmp_path, monkey
                 expected_response=expected_response,
             ),
         )
+        # D9 / rev-9: stamp close-intent on ratify events so the
+        # quorum gate counts them.
+        if kind == "ratify":
+            import json as _json
+            from app.behaviors.chat.models import ChatMessageModel
+            from app.kernel.v2.models import OperationEventV2Model
+            with db.session_scope() as _db:
+                v1_msg = _db.get(ChatMessageModel, s.id)
+                if v1_msg is not None and v1_msg.v2_event_id:
+                    v2_ev = _db.get(OperationEventV2Model, v1_msg.v2_event_id)
+                    if v2_ev is not None:
+                        try:
+                            ex = _json.loads(v2_ev.payload_json or "{}")
+                        except Exception:
+                            ex = {}
+                        if not isinstance(ex, dict):
+                            ex = {}
+                        ex["intent"] = "close"
+                        v2_ev.payload_json = _json.dumps(ex, ensure_ascii=False)
+                        _db.flush()
+        return s
 
     def v2id(msg):
         with db.session_scope() as s:
@@ -201,12 +222,34 @@ def test_premature_close_under_quorum_blocked_then_unblocked(tmp_path, monkeypat
     )
 
     def post(actor, kind, content):
-        chat.submit_speech(
+        s = chat.submit_speech(
             conversation_id=summary.id,
             request=m["SpeechActSubmitRequest"](
                 actor_name=actor, kind=kind, content=content,
             ),
         )
+        # D9 / rev-9: ratifies count toward quorum only when close-
+        # intent. Tests in this file use ratify exclusively for
+        # quorum voting, so stamp intent=close automatically.
+        if kind == "ratify":
+            import json as _json
+            from app.behaviors.chat.models import ChatMessageModel
+            from app.kernel.v2.models import OperationEventV2Model
+            with m["db"].session_scope() as _db:
+                v1_msg = _db.get(ChatMessageModel, s.id)
+                if v1_msg is not None and v1_msg.v2_event_id:
+                    v2_ev = _db.get(OperationEventV2Model, v1_msg.v2_event_id)
+                    if v2_ev is not None:
+                        try:
+                            ex = _json.loads(v2_ev.payload_json or "{}")
+                        except Exception:
+                            ex = {}
+                        if not isinstance(ex, dict):
+                            ex = {}
+                        ex["intent"] = "close"
+                        v2_ev.payload_json = _json.dumps(ex, ensure_ascii=False)
+                        _db.flush()
+        return s
 
     post("alice", "question", "Should we rotate?")
     post("bob", "answer", "Yes — compliance window")

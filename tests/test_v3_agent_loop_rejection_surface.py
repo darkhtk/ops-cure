@@ -46,6 +46,10 @@ class _StubLoop:
         # P9.4 / D14: _build_prompt now also reads this map to surface
         # claude-run failures into the next prompt.
         self._last_run_failure: dict[str, dict[str, str]] = {}
+        # P10.2: artifact-extract failure surface.
+        self._last_artifact_failure: dict[str, dict[str, str]] = {}
+        # P10.6: consecutive same-kind failures escalation.
+        self._consecutive_kind_failures: dict[str, dict[str, int]] = {}
         self._history_limit = 0
         self._log_lines: list[str] = []
 
@@ -168,6 +172,8 @@ def test_d2_rejection_clears_after_successful_post():
         _log_lines: list = []
         _last_post_rejection: dict = {}
         _last_run_failure: dict = {}  # P9.4 / D14
+        _last_artifact_failure: dict = {}  # P10.2
+        _consecutive_kind_failures: dict = {}  # P10.6
         # _post_claim's success branch does:
         #   self._last_post_rejection.pop(op_id, None)
         # we can't run the full method without HTTP, but the clear

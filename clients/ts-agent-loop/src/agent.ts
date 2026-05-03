@@ -86,12 +86,30 @@ export class Agent {
     return null;
   }
 
-  async post(env: InboxEnvelope, reply: { kind: string; text: string }): Promise<void> {
+  async post(
+    env: InboxEnvelope,
+    reply: {
+      kind: string;
+      text: string;
+      // T1.2: singular artifact dict (back-compat).
+      artifact?: Record<string, unknown>;
+      // P9.3 / D11: plural artifacts list (multi-deliverable).
+      artifacts?: Array<Record<string, unknown>>;
+      // P9.1 / D9: explicit close-intent flag for ratify events.
+      intent?: "close";
+    },
+  ): Promise<void> {
     const parsed = parseReplyPrefix(reply.text);
+    const payload: Record<string, unknown> = { text: parsed.body };
+    if (reply.artifact) payload["artifact"] = reply.artifact;
+    if (reply.artifacts && reply.artifacts.length > 0) {
+      payload["artifacts"] = reply.artifacts;
+    }
+    if (reply.intent) payload["intent"] = reply.intent;
     const body: Record<string, unknown> = {
       actor_handle: this.cfg.actorHandle,
       kind: parsed.kind ? `speech.${parsed.kind}` : reply.kind,
-      payload: { text: parsed.body },
+      payload,
       replies_to_event_id: env.event_id,
     };
     if (parsed.expectedResponse) {

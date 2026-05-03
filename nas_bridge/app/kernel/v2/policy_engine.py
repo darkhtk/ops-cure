@@ -210,6 +210,7 @@ class PolicyEngine:
         *,
         op: OperationV2Model,
         closer_actor_id: str | None,
+        resolution: str | None = None,
     ) -> None:
         """Raise ``PolicyViolation`` if the op's close policy is not
         satisfied. Engine assumes the caller already passed the basic
@@ -224,7 +225,25 @@ class PolicyEngine:
         # close on having ≥1 OperationArtifact attached. Useful for
         # kind=task / kind=proposal where deliverable existence is a
         # completion criterion.
-        if policy.get("requires_artifact"):
+        #
+        # P10.4 — gate ONLY applies to terminal-success resolutions.
+        # An abandoned / cancelled / failed close is by definition
+        # admitting no deliverable was produced; demanding an
+        # artifact would force callers to fabricate one (Unity
+        # arcade smoke 2026-05-04: alice attached a build that
+        # nobody actually verified just to satisfy the gate). The
+        # success vocabulary (per kind) lives in
+        # contract.ALLOWED_RESOLUTIONS but at the gate-level we
+        # use a simple "is it a non-failure resolution?" check.
+        _NON_SUCCESS_RESOLUTIONS = {
+            "abandoned", "cancelled", "failed", "withdrawn",
+            "superseded", "dropped",
+        }
+        is_terminal_success = (
+            resolution is None
+            or resolution not in _NON_SUCCESS_RESOLUTIONS
+        )
+        if policy.get("requires_artifact") and is_terminal_success:
             artifacts = self._repo.list_artifacts_for_operation(
                 db, operation_id=op.id,
             )
@@ -235,7 +254,10 @@ class PolicyEngine:
                         "policy.requires_artifact=true but no "
                         "OperationArtifact is attached to this op; "
                         "post a speech.evidence with payload.artifact "
-                        "before closing"
+                        "before closing (or use a non-success "
+                        "resolution like 'abandoned'/'cancelled'/"
+                        "'failed' — the artifact gate is bypassed "
+                        "for those terminal-failure paths)"
                     ),
                 )
 

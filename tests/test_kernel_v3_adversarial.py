@@ -67,13 +67,38 @@ def _open(chat, m, discord, *, opener="alice", policy=None, addressed_to=None):
     )
 
 
-def _say(chat, m, conv_id, *, actor="alice", kind="claim", content="hi", **kwargs):
-    return chat.submit_speech(
+def _say(chat, m, conv_id, *, actor="alice", kind="claim", content="hi",
+         close_intent: bool = True, **kwargs):
+    """``close_intent`` defaults True for ratifies in this file's
+    tests since the original test semantics presumed every ratify
+    was a vote. D9/rev-9 split that meaning; explicit flag keeps
+    pre-D9 invariants (quorum dedup etc.) testable.
+    """
+    summary = chat.submit_speech(
         conversation_id=conv_id,
         request=m["SpeechActSubmitRequest"](
             actor_name=actor, kind=kind, content=content, **kwargs,
         ),
     )
+    if close_intent and kind == "ratify":
+        import json as _json
+        from app.behaviors.chat.models import ChatMessageModel
+        from app.kernel.v2.models import OperationEventV2Model
+        with m["db"].session_scope() as _db:
+            v1_msg = _db.get(ChatMessageModel, summary.id)
+            if v1_msg is not None and v1_msg.v2_event_id:
+                v2_ev = _db.get(OperationEventV2Model, v1_msg.v2_event_id)
+                if v2_ev is not None:
+                    try:
+                        existing = _json.loads(v2_ev.payload_json or "{}")
+                    except Exception:
+                        existing = {}
+                    if not isinstance(existing, dict):
+                        existing = {}
+                    existing["intent"] = "close"
+                    v2_ev.payload_json = _json.dumps(existing, ensure_ascii=False)
+                    _db.flush()
+    return summary
 
 
 def _v2_event_id(db, m, v1_msg_id):
