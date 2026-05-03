@@ -1,6 +1,6 @@
 # Opscure Bridge Protocol v3 — Normative Specification
 
-**Status**: Normative (rev 5, 2026-05-03). This document is the
+**Status**: Normative (rev 6, 2026-05-03). This document is the
 authoritative description of Opscure Bridge protocol v3.x. Where it
 disagrees with code, the spec is wrong and a clarifying patch is
 welcome — but in the meantime, the **wire test fixtures**
@@ -661,6 +661,64 @@ original text as the body. Both implementations agree at the exact
 boundary — see fixture cases `T33` / `T34` in
 `tests/fixtures/reply_prefix_cases.json`.
 
+### 8.1.2 Evidence — artifact attachment
+
+`chat.speech.evidence` carries an OPTIONAL `payload.artifact` dict
+that formally registers a deliverable produced during the op:
+
+```json
+{
+  "kind": "speech.evidence",
+  "payload": {
+    "text": "wrote dodge.html",
+    "artifact": {
+      "kind": "code" | "screenshot" | "diff" | "log" | "file" | ...,
+      "uri": "file:///path/to/dodge.html",
+      "sha256": "<64-char hex>",
+      "mime": "text/html",
+      "size_bytes": 5942,
+      "label": "optional human label",
+      "metadata": { "any": "extra" }
+    }
+  }
+}
+```
+
+Fields:
+
+- `kind` (required): a free-form category. Reference clients use
+  `code` / `screenshot` / `diff` / `log` / `file` / `image` /
+  `audio` / `evidence`, but the bridge does not enforce a vocab.
+- `uri` (required): non-empty string. The bridge does not interpret
+  `uri` semantics (could be `file://`, `s3://`, `http://`, …) — it
+  stores it verbatim. Consumers fetch + verify against `sha256`.
+- `sha256` (required): exactly 64 hex chars. The bridge does not
+  recompute; the writer is responsible for matching content.
+- `mime` (required): non-empty string. Best-effort hint, not enforced.
+- `size_bytes` (required): non-negative int.
+- `label` (optional str), `metadata` (optional object).
+
+When all required fields are present and well-formed, the bridge
+**MUST** create an `OperationArtifact` row tied to the event id
+and surface it via `GET /v2/operations/{id}/artifacts`. When the
+field is absent, the event is recorded normally with no artifact.
+When the field is *partially* present (at least one of the
+artifact keys but missing required fields), the bridge **MUST**
+reject with HTTP 400 (`payload.artifact: …`) — silent drop hides
+executor bugs.
+
+Other speech kinds **MUST** ignore `payload.artifact`. The field
+is recognized only on `speech.evidence` because evidence is the
+designated carrier for "a deliverable now exists" — a `claim` or
+`propose` carrying a file path is just prose.
+
+Reference Python clients support a convenience header in the
+reply body — `ARTIFACT: path=<rel> [kind=<k>] [label=<l>]` on the
+first line — which `BridgeAgentLoop` strips, stats under
+`agent_cwd`, and converts to a structured `payload.artifact`
+before posting. The header is a client-side convenience; non-
+Python clients construct the dict directly.
+
 ### 8.2 Governance acts
 
 `chat.speech.move_close`, `chat.speech.ratify`, `chat.speech.invite`,
@@ -978,6 +1036,7 @@ for details.
 | 3 | 2026-05-03 | Phase 6: §8.1.1 added — INVITING vs TERMINAL reply distinction. Bridges **MUST NOT** synthesize default `expected_response` from speech kind; workflow shape is a speaker-level choice. The protocol stays workflow-agnostic; clients use a compact prefix grammar (`[KIND→@a,@b kinds=…] body`) at their convenience. See `tests/test_v3_next_responder_parser.py` for the grammar. |
 | 4 | 2026-05-03 | T1.1: `policy.bind_remote_task` field added to `OperationPolicy` (§6.1). New §9.1 "Choosing `kind`" makes the collab-task vs executor-task distinction normative. `/v2/operations` defaults `bind_remote_task=false` for `kind=task`; the v1 `/api/chat` path keeps the legacy `true` default. §9.4 documents the task-bound close guard (only fires when `bind_remote_task=true`). Sub-section 9.2/9.3 renumbered. Tests: `tests/test_v3_bind_remote_task_policy.py`. |
 | 5 | 2026-05-03 | Cross-impl parser conformance: 37-case JSON fixture at `tests/fixtures/reply_prefix_cases.json` exercised by Python (`tests/test_v3_parser_cross_impl_fixture.py`) and TypeScript (`clients/ts-agent-loop/src/parser-fixture.test.ts`). Fixed Python parser drift on prefix-length boundary — `]` at exact idx 200 was rejected by Python but accepted by TS. Both impls now agree on **≤ 200 chars (inclusive)**, documented in §8.1.1. |
+| 6 | 2026-05-03 | T1.2: artifact-on-evidence (§8.1.2). `speech.evidence` may carry a `payload.artifact` dict (`kind/uri/sha256/mime/size_bytes` + optional `label`/`metadata`). The bridge auto-creates an `OperationArtifact` row tied to the event. Other speech kinds ignore the field. Partial/malformed artifact is rejected with HTTP 400 (no silent drop). Reference Python parser (`agent_loop.py`) understands an `ARTIFACT: path=...` first-line header and stats the file before posting. Tests: `tests/test_v3_artifact_evidence.py` (HTTP path) + `tests/test_v3_agent_loop_artifact_extract.py` (parser). |
 
 ## Appendix A — Error code catalog (machine-readable)
 

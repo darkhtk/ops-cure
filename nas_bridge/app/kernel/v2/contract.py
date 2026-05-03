@@ -323,6 +323,72 @@ DEFAULT_OPERATION_POLICY: dict = {
 }
 
 
+def validate_artifact_payload(value: object) -> dict | None:
+    """Normalize an artifact descriptor on ``speech.evidence.payload``.
+
+    Returns the validated dict on success, ``None`` if the value is
+    not a dict (caller treats no-op). Raises ``ValueError`` only when
+    the value is *partially* shaped — i.e. clearly intended to be an
+    artifact but missing required fields.
+
+    Required: ``kind``, ``uri``, ``sha256``, ``mime``, ``size_bytes``.
+    Optional: ``label`` (str), ``metadata`` (dict).
+
+    The bridge does not interpret ``uri`` semantics — it just persists.
+    Callers (agents writing to local cwd, executors uploading to S3)
+    own the format. Same for ``mime``: best-effort, not enforced.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        return None
+    # If at least one required field is present, treat as intended-
+    # artifact and demand the rest. Otherwise it's not an artifact.
+    keys = set(value.keys())
+    intended_keys = {"kind", "uri", "sha256", "mime", "size_bytes",
+                     "label", "metadata"}
+    if not (keys & intended_keys):
+        return None
+    required = ("kind", "uri", "sha256", "mime", "size_bytes")
+    missing = [k for k in required if k not in value]
+    if missing:
+        raise ValueError(
+            f"payload.artifact missing required fields: {missing}"
+        )
+    if not isinstance(value["kind"], str) or not value["kind"]:
+        raise ValueError("payload.artifact.kind must be a non-empty str")
+    if not isinstance(value["uri"], str) or not value["uri"]:
+        raise ValueError("payload.artifact.uri must be a non-empty str")
+    if not isinstance(value["sha256"], str) or len(value["sha256"]) != 64:
+        raise ValueError(
+            "payload.artifact.sha256 must be a 64-char hex string"
+        )
+    if not isinstance(value["mime"], str):
+        raise ValueError("payload.artifact.mime must be a str")
+    if not isinstance(value["size_bytes"], int) or value["size_bytes"] < 0:
+        raise ValueError(
+            "payload.artifact.size_bytes must be a non-negative int"
+        )
+    label = value.get("label")
+    if label is not None and not isinstance(label, str):
+        raise ValueError("payload.artifact.label must be a str when set")
+    meta = value.get("metadata")
+    if meta is not None and not isinstance(meta, dict):
+        raise ValueError("payload.artifact.metadata must be a dict when set")
+    out = {
+        "kind": value["kind"],
+        "uri": value["uri"],
+        "sha256": value["sha256"],
+        "mime": value["mime"],
+        "size_bytes": value["size_bytes"],
+    }
+    if label is not None:
+        out["label"] = label
+    if meta is not None:
+        out["metadata"] = meta
+    return out
+
+
 def validate_operation_policy(value: dict | None) -> dict:
     """Normalize an operation policy. Falls back to DEFAULT_OPERATION_POLICY
     for missing keys. Raises ValueError on unknown enum values."""

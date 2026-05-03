@@ -23,13 +23,16 @@ ClaudeRun runtime.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import mimetypes
 import queue
 import sys
 import threading
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 from typing import Any
 
 from .claude_runtime import ClaudeRun
@@ -589,6 +592,99 @@ class BridgeAgentLoop:
             return "claim", None, cleaned
         return kind, None, body
 
+    # T1.2 — out-of-band artifact descriptor for ``speech.evidence``.
+    # The agent prepends ``ARTIFACT: path=relative/file [kind=code] [label=...]``
+    # as the FIRST LINE of the reply body (after the prefix). The
+    # parser pulls it off, stats the file under ``agent_cwd``, and
+    # forwards a structured ``payload.artifact`` to the bridge. The
+    # bridge auto-creates an OperationArtifact row tied to the event.
+    #
+    # Why a header line and not an extension to ``[KIND→…]``? The
+    # prefix parser is now under cross-impl conformance (Python ↔ TS)
+    # — every grammar widening has to be mirrored. Evidence-with-
+    # artifact is a Python-side convenience: the WIRE shape
+    # (``payload.artifact = {kind, uri, sha256, ...}``) is what the
+    # protocol cares about. Other clients are free to compute the
+    # artifact dict however they want.
+
+    _ARTIFACT_HEADER_PREFIX = "ARTIFACT:"
+
+    def _maybe_extract_artifact(
+        self, body: str,
+    ) -> tuple[dict[str, Any] | None, str]:
+        """If the first line of ``body`` is an ``ARTIFACT: path=...``
+        header, stat the referenced file under ``agent_cwd`` and
+        return ``({kind, uri, sha256, mime, size_bytes, label?}, rest_body)``.
+
+        Otherwise ``(None, body)``. Failures (path missing,
+        unreadable) are logged and treated as no-op — the speech
+        event still goes through with the original body.
+        """
+        if not body.startswith(self._ARTIFACT_HEADER_PREFIX):
+            return None, body
+        first_line, sep, rest = body.partition("\n")
+        spec_str = first_line[len(self._ARTIFACT_HEADER_PREFIX):].strip()
+        # Tokens: ``key=value``. Values are bare (no quoting) so paths
+        # MUST NOT contain spaces. Most agent cwd file paths satisfy
+        # this; if not, the agent should rename or wrap differently.
+        fields: dict[str, str] = {}
+        for tok in spec_str.split():
+            if "=" not in tok:
+                continue
+            k, _, v = tok.partition("=")
+            k = k.strip()
+            v = v.strip()
+            if k and v:
+                fields[k] = v
+        path = fields.get("path")
+        if not path:
+            self._log(
+                "agent loop: ARTIFACT header missing path= field; ignoring "
+                f"({spec_str!r})"
+            )
+            return None, rest.lstrip("\n") if sep else body
+        cwd = Path(self._cwd) if self._cwd else Path.cwd()
+        full = (cwd / path).resolve()
+        try:
+            if not full.is_file():
+                raise FileNotFoundError(f"not a file: {full}")
+        except (OSError, FileNotFoundError) as exc:
+            self._log(
+                f"agent loop: artifact path {full} unreadable ({exc}); "
+                "skipping attachment"
+            )
+            return None, rest.lstrip("\n") if sep else body
+        try:
+            h = hashlib.sha256()
+            size = 0
+            with full.open("rb") as f:
+                while True:
+                    chunk = f.read(8192)
+                    if not chunk:
+                        break
+                    h.update(chunk)
+                    size += len(chunk)
+            sha256 = h.hexdigest()
+        except OSError as exc:
+            self._log(
+                f"agent loop: artifact stat failed for {full} ({exc}); "
+                "skipping attachment"
+            )
+            return None, rest.lstrip("\n") if sep else body
+        mime, _ = mimetypes.guess_type(str(full))
+        if mime is None:
+            mime = "application/octet-stream"
+        artifact: dict[str, Any] = {
+            "kind": fields.get("kind", "file"),
+            "uri": full.as_uri(),
+            "sha256": sha256,
+            "mime": mime,
+            "size_bytes": size,
+        }
+        if "label" in fields:
+            artifact["label"] = fields["label"]
+        return artifact, rest.lstrip("\n") if sep else ""
+
     @staticmethod
     def _parse_invite_tail(tail: str) -> tuple[list[str], list[str]]:
         """Pull ``@handle`` tokens + optional ``kinds=foo,bar`` from a
@@ -626,11 +722,20 @@ class BridgeAgentLoop:
         # v3 phase 6: prefix carries kind AND optional next-responder
         # contract. See _parse_reply_prefix for the grammar.
         kind, expected_response, cleaned = self._parse_reply_prefix(cleaned)
+        # T1.2: evidence may carry an out-of-band ARTIFACT header on the
+        # first body line. Strip + stat it before posting so the bridge
+        # auto-creates an OperationArtifact row.
+        artifact_payload: dict[str, Any] | None = None
+        if kind == "evidence":
+            artifact_payload, cleaned = self._maybe_extract_artifact(cleaned)
         url = f"{self._bridge_url}/v2/operations/{op_id}/events"
+        payload: dict[str, Any] = {"text": cleaned}
+        if artifact_payload is not None:
+            payload["artifact"] = artifact_payload
         body: dict[str, Any] = {
             "actor_handle": self._actor_handle,
             "kind": f"speech.{kind}",
-            "payload": {"text": cleaned},
+            "payload": payload,
         }
         if expected_response is not None:
             body["expected_response"] = expected_response

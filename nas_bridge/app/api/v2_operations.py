@@ -468,6 +468,30 @@ def append_event(
                 status_code=500,
                 detail="speech accepted but v2 mirror missing -- check dual-write",
             )
+        # T1.2 — speech.evidence may carry a `payload.artifact` dict
+        # describing a deliverable file (path/sha256/size/mime). The
+        # bridge auto-creates an OperationArtifact row tied to this
+        # event so collab-task ops have a formal audit trail of what
+        # was produced. Other kinds ignore the field.
+        if speech_kind == "evidence":
+            from ..kernel.v2 import contract as _v2_contract
+            from ..kernel.v2 import OperationMirror as _OperationMirror
+            try:
+                artifact = _v2_contract.validate_artifact_payload(
+                    payload.payload.get("artifact")
+                )
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"invalid payload.artifact: {exc}",
+                )
+            if artifact is not None:
+                _OperationMirror().attach_artifact(
+                    db,
+                    v2_operation_id=operation_id,
+                    v2_event_id=v2_event_id,
+                    artifact=artifact,
+                )
         op = repo.get_operation(db, operation_id)
         ev = db.get(OperationEventV2Model, v2_event_id)
         return _serialize_event(ev, repo) | {"operation_id": op.id}
