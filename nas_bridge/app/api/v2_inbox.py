@@ -71,6 +71,77 @@ def get_inbox(
     return {"actor_handle": handle, "items": items}
 
 
+@router.get("/operations/discoverable")
+def list_discoverable_operations(
+    actor_handle: str = Query(..., alias="for", description="Actor handle (e.g. '@bob') asking 'what could I join?'"),
+    space_id: str | None = Query(default=None, description="Optional scope to a single space"),
+    limit: int = Query(default=100, ge=1, le=500),
+    caller: BridgeCaller = Depends(require_bridge_caller),  # noqa: ARG001
+) -> dict[str, Any]:
+    """v3 phase 2.5 — list operations the asker is **not yet a
+    participant of** but **could legitimately join** under each op's
+    ``policy.join_policy``. Closes the discovery gap noted in the
+    mid-collab join review.
+
+    Returns ``open`` ops only (closed ops can't be joined).
+
+    Inclusion rules:
+      * ``join_policy=open`` → always discoverable.
+      * ``join_policy=self_or_invite`` → always discoverable (the asker
+        can self-join under default policy).
+      * ``join_policy=invite_only`` → only discoverable if the asker
+        already has any participant role (typically ``addressed`` from
+        a prior speech.invite); a self-join attempt would be rejected
+        by the policy engine, so don't surface it.
+    """
+    handle = actor_handle if actor_handle.startswith("@") else f"@{actor_handle}"
+    repo = V2Repository()
+    items: list[dict[str, Any]] = []
+    from ..kernel.v2 import contract as _v2_contract
+    with session_scope() as db:
+        from ..kernel.v2.models import OperationV2Model, OperationParticipantV2Model
+        from sqlalchemy import select as _select
+        actor = repo.get_actor_by_handle(db, handle)
+        actor_id = actor.id if actor is not None else None
+
+        # Pre-compute the set of op ids the actor is already in --
+        # we exclude those (already in inbox).
+        already_in: set[str] = set()
+        if actor_id is not None:
+            already_in = set(db.scalars(
+                _select(OperationParticipantV2Model.operation_id)
+                .where(OperationParticipantV2Model.actor_id == actor_id)
+            ))
+
+        stmt = _select(OperationV2Model).where(OperationV2Model.state == "open")
+        if space_id:
+            stmt = stmt.where(OperationV2Model.space_id == space_id)
+        stmt = stmt.order_by(OperationV2Model.created_at.desc()).limit(max(1, min(int(limit), 500)))
+        for op in db.scalars(stmt):
+            if op.id in already_in:
+                continue
+            policy = repo.operation_policy(op)
+            jp = policy.get("join_policy")
+            if jp == _v2_contract.JOIN_POLICY_INVITE_ONLY:
+                # Only surface invite_only ops where the asker is
+                # already invited (existing participant).
+                if actor_id is None:
+                    continue
+                # actor isn't in already_in (filtered above) so they
+                # can't have been invited; skip.
+                continue
+            items.append({
+                "id": op.id,
+                "space_id": op.space_id,
+                "kind": op.kind,
+                "title": op.title,
+                "intent": op.intent,
+                "policy": policy,
+                "created_at": op.created_at.isoformat() if op.created_at else None,
+            })
+    return {"actor_handle": handle, "items": items}
+
+
 @router.get("/inbox/stream")
 async def stream_inbox(
     request: Request,

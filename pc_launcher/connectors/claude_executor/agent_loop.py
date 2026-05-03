@@ -248,6 +248,15 @@ class BridgeAgentLoop:
         op_id = ev.get("operation_id")
         if not op_id:
             return
+        # v3 phase 2.5: skip closed ops up-front. SSE may deliver an
+        # event from a closing op (race) or a stale queue entry from
+        # before close; running claude on those wastes a turn whose
+        # POST will be rejected by the bridge anyway. Best-effort
+        # check — if the op probe fails we proceed (the POST gate is
+        # the authoritative refusal).
+        if self._op_is_closed(op_id):
+            self._log(f"agent loop: skipping op={op_id} (closed)")
+            return
         prompt = self._build_prompt(ev)
         if not prompt.strip():
             return
@@ -262,6 +271,26 @@ class BridgeAgentLoop:
         trigger_event_id = ev.get("event_id")
         if self._post_claim(op_id, result_text, in_reply_to=trigger_event_id):
             self._responses_per_op[op_id] = self._responses_per_op.get(op_id, 0) + 1
+
+    def _op_is_closed(self, op_id: str) -> bool:
+        """Best-effort op state probe. Returns True only when we have a
+        confident answer that the op is closed; transient errors return
+        False so we don't drop legitimate work on a flaky network."""
+        url = f"{self._bridge_url}/v2/operations/{urllib.request.quote(op_id)}"
+        req = urllib.request.Request(
+            url, method="GET",
+            headers={"Authorization": f"Bearer {self._token}"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=5.0) as resp:
+                body = resp.read()
+        except Exception:  # noqa: BLE001
+            return False
+        try:
+            data = json.loads(body.decode("utf-8"))
+        except (ValueError, TypeError):
+            return False
+        return data.get("state") == "closed"
 
     def _fetch_op_history(self, op_id: str) -> list[dict[str, Any]]:
         """Pull the last `history_limit` events from the op so the prompt
