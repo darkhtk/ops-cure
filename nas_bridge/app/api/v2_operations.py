@@ -20,11 +20,46 @@ from ..auth import (
     BridgeCaller, TOKEN_SCOPE_SPEAK,
     require_bridge_caller, require_scope, verify_actor_handle_claim,
 )
+from ..config import get_settings
 from ..db import session_scope
 from ..kernel.v2 import V2Repository
 from ..kernel.v2.models import OperationEventV2Model
+from ..security import walk_json_depth
 
 router = APIRouter(prefix="/v2/operations", tags=["v2-operations", "protocol-v3-public"])
+
+
+def _enforce_payload_depth(*values: object) -> None:
+    """Reject (or log) any free-form dict whose nesting exceeds the
+    configured cap. Called at each POST entry point for fields that
+    pydantic schema can't bound (``payload``, ``metadata``,
+    ``policy``, ``expected_response``, ``success_criteria``).
+
+    Raises ``HTTPException(400)`` with stable code ``payload.depth_exceeded``;
+    in ``BRIDGE_BOUNDS_LOG_ONLY=1`` mode logs and passes through.
+    """
+    settings = get_settings()
+    cap = settings.max_json_depth
+    log_only = settings.bounds_log_only
+    for v in values:
+        if v is None:
+            continue
+        try:
+            walk_json_depth(v, cap)
+        except ValueError as exc:
+            if log_only:
+                import logging
+                logging.getLogger("opscure.security.bounds").warning(
+                    "payload.depth_exceeded log_only=1 detail=%s", exc,
+                )
+                continue
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "payload.depth_exceeded",
+                    "detail": str(exc),
+                },
+            )
 
 
 def _normalize_handle(value: str | None) -> str | None:
@@ -322,6 +357,7 @@ def open_operation(
         x_actor_token=x_actor_token,
     )
     require_scope(request, x_actor_token=x_actor_token, needed=TOKEN_SCOPE_SPEAK)
+    _enforce_payload_depth(payload.success_criteria, payload.policy)
     """Open a new operation. Delegates to ChatConversationService.open_conversation
     in the chat-only era; the response surfaces the v2 operation id
     directly so callers never need the v1 conversation id."""
@@ -430,6 +466,7 @@ def append_event(
         request, claimed_handle=payload.actor_handle, x_actor_token=x_actor_token,
     )
     require_scope(request, x_actor_token=x_actor_token, needed=TOKEN_SCOPE_SPEAK)
+    _enforce_payload_depth(payload.payload, payload.expected_response)
     if not payload.kind.startswith("speech."):
         raise HTTPException(
             status_code=400,
@@ -772,6 +809,7 @@ def submit_evidence(
     request: Request,
     caller: BridgeCaller = Depends(require_bridge_caller),  # noqa: ARG001
 ) -> dict[str, Any]:
+    _enforce_payload_depth(payload.payload)
     v1_id = _operation_to_v1_conversation_id(operation_id)
     from ..behaviors.chat.conversation_schemas import ChatTaskEvidenceRequest
     coord_response = _coord_call(

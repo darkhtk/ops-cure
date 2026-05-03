@@ -12,6 +12,13 @@ from uuid import uuid4
 from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session, selectinload
 
+from .security import (
+    bounded_findall,
+    bounded_fullmatch,
+    bounded_match,
+    bounded_search,
+    bounded_sub,
+)
 from .behaviors.workflow.models import (
     HandoffModel,
     JobModel,
@@ -1557,7 +1564,7 @@ class SessionService:
     ) -> RoutingDecision:
         agent_list = list(session_row.agents)
         body = content.strip()
-        match = AGENT_PREFIX_RE.match(content)
+        match = bounded_match(AGENT_PREFIX_RE, content)
         if match:
             requested_name = match.group("agent")
             body = match.group("body").strip()
@@ -1716,7 +1723,7 @@ class SessionService:
     ) -> str | None:
         if not content:
             return None
-        match = AGENT_THREAD_HEADER_RE.match(content.strip())
+        match = bounded_match(AGENT_THREAD_HEADER_RE, content.strip())
         if not match:
             return None
         requested_name = match.group("agent")
@@ -2133,7 +2140,7 @@ class SessionService:
             return "done"
         if any(line.startswith("HUMAN:") for line in lines):
             return "human"
-        match = OPS_TYPE_RE.search(content)
+        match = bounded_search(OPS_TYPE_RE, content)
         if match is not None:
             return match.group("type").strip().lower()
         if any(line.startswith("OPS:") for line in lines):
@@ -2142,7 +2149,7 @@ class SessionService:
 
     @staticmethod
     def _extract_transcript_task_id(content: str) -> str | None:
-        match = TASK_CARD_ID_RE.search(content)
+        match = bounded_search(TASK_CARD_ID_RE, content)
         if match is None:
             return None
         return match.group(0).strip().upper()
@@ -2441,8 +2448,8 @@ class SessionService:
             )
             return ""
 
-        visible_output = HANDOFF_RE.sub(replace_handoff, output_text)
-        visible_output = DISCUSS_RE.sub(replace_discuss, visible_output).strip()
+        visible_output = bounded_sub(HANDOFF_RE, replace_handoff, output_text)
+        visible_output = bounded_sub(DISCUSS_RE, replace_discuss, visible_output).strip()
         return visible_output, handoffs, handoff_rejections, discussions, discussion_rejections
 
     def _queue_handoffs(
@@ -2572,7 +2579,7 @@ class SessionService:
         normalized_body = self._normalize_task_payload_text(handoff.body)
         task_key = (
             handoff.task_id.strip().upper()
-            if handoff.task_id and CANONICAL_TASK_KEY_RE.fullmatch(handoff.task_id.strip().upper())
+            if handoff.task_id and bounded_fullmatch(CANONICAL_TASK_KEY_RE, handoff.task_id.strip().upper())
             else self._allocate_task_key(db, session_id=session_row.id)
         )
         summary_line = self._extract_prefixed_line(normalized_body, "Target summary:")
@@ -2681,7 +2688,7 @@ class SessionService:
         values = [
             int(match.group("number"))
             for task_key in existing_keys
-            if task_key and (match := CANONICAL_TASK_KEY_RE.fullmatch(task_key.strip().upper())) is not None
+            if task_key and (match := bounded_fullmatch(CANONICAL_TASK_KEY_RE, task_key.strip().upper())) is not None
         ]
         next_index = (max(values) + 1) if values else 1
         return f"T-{next_index:03d}"
@@ -3151,7 +3158,7 @@ class SessionService:
         summary_line = SessionService._extract_prefixed_line(normalized_body, "Target summary:")
         first_line = next((line.strip() for line in normalized_body.splitlines() if line.strip()), "Focused follow-up task")
         candidate = summary_line or first_line
-        candidate = TASK_CARD_ID_RE.sub("", candidate).strip(" -:\t")
+        candidate = bounded_sub(TASK_CARD_ID_RE, "", candidate).strip(" -:\t")
         if not candidate:
             candidate = "Focused follow-up task"
         return candidate[:96]
@@ -3953,11 +3960,11 @@ class SessionService:
         normalized = content.strip()
         if not normalized:
             return False
-        if TASK_CARD_ID_RE.search(normalized):
+        if bounded_search(TASK_CARD_ID_RE, normalized):
             return False
-        if FOLLOW_UP_MESSAGE_RE.match(normalized):
+        if bounded_match(FOLLOW_UP_MESSAGE_RE, normalized):
             return False
-        if len(" ".join(normalized.split())) <= 48 and FOLLOW_UP_HINT_RE.search(normalized):
+        if len(" ".join(normalized.split())) <= 48 and bounded_search(FOLLOW_UP_HINT_RE, normalized):
             return False
         return True
 
@@ -3965,7 +3972,7 @@ class SessionService:
         normalized = " ".join(body.split())
         if len(normalized) < MIN_HANDOFF_BODY_LENGTH:
             return "handoff is too short for a task-card-sized next step"
-        if TASK_CARD_ID_RE.search(normalized) is None:
+        if bounded_search(TASK_CARD_ID_RE, normalized) is None:
             return "handoff is missing a `T-###` task id"
         if "TASK_BOARD.md" not in body or "CURRENT_STATE.md" not in body:
             return "handoff must reference `TASK_BOARD.md` and `CURRENT_STATE.md`"
@@ -3975,7 +3982,7 @@ class SessionService:
 
     @staticmethod
     def _extract_task_id(text: str) -> str | None:
-        match = TASK_CARD_ID_RE.search(text or "")
+        match = bounded_search(TASK_CARD_ID_RE, text or "")
         if match is None:
             return None
         return match.group(0).upper()

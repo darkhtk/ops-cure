@@ -381,6 +381,34 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Opscure Bridge", lifespan=lifespan)
+
+# axis H (adversarial robustness): perimeter bounds. Order matters —
+# starlette `add_middleware` prepends, so the *last* call is the
+# outermost wrap. We want:
+#
+#   request:  BodySize -> Trace -> ProtocolVersion -> Timeout -> handler
+#   response: handler  -> Timeout -> ProtocolVersion -> Trace -> BodySize
+#
+# BodySize sits outermost so an oversized body is 413'd before any
+# downstream middleware allocates per-request state. Timeout sits
+# innermost so its `asyncio.wait_for` directly wraps the handler;
+# SSE / long-poll prefixes are exempt.
+from .security.bounds import (  # noqa: E402
+    BodySizeLimitMiddleware,
+    RequestTimeoutMiddleware,
+)
+_settings_for_bounds = get_settings()
+_TIMEOUT_EXEMPT_PREFIXES = (
+    "/v2/inbox/",          # SSE stream
+    "/v2/operations/.*/seen",  # heartbeat ping (path is per-op, prefix conservative)
+    "/health",
+)
+app.add_middleware(
+    RequestTimeoutMiddleware,
+    timeout_s=_settings_for_bounds.request_timeout_s,
+    exempt_prefixes=_TIMEOUT_EXEMPT_PREFIXES,
+    log_only=_settings_for_bounds.bounds_log_only,
+)
 # v3 phase 4: protocol version negotiation. Middleware echoes
 # X-Protocol-Version-Supported on every response and rejects unknown
 # versions before they reach a route. See app/protocol_version.py.
@@ -391,6 +419,11 @@ app.add_middleware(ProtocolVersionMiddleware)
 from .trace_context import TraceparentMiddleware, install_logging_filter  # noqa: E402
 app.add_middleware(TraceparentMiddleware)
 install_logging_filter()
+app.add_middleware(
+    BodySizeLimitMiddleware,
+    max_bytes=_settings_for_bounds.max_body_bytes,
+    log_only=_settings_for_bounds.bounds_log_only,
+)
 app.include_router(health.router)
 app.include_router(actors.router)
 app.include_router(behaviors.router)

@@ -1,6 +1,6 @@
 # Opscure Bridge Protocol v3 — Normative Specification
 
-**Status**: Normative (rev 10, 2026-05-04). This document is the
+**Status**: Normative (rev 11, 2026-05-04). This document is the
 authoritative description of Opscure Bridge protocol v3.x. Where it
 disagrees with code, the spec is wrong and a clarifying patch is
 welcome — but in the meantime, the **wire test fixtures**
@@ -987,6 +987,15 @@ branch on (status, code) pairs:
 | `policy.invite_needs_participant` | `chat.speech.invite` from non-participant |
 | `policy.close_needs_artifact` | `requires_artifact=true` and op has zero `OperationArtifact` rows |
 
+Perimeter-bound rejections from the adversarial-robustness layer
+(see §17 for caps and rationale):
+
+| Code | HTTP | When |
+|---|---|---|
+| `body.too_large` | 413 | Request body exceeds `BRIDGE_MAX_BODY_BYTES` (default 1 MiB) |
+| `request.timeout` | 504 | Handler runtime exceeded `BRIDGE_REQUEST_TIMEOUT_S` (default 30 s) |
+| `payload.depth_exceeded` | 400 | Free-form JSON nesting exceeds `BRIDGE_MAX_JSON_DEPTH` (default 32) |
+
 Authentication / scope rejections use the corresponding HTTP status:
 
 | Status | When |
@@ -1069,7 +1078,51 @@ python -m pytest tests/conformance/ -q
 See [tests/conformance/README.md](../tests/conformance/README.md)
 for details.
 
-## 17. Changelog
+## 17. Bounds & quotas
+
+The bridge **MUST** apply transport-level and parser-level bounds at
+its perimeter. Without them the kernel's typed-vocabulary guarantees
+do not survive contact with adversarial input. These bounds are a
+*single boundary* — clients see them as HTTP rejections; downstream
+kernel code can assume input is bounded.
+
+### 17.1 Caps
+
+| Setting | Default | Env var | Behavior |
+|---|---|---|---|
+| Max request body | 1 MiB | `BRIDGE_MAX_BODY_BYTES` | Bodies above the cap are rejected with 413 + code `body.too_large`. Content-Length is checked before reading; chunked uploads are counted as bytes accumulate. |
+| Max JSON nesting | 32 levels | `BRIDGE_MAX_JSON_DEPTH` | Free-form fields (`policy`, `metadata`, `payload`, `expected_response`, `success_criteria`) walked at POST entry; over-cap rejected with 400 + code `payload.depth_exceeded`. |
+| Max handler runtime | 30 s | `BRIDGE_REQUEST_TIMEOUT_S` | Handler wrapped in `asyncio.wait_for`; over-cap returns 504 + code `request.timeout`. SSE / heartbeat / health prefixes are exempt. |
+| Max regex input length | 8 KiB | (not configurable) | Adapter regexes (`@<handle>`, `T-NNN`, `OPS:`, handoff/discuss markers) reject inputs above the cap before invoking the regex. ReDoS defense; longer messages bypass adapter parsing without affecting kernel ingest. |
+
+### 17.2 Rollout mode
+
+`BRIDGE_BOUNDS_LOG_ONLY=1` makes body/timeout/depth violations log a
+warning and pass through instead of returning 4xx/5xx. Intended for
+staged rollout: operators ship the bounds in observe-only mode for ≥1
+sweep, then flip to enforcement once the cap-hit rate is acceptable.
+This mirrors the phase-10 "surface first, enforce next" sequence.
+
+### 17.3 SSE & long-poll exemption
+
+Streaming endpoints **MUST** be added to the timeout-exempt prefix
+list. Today: `/v2/inbox/`, `/v2/operations/.*/seen`, `/health`. New
+streaming endpoints introduced in future versions **MUST** update
+this list (otherwise the timeout middleware will close the connection
+after `BRIDGE_REQUEST_TIMEOUT_S`).
+
+### 17.4 What is NOT covered
+
+- Idempotency keys on mutating endpoints (axis J — separate concern)
+- Distributed rate limiting across instances (infra layer, not in spec)
+- GZIP decompression-bomb defense (no gzip middleware shipped today)
+- TLS / connection-level limits (operator deployment concern)
+
+These are intentionally out of scope for §17. A future revision may
+introduce idempotency-key as a normative requirement; until then,
+clients **SHOULD** treat retries as at-least-once.
+
+## 18. Changelog
 
 | Rev | Date | Notes |
 |---|---|---|
@@ -1082,6 +1135,7 @@ for details.
 | 7 | 2026-05-03 | T2.1: `policy.requires_artifact` field added to `OperationPolicy` (§6.1, §9.4). When `true`, close is rejected with HTTP 400 + code `policy.close_needs_artifact` until ≥1 `OperationArtifact` row is attached. Orthogonal to `close_policy` — both must be satisfied. Default `false` (back-compat). Pairs with T1.2 evidence-with-artifact for "no close without deliverable" semantics. Tests: `tests/test_v3_requires_artifact_policy.py`. |
 | 8 | 2026-05-04 | RPG smoke 결함 정리 — `evidence` 와 `object` 가 `defer` 옆에 universal carve-out 으로 추가됨 (§12.2). 좁은 `kinds=` whitelist 가 demand-patch 흐름을 묶던 deadlock 해소. Reference `agent_loop.py` 가 (a) HTTP 400 rejection 을 다음 prompt 에 노출 (D2) 하고 (b) 트리거의 `expected_response.kinds` 를 LLM 에게 미리 알려줌 (D8) — 자기교정 가능. `addressed_to_*` 가 v3.1 에선 structural-only / `expected_response` 가 권장 surface 임을 §6.4 에 명시. Tests: `tests/test_v3_reply_kind_carveouts.py`, `tests/test_v3_agent_loop_rejection_surface.py`. |
 | 9 | 2026-05-04 | Unity arcade smoke 후속 — 6 결함 일괄 fix. **D9** ratify intent split: quorum gate 가 close-intent ratify 만 카운트 (explicit `payload.intent="close"` / replies_to `move_close` / replies_to artifact-bearing event / op 이미 artifact 보유). **D10** agent_loop prompt 에 "[KIND] MUST be position-0" 강조. **D11** `payload.artifacts: list` 다중 artifact 첨부 (singular `payload.artifact` 보존). **D14** agent_loop 가 claude run "no result" 도 `_last_run_failure` 로 캡처 → 다음 prompt 에 ⚠️ 노출 (D2 패턴). **P9.5** Discord forwarder 가 `/operations` open + `/close` lifecycle marker 도 forwarding. **D3** `expected_response.from_actor_handles` 에 미존재 handle WARN log (옵션 `BRIDGE_REQUIRE_KNOWN_HANDLES=1` 시 reject 400). 페르소나 prompt 에 domain pre-flight checklist 추가 (D12). Tests: `test_v3_ratify_intent_split.py`, `test_v3_multi_artifact.py`, `test_v3_discord_lifecycle_forward.py`, `test_v3_handle_validation.py`. |
+| 11 | 2026-05-04 | Phase 11 — adversarial-robustness perimeter (axis H). New §17 "Bounds & quotas" defines transport-level (body 1 MiB, timeout 30 s) + parser-level (JSON depth 32, regex input 8 KiB) caps. New error codes `body.too_large` (413), `request.timeout` (504), `payload.depth_exceeded` (400) added to §13. `BRIDGE_BOUNDS_LOG_ONLY=1` enables observe-only rollout. SSE/heartbeat/health prefixes exempt from handler timeout. Tests: `test_security_bounds.py`, `test_security_regex_safety.py`, `tests/conformance/test_adversarial.py`. |
 | 10 | 2026-05-04 | Phase 10 — silent failures 전부 surface. **P10.1+P10.5** agent_loop pre-flight 가 본문 가운데 `[KIND]` 발견 시 post 거부 + self-rejection 캡처 (D10 깊이 패치). **P10.2** ARTIFACT 헤더가 path stat 실패 시 `_last_artifact_failure` 캡처 → 다음 prompt ⚠️. **P10.3** 5xx 도 `_last_post_rejection` 에 캡처 (transient flag) — 4xx 와 별도 가이드. **P10.4** `policy.requires_artifact` gate 가 success resolution (`completed`/`accepted`/`answered` 등) 만 적용 — abandoned/cancelled/failed/withdrawn/superseded/dropped 는 bypass. **P10.6** 같은 op 같은 kind 연속 4xx 시 prompt escalate (🚨 "Stop trying [<kind>]"). **P10.7** TS reference (`agent.ts`) 가 plural artifacts + intent 패스스루. **P10.10** task-bound close 메시지에 `bind_remote_task=false` 우회 hint. Tests: `test_v3_phase10_silent_failure_surfacing.py`, `test_v3_abandoned_bypass_artifact.py`. 회귀: `test_kernel_v3_*` / conformance / multiturn helper 들에 close-intent stamping 추가. |
 
 ## Appendix A — Error code catalog (machine-readable)
@@ -1103,6 +1157,18 @@ for details.
   "policy.close_needs_quorum": {
     "http_status": 400,
     "summary": "close_policy=quorum requires min_ratifiers distinct ratifiers"
+  },
+  "body.too_large": {
+    "http_status": 413,
+    "summary": "request body exceeds the configured maximum (BRIDGE_MAX_BODY_BYTES)"
+  },
+  "request.timeout": {
+    "http_status": 504,
+    "summary": "handler runtime exceeded the configured ceiling (BRIDGE_REQUEST_TIMEOUT_S)"
+  },
+  "payload.depth_exceeded": {
+    "http_status": 400,
+    "summary": "free-form JSON nesting exceeds BRIDGE_MAX_JSON_DEPTH"
   },
   "policy.close_needs_participant": {
     "http_status": 400,

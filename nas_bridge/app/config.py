@@ -48,6 +48,31 @@ class Settings(BaseSettings):
         default=True,
         alias="BRIDGE_CHAT_V1_DEPRECATION_WARNING",
     )
+    # axis H (adversarial robustness): perimeter bounds.
+    # Default 1 MiB body cap covers all current ops surface
+    # (artifact uploads go through a separate stream path that
+    # may need a higher cap). Default depth 32 covers any
+    # legitimate metadata / payload._meta nesting we have today.
+    # Default 30 s timeout is the slowest live conformance test;
+    # SSE prefixes are exempt at the middleware layer.
+    # Log-only mode lets staged rollout observe hit rate before
+    # turning on enforcement (phase-10 surface-first pattern).
+    max_body_bytes: int = Field(
+        default=1_048_576,
+        alias="BRIDGE_MAX_BODY_BYTES",
+    )
+    max_json_depth: int = Field(
+        default=32,
+        alias="BRIDGE_MAX_JSON_DEPTH",
+    )
+    request_timeout_s: float = Field(
+        default=30.0,
+        alias="BRIDGE_REQUEST_TIMEOUT_S",
+    )
+    bounds_log_only: bool = Field(
+        default=False,
+        alias="BRIDGE_BOUNDS_LOG_ONLY",
+    )
 
     model_config = SettingsConfigDict(
         env_file=".env",
