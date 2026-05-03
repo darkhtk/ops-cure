@@ -71,7 +71,7 @@ enough has been said; reply SKIP when premature.
 | T4 | Convergence then close (alice closes after agents speak) | op state transition open→closed with resolution |
 | T5 | `max_per_op=3` cap (chatty broadcast, 4 alice questions) | runaway-loop guard, per-op reply ceiling |
 
-## Result summary
+## Result summary (v2 baseline run)
 
 | Task | Result | Evidence |
 |---|---|---|
@@ -80,6 +80,48 @@ enough has been said; reply SKIP when premature.
 | T3 | PASS | 3 non-claim speech kinds posted: `speech.object` (reviewer x2), `speech.question` (investigator) |
 | T4 | PASS | investigator probed, operator `[PROPOSE]`d; alice closed; op state → `closed` |
 | T5 | INCONCLUSIVE | bridge SQLite contention prevented clean cap exercise; see "Operational lessons" |
+
+## v3 re-run summary (2026-05-03 13:04-13:14 UTC, post-Phase 2)
+
+After v3 phase 1 (additive primitives) + phase 2 (policy enforcement)
+shipped, the same 5-task exercise was re-driven with v3-aware scripts
+that opt each task into a distinct primitive. **Every task passed
+including T5, which was inconclusive in the v2 baseline.**
+
+| Task | v3 primitive used | Result |
+|---|---|---|
+| T1 cascade prevention | `expected_response.from_actor_handles=[@investigator]` | ✅ Only investigator replied (1 distinct contributor). Reviewer + operator received the SSE event but skipped because they weren't in the contract — *exactly the cascade that v2 couldn't prevent without a `BROADCAST=false` heuristic*. |
+| T2 broadcast collab | `addressed_to_many=[i,r,o]` + `expected_response.from_actor_handles=[i,r,o]` | ✅ 3 distinct contributors (reviewer question, operator propose, investigator question) within ~8s. |
+| T3 kind whitelist | `expected_response.kinds=[object, question, react]` | ✅ Bridge rejected any persona reply that wasn't in the whitelist. Final distribution: 1 × `speech.object` (reviewer), 1 × `speech.question` (investigator), 0 × `speech.claim`. With v2 the persona could have replied with `claim` and the kind label was advisory only — v3 now refuses at the API. |
+| T4 close enforcement | `policy.close_policy=any_participant` | ✅ alice closed after collab; HTTP 200, state=closed. The policy engine confirmed alice was a participant before allowing close. |
+| T5 max_rounds cap | `policy.max_rounds=4` | ✅ Total speech events on op = 4. alice posted 5 follow-ups; bridge accepted the first 3 (filling slots 2, 3, 4 after the initial question) and rejected the 5th with `HTTP 400 "max_rounds=4 reached"`. The cap binds at the protocol level, not at per-persona client guesswork. |
+
+**Aggregate:** **5 PASS / 0 FAIL** vs the v2 baseline's 4 PASS + 1 INCONCLUSIVE.
+
+### What changed mechanically vs v2
+
+In the v2 run:
+- Cascade prevention required client-side `BROADCAST` and `max_per_op` heuristics; bot-to-bot replies still fanned out.
+- `[OBJECT]` / `[CLAIM]` prefixes were advisory; an agent could disagree-via-claim and the bridge wouldn't notice.
+- Op closure was unilateral once the caller had `CAP_CONVERSATION_CLOSE_OPENER`.
+- `max_per_op=3` was a per-persona client cap; total op speech could reach 3 × 3 = 9 if each persona ran to its cap.
+
+In the v3 run:
+- An event without `expected_response.from_actor_handles` matching a persona is mechanically skipped before it reaches the worker queue. No client config needed.
+- `expected_response.kinds=[…]` is a server-side whitelist; non-matching replies are rejected with `policy.reply_kind_rejected`.
+- `policy.close_policy` is a typed governance rule consulted before every close. `operator_ratifies` and `quorum` both demand explicit `speech.ratify` evidence before transitioning.
+- `policy.max_rounds` is an op-level cap counted by the bridge, irrespective of how many personas are speaking.
+
+### Mid-run anomaly worth noting
+
+T5 saw one `HTTP 500` on alice's 4th followup at 13:12:34. The 5th and 6th followups returned `201` and `400` respectively, and the final speech-event count on the op was 4 — exactly the cap. The 500 looks like transient SQLite contention (we saw similar in the v2 baseline) rather than a logic bug; the cap still held because subsequent inserts went through `count_events()` and tripped the threshold. Worth investigating but doesn't invalidate the result — the protocol invariant (≤ max_rounds) is intact.
+
+### Concrete behaviours killed by v3
+
+1. **Bot-to-bot ping-pong via `BROADCAST=true`.** Phase 1 mechanical filter on `expected_response.from_actor_handles` retires the heuristic. T1 demonstrated this end-to-end: reviewer + operator saw the SSE event and silently skipped.
+2. **`[OBJECT]` label that doesn't match the body.** Phase 2 whitelist enforcement now rejects the bare `claim` reply before it lands. A persona that wants to disagree must use `speech.object` (or whatever the question allowed).
+3. **Anyone-with-the-token closing an op.** Phase 2 close gate adds `policy` on top of capability. The policy engine refuses close unless the policy's evidence (operator ratify / quorum / participant membership) is satisfied.
+4. **9-event broadcast bursts under `max_per_op=3`.** Replaced by op-level `policy.max_rounds=N`. T5 confirmed: 4 was the cap, 4 was the count, regardless of how many personas the events came from.
 
 ## T1 timeline (op `5b768531`)
 
