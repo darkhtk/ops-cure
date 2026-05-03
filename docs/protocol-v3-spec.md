@@ -1,6 +1,6 @@
 # Opscure Bridge Protocol v3 — Normative Specification
 
-**Status**: Normative (rev 7, 2026-05-03). This document is the
+**Status**: Normative (rev 8, 2026-05-04). This document is the
 authoritative description of Opscure Bridge protocol v3.x. Where it
 disagrees with code, the spec is wrong and a clarifying patch is
 welcome — but in the meantime, the **wire test fixtures**
@@ -354,6 +354,13 @@ If `expected_response` is absent, clients fall back to
   guarantee `(operation_id, seq)` is unique.
 - `addressed_to_actor_ids`: actor IDs the speaker explicitly
   addressed. Becomes participants on the op (auto-add).
+  **Note (rev 8)**: this field is **structural-only** in v3.1 —
+  bridges still maintain it for v1/v2 routing compat, but
+  reference clients (`agent_loop.py`, `agent.ts`) populate
+  responsibility exclusively via `expected_response.from_actor_handles`.
+  Speakers SHOULD set `expected_response` for new code. Future
+  rev MAY deprecate `addressed_to_*` once all clients have
+  migrated.
 - `private_to_actor_ids`: when non-null, only actors in this list
   (plus the speaker) **MUST** be able to read this event. SSE
   fan-out and history GET both enforce.
@@ -912,10 +919,30 @@ When the proposed event's `replies_to_event_id` points at an event
 whose `expected_response.kinds` is set:
 
 - If `kinds` contains `"*"`: any kind admissible.
-- Else if the proposed event's kind is `defer`: admissible
-  (universal carve-out).
+- Else if the proposed event's kind is one of the **universal
+  carve-outs** (`defer`, `evidence`, `object`): admissible
+  regardless of the whitelist (rev 8).
 - Else if the proposed event's kind is in `kinds`: admissible.
 - Else: reject with HTTP 400 and code `policy.reply_kind_rejected`.
+
+The carve-outs exist because the whitelist is meant to shape
+*voting* moments, not block legitimate moves a speaker should
+always be able to make:
+
+- `defer` — "I cannot answer in the requested form". Required for
+  the auto-defer sweeper (§12.3) to work under any whitelist.
+- `evidence` — deliverable carrier (§8.1.2). Forbidding evidence
+  would mean a [PROPOSE kinds=ratify,object] could not be answered
+  with a patched file when the patch is exactly what the propose
+  expects. Demand-patch loops would deadlock.
+- `object` — late-arriving counter-evidence is always valid. A
+  poorly narrowed whitelist must not silently convert a real
+  disagreement into rejection.
+
+Bridge implementations MUST honour these three carve-outs.
+Reference clients (`agent_loop.py`) surface the whitelist + any
+HTTP 400 rejection back to the agent's brain so it can self-correct
+within the contract.
 
 ### 12.3 Auto-defer sweeper
 
@@ -1053,6 +1080,7 @@ for details.
 | 5 | 2026-05-03 | Cross-impl parser conformance: 37-case JSON fixture at `tests/fixtures/reply_prefix_cases.json` exercised by Python (`tests/test_v3_parser_cross_impl_fixture.py`) and TypeScript (`clients/ts-agent-loop/src/parser-fixture.test.ts`). Fixed Python parser drift on prefix-length boundary — `]` at exact idx 200 was rejected by Python but accepted by TS. Both impls now agree on **≤ 200 chars (inclusive)**, documented in §8.1.1. |
 | 6 | 2026-05-03 | T1.2: artifact-on-evidence (§8.1.2). `speech.evidence` may carry a `payload.artifact` dict (`kind/uri/sha256/mime/size_bytes` + optional `label`/`metadata`). The bridge auto-creates an `OperationArtifact` row tied to the event. Other speech kinds ignore the field. Partial/malformed artifact is rejected with HTTP 400 (no silent drop). Reference Python parser (`agent_loop.py`) understands an `ARTIFACT: path=...` first-line header and stats the file before posting. Tests: `tests/test_v3_artifact_evidence.py` (HTTP path) + `tests/test_v3_agent_loop_artifact_extract.py` (parser). |
 | 7 | 2026-05-03 | T2.1: `policy.requires_artifact` field added to `OperationPolicy` (§6.1, §9.4). When `true`, close is rejected with HTTP 400 + code `policy.close_needs_artifact` until ≥1 `OperationArtifact` row is attached. Orthogonal to `close_policy` — both must be satisfied. Default `false` (back-compat). Pairs with T1.2 evidence-with-artifact for "no close without deliverable" semantics. Tests: `tests/test_v3_requires_artifact_policy.py`. |
+| 8 | 2026-05-04 | RPG smoke 결함 정리 — `evidence` 와 `object` 가 `defer` 옆에 universal carve-out 으로 추가됨 (§12.2). 좁은 `kinds=` whitelist 가 demand-patch 흐름을 묶던 deadlock 해소. Reference `agent_loop.py` 가 (a) HTTP 400 rejection 을 다음 prompt 에 노출 (D2) 하고 (b) 트리거의 `expected_response.kinds` 를 LLM 에게 미리 알려줌 (D8) — 자기교정 가능. `addressed_to_*` 가 v3.1 에선 structural-only / `expected_response` 가 권장 surface 임을 §6.4 에 명시. Tests: `tests/test_v3_reply_kind_carveouts.py`, `tests/test_v3_agent_loop_rejection_surface.py`. |
 
 ## Appendix A — Error code catalog (machine-readable)
 

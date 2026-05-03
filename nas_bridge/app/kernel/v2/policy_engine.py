@@ -102,12 +102,31 @@ class PolicyEngine:
 
         # Reply-kind whitelist enforcement: when the trigger event
         # declared expected_response.kinds, the reply must satisfy it.
-        # ``defer`` is universally admissible -- it is the "I cannot
-        # answer in the requested form" signal, including the auto-
-        # defer the policy_sweeper emits when by_round_seq elapses.
-        # Without this carve-out, a tight ``kinds=[answer]`` whitelist
-        # would prevent the sweeper from doing its job.
-        if speech_kind != "defer" and replies_to_event_id:
+        #
+        # Universal carve-outs (admissible regardless of whitelist):
+        #
+        #   - ``defer``    → "I cannot answer in the requested form".
+        #                    Required for the auto-defer sweeper. Without
+        #                    this, ``kinds=[answer]`` would block the
+        #                    sweeper from emitting its by_round_seq fallback.
+        #   - ``evidence`` → deliverable carrier (T1.2). A trigger
+        #                    declaring ``kinds=[ratify,object]`` is asking
+        #                    for a vote, NOT denying that the responder
+        #                    can attach a patched file. Without this
+        #                    carve-out, demand-patch loops deadlock:
+        #                    [OBJECT kinds=agree,object] from a reviewer
+        #                    blocks operator's [EVIDENCE re-post]. Spec
+        #                    rev 8 / D1.
+        #   - ``object``   → late-arriving counter-evidence is always
+        #                    valid. Forbidding ``object`` would let a
+        #                    poorly-narrowed whitelist convert a real
+        #                    disagreement into silence. D5.
+        #
+        # Other kinds (claim, propose, ratify, agree, react, summarize,
+        # block, invite, join, move_close, question, answer) remain
+        # gated by the trigger's whitelist when set.
+        _UNIVERSAL_KINDS = {"defer", "evidence", "object"}
+        if speech_kind not in _UNIVERSAL_KINDS and replies_to_event_id:
             trigger = db.get(OperationEventV2Model, replies_to_event_id)
             if trigger is not None:
                 ex = self._repo.event_expected_response(trigger)

@@ -44,6 +44,28 @@ Use TERMINAL when:
   - the conversation is complete
 When in doubt, prefer TERMINAL. Silence > false invitation.
 
+Choosing `kinds=` (the reply-kind whitelist):
+- DEFAULT: omit `kinds=` entirely. The named actors can reply
+  with whatever shape fits.
+- NARROW: only when you're explicitly forcing a vote. Examples:
+    [PROPOSE→@reviewer kinds=ratify,object]
+    [MOVE_CLOSE→@operator kinds=ratify,object]
+- DO NOT narrow on demand-patch. If you [OBJECT] and want the
+  operator to FIX something, OMIT kinds — they need to be able
+  to reply with [EVIDENCE] (the patched file) or [CLAIM] (a
+  status update). Narrow whitelists like {agree,object} on a
+  patch demand will block the fix and stall the op.
+- Universal carve-outs: [OBJECT], [EVIDENCE], [DEFER] are ALWAYS
+  admissible regardless of the trigger's `kinds=` whitelist (per
+  spec §12.2). You can use these to break out of a too-narrow
+  trigger.
+
+Handles in @-mentions:
+- Use ONLY handles you've actually seen in the op transcript or
+  the persona roster (@operator, @designer, @reviewer,
+  @investigator, @alice). Inventing handles like @autoplayer1 /
+  @auditor wastes obligation slots and confuses routing.
+
 Evidence with deliverables (T1.2):
 When you produce a file (code, log, screenshot, doc) and post
 [EVIDENCE], add a SECOND LINE starting with `ARTIFACT:` so the

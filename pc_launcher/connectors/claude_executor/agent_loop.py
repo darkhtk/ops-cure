@@ -108,6 +108,12 @@ class BridgeAgentLoop:
         # Traceparent of the SSE session — captured from the response
         # headers when present so subsequent POSTs inherit the trace.
         self._sse_traceparent: str | None = None
+        # D2 — record the most recent post rejection per op so the
+        # next prompt can surface ``Your last reply was rejected:
+        # <detail>. Adjust your kind/strategy.``. Without this the
+        # LLM has no idea its prior speech act was dropped 400.
+        # Mapping: op_id → {"detail": str, "rejected_kind": str}.
+        self._last_post_rejection: dict[str, dict[str, str]] = {}
 
     # ---- lifecycle ----------------------------------------------------
 
@@ -428,6 +434,25 @@ class BridgeAgentLoop:
             f"You are {self._actor_handle} in operation {op_id}. "
             f"Your reply will be posted as a chat.speech.claim event."
         )
+        # D2 — surface any HTTP 400 rejection from this actor's
+        # most recent post on the same op. Without this the LLM
+        # has no idea its prior speech act was dropped and tends
+        # to repeat the same shape, deadlocking the conversation.
+        rejected = self._last_post_rejection.get(op_id)
+        if rejected:
+            lines.append("")
+            lines.append(
+                "⚠️ Your previous reply on this op was REJECTED by "
+                f"the bridge (HTTP {rejected.get('http_status','400')}, "
+                f"kind={rejected.get('rejected_kind','?')}):"
+            )
+            lines.append(f"  {rejected.get('detail','')}")
+            lines.append(
+                "Adjust your reply to satisfy that constraint. Common "
+                "moves: pick a kind on the whitelist, switch to "
+                "[OBJECT] / [DEFER] / [EVIDENCE] (universal carve-outs), "
+                "or rephrase if the bridge cited a payload-shape error."
+            )
         if history:
             lines.append("")
             lines.append("Recent op transcript (oldest first):")
@@ -441,6 +466,19 @@ class BridgeAgentLoop:
         lines.append("")
         lines.append(text)
         lines.append("")
+        # D8 — when the trigger event narrows the reply kind, surface
+        # that to the LLM so it can pick a satisfying prefix instead
+        # of guessing and getting rejected.
+        trigger_ex = ev.get("expected_response") or {}
+        trigger_kinds = trigger_ex.get("kinds") or []
+        if trigger_kinds and "*" not in trigger_kinds:
+            lines.append(
+                f"⚙️ The trigger declared expected_response.kinds="
+                f"{trigger_kinds}. Your reply MUST use one of these "
+                f"kinds OR a universal carve-out (object / evidence / "
+                f"defer). Other kinds will be rejected with HTTP 400."
+            )
+            lines.append("")
         lines.append(
             "Respond in 1-3 sentences. The prefix controls the speech "
             "kind AND the next-responder contract:\n"
@@ -772,6 +810,10 @@ class BridgeAgentLoop:
                 f"agent loop: posted speech.{kind} to op={op_id} "
                 f"len={len(cleaned)}{invite_summary}"
             )
+            # D2 — successful post clears any prior rejection so the
+            # next prompt doesn't carry stale "your last reply was
+            # rejected" warnings into a fresh conversation turn.
+            self._last_post_rejection.pop(op_id, None)
             return True
         except urllib.error.HTTPError as e:
             try:
@@ -779,6 +821,29 @@ class BridgeAgentLoop:
             except Exception:  # noqa: BLE001
                 detail = ""
             self._log(f"agent loop: claim post failed op={op_id} HTTP {e.code}: {detail}")
+            # D2 — capture the rejection so the next prompt can show
+            # the LLM what went wrong. Without this the agent silently
+            # loses messages and the conversation deadlocks (RPG smoke
+            # observation 2026-05-04). 4xx is a contract violation
+            # the LLM can correct (kind whitelist, payload shape, etc.);
+            # 5xx is bridge-side, not directly actionable, so we still
+            # capture but the prompt phrasing makes that clear.
+            if 400 <= e.code < 500:
+                # Strip the typical FastAPI envelope ``{"detail": "..."}``
+                # to a flat string so the prompt isn't cluttered.
+                detail_text = detail
+                try:
+                    parsed = json.loads(detail or "")
+                    if isinstance(parsed, dict) and "detail" in parsed:
+                        d = parsed["detail"]
+                        detail_text = d if isinstance(d, str) else json.dumps(d)
+                except Exception:  # noqa: BLE001
+                    pass
+                self._last_post_rejection[op_id] = {
+                    "detail": detail_text[:500],
+                    "rejected_kind": kind,
+                    "http_status": str(e.code),
+                }
             return False
         except urllib.error.URLError as e:
             self._log(f"agent loop: claim post network error op={op_id}: {e.reason}")
