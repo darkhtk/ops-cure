@@ -118,7 +118,8 @@ Compatibility: all fields optional. Old clients ignore them; old data
 gets `DEFAULT_OPERATION_POLICY` materialized at open time.
 
 Test status: **478/479 pass** (1 skipped = live LLM). Phase 1 introduces
-zero regressions vs the prior 471/472 baseline.
+zero regressions vs the prior 471/472 baseline. (The full Phase 1+2+2.5
+suite is **512/513 pass** — see status block at the bottom.)
 
 ## Phase 2 — opt-in enforcement (DONE for 3/6, deferred for 3/6)
 
@@ -154,29 +155,50 @@ POST /v2/operations/{id}/close → 409 Conflict
              event from a participant with role='operator'" }
 ```
 
-### Deferred to phase 2.5
+## Phase 2.5 — multi-turn safety net (DONE for 4/5)
 
-These needed more architecture than this round could land cleanly:
+After the persona live exercise revealed that v3 worked on single-round
+scenarios but had untested holes for longer ops, this round closed the
+gaps that prevent multi-turn collaboration from drifting silently.
 
-1. **`by_round_seq` auto-DEFER.** Requires a periodic sweep to
-   examine open events with `expected_response.by_round_seq` set,
-   compare against current op `MAX(seq)`, and (when expired) emit a
-   synthetic `speech.defer` from the addressee. Recovery loop has the
-   wrong cadence; need either a dedicated `policy_sweeper` or to fold
-   this into the existing idle sweep.
+### Implemented
 
-2. **`context_compaction=rolling_summary`.** Generating summaries
+| Component | Closes |
+|---|---|
+| `kernel/v2/policy_sweeper.py` | **`by_round_seq` auto-DEFER**. Background loop (default 30s) scans open ops, finds events whose `expected_response.by_round_seq` has elapsed, emits `speech.defer` on the addressee's behalf. Idempotent (won't double-fire on the same trigger). Wired into bridge lifespan. |
+| `kernel/v2/policy_engine.py` | **`defer` is universally admissible.** A targeted `kinds=[answer]` whitelist no longer blocks the sweeper from doing its job — defer is the canonical "I cannot answer in the requested form" signal. |
+| Two new speech kinds: `move_close`, `ratify` | Phase 2 governance acts. Drift detector aligned across `SPEECH_KINDS` ↔ pydantic Literal ↔ `agent_loop._ALLOWED_SPEECH_KINDS`. |
+| Two new speech kinds: `invite`, `join` | **Mid-collab membership protocol**. `speech.invite` from existing participant addresses an outside handle (auto-adds them as `role=addressed`). `speech.join` is self-declaration, gated by `policy.join_policy`. PolicyEngine's `check_invite_admissible` blocks bootstrap-self-invites; `check_join_admissible` enforces `invite_only` ⇒ existing-participant requirement. |
+| `db.py` | **`PRAGMA journal_mode=WAL`, `synchronous=NORMAL`, `busy_timeout=5000`, `foreign_keys=ON`.** Fixes the SQLite contention HTTP 500 we saw mid-T5 in the persona run, AND closes a long-tolerated dangling-FK quirk in `replies_to_speech_id`. |
+| `agent_loop.py` | **Closed-op skip.** Before each handle, agent probes `GET /v2/operations/{id}` and skips when `state=closed`. Prevents wasted claude runs on stale events from already-closed ops. |
+| `api/v2_inbox.py` | **`GET /v2/operations/discoverable?for=@actor`.** Lists open ops the asker is **not yet a participant of** but **could legitimately join** under each op's `join_policy`. Closes the discovery gap surfaced in the mid-collab join review. |
+| `tests/test_kernel_v3_adversarial.py` | 7 negative-path tests pinning down that gates *reject* misbehavior, not just allow conformant clients. |
+| `tests/test_kernel_v3_multiturn_convergence.py` | 2 tests of 10-round disagreement→propose→ratify→close convergence. |
+| `tests/test_kernel_v3_policy_sweeper.py` | 4 sweeper behavior tests (emit / idempotent / skip-on-reply / pre-window noop). |
+| `tests/test_kernel_v3_join_invite.py` | 5 membership tests covering all three join policies. |
+| `tests/test_kernel_v3_late_join_privacy.py` | 2 tests confirming a late-joiner's history fetch redacts whisper events from before they joined. |
+| `tests/test_kernel_v3_discovery.py` | 5 endpoint tests (open/self_or_invite/invite_only filtering, exclude already-in / closed, space_id filter). |
+
+### Deferred to a later round
+
+1. **`context_compaction=rolling_summary`.** Generating summaries
    needs an LLM caller. The kernel deliberately doesn't carry an
    API key (pivot earlier this work). Right shape: a designated
    external agent (e.g. `@summarizer`) listens for compaction
-   triggers and posts `speech.summarize` artifacts.
+   triggers and posts `speech.summarize` artifacts. Out of scope
+   for protocol primitives — it's an *agent application* on top.
 
-3. **`join_policy` enforcement.** Phase 1 stores the policy; phase 2
-   doesn't enforce it because there is no `JOIN` speech act yet. The
-   current "addressed_to auto-adds participant" semantics is the
-   implicit join — fine for `self_or_invite`, ambiguous for
-   `invite_only`. Phase 2.5 will add an explicit `JOIN` /  `INVITE`
-   pair (likely as new event kinds, not speech kinds).
+2. **SSE catch-up replay.** A new joiner's SSE only delivers events
+   posted after subscribe. Catch-up is via REST `GET /events`. The
+   `agent_loop._fetch_op_history` already covers this for agent
+   clients; UI clients would benefit from a `?from_seq=N` SSE replay
+   mode but that's a UX nicety, not a correctness gap.
+
+3. **Agent presence / heartbeat.** When an agent crashes mid-run,
+   the trigger event sits unanswered until `by_round_seq` elapses
+   and the sweeper auto-defers. Faster signal would require an
+   agent-level heartbeat (`actor.last_seen_at` already exists in
+   the schema; just nothing updates it from the agent side).
 
 ## Phase 3 — deprecate the shims (TODO)
 
@@ -245,4 +267,57 @@ Phase 3 retires the shims after a deprecation window.
 
 4. **`by_round_seq` enforcement loop.** Where does it live? Current
    `recovery_loop` could pick it up but its cadence is coarse. A
-   dedicated lightweight scheduler may be cleaner.
+   dedicated lightweight scheduler may be cleaner. **(Resolved in
+   phase 2.5: `kernel/v2/policy_sweeper.py` is the dedicated loop,
+   default 30s cadence, opt-out via `BRIDGE_POLICY_SWEEPER_SECONDS=0`.)**
+
+---
+
+## Status block (final, this work cycle)
+
+| Layer | State |
+|---|---|
+| Phase 1 (additive primitives) | ✅ Done |
+| Phase 2 (policy enforcement) | ✅ Done — max_rounds, kind whitelist, close policy |
+| Phase 2.5 (multi-turn safety net) | ✅ Done — sweeper, JOIN/INVITE, closed-op skip, late-join privacy, discovery, WAL |
+| Phase 3 (legacy cleanup) | ⏸ Pending — BROADCAST env, max_per_op env, addressed_to_many semantics |
+| Out of scope | rolling_summary (needs `@summarizer` agent), agent presence/heartbeat, identity hardening |
+
+### Test counts
+
+| Suite | Tests | Status |
+|---|---|---|
+| Pre-v3 baseline | 471 | passed |
+| + v3 phase 1 (`test_kernel_v3_speech_act_primitives.py`) | +7 | passed |
+| + v3 phase 2 (`test_kernel_v3_policy_engine.py`) | +9 | passed |
+| + v3 phase 2.5 adversarial (`test_kernel_v3_adversarial.py`) | +7 | passed |
+| + v3 phase 2.5 multi-turn (`test_kernel_v3_multiturn_convergence.py`) | +2 | passed |
+| + v3 phase 2.5 sweeper (`test_kernel_v3_policy_sweeper.py`) | +4 | passed |
+| + v3 phase 2.5 join/invite (`test_kernel_v3_join_invite.py`) | +5 | passed |
+| + v3 phase 2.5 late-join privacy (`test_kernel_v3_late_join_privacy.py`) | +2 | passed |
+| + v3 phase 2.5 discovery (`test_kernel_v3_discovery.py`) | +5 | passed |
+| **Aggregate** | **512** | **passed** (1 skipped = live LLM opt-in) |
+
+### Live verification snapshots (5/5 PASS)
+
+The post-Phase-2 persona run is captured in
+[protocol-personas-live-log.md](./protocol-personas-live-log.md). The 5
+tasks are: targeted Q&A (cascade prevention), broadcast collab,
+speech-kind whitelist, any_participant close, max_rounds cap. All
+passed end-to-end via real claude CLI personas through external
+`agent_loop`.
+
+### What's honest to claim
+
+- **Cooperative single-bridge multi-agent collab is structurally sound.**
+  Cascade prevention, kind enforcement, close policy, max_rounds,
+  membership, late-join privacy, discovery — all backed by the test
+  suite + a live persona run.
+- **Adversarial robustness at the message-semantics layer is real.**
+  7 negative-path tests confirm the gates reject misbehavior, not
+  just allow good behavior.
+- **Identity / authentication remains the gaping hole.** Single
+  shared bearer token; any caller can claim any handle. The
+  capability model exists in code but is functionally a no-op
+  because there's no per-actor principal. Production exposure
+  outside a trusted LAN requires Phase 3.x identity work first.
