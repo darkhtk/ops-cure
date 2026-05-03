@@ -313,6 +313,13 @@ DEFAULT_OPERATION_POLICY: dict = {
     "max_rounds": None,            # None = unbounded
     "min_ratifiers": None,         # only used when close_policy=quorum
     "bot_open": True,              # bots are first-class openers by default
+    # When kind=task, controls whether a RemoteTaskModel row is created
+    # and bound to the conversation. v1 chat callers default to True
+    # (back-compat — v1 chat tests assume binding). v3 ``/v2/operations``
+    # callers default to False so collaborative-task ops are not blocked
+    # from quorum-close by an orphan ``queued`` RemoteTask. Explicit
+    # callers can flip either way.
+    "bind_remote_task": True,
 }
 
 
@@ -353,6 +360,11 @@ def validate_operation_policy(value: dict | None) -> dict:
             if not isinstance(bo, bool):
                 raise ValueError("policy.bot_open must be a bool")
             base["bot_open"] = bo
+        brt = value.get("bind_remote_task")
+        if brt is not None:
+            if not isinstance(brt, bool):
+                raise ValueError("policy.bind_remote_task must be a bool")
+            base["bind_remote_task"] = brt
     if base["close_policy"] == CLOSE_POLICY_QUORUM and not base.get("min_ratifiers"):
         raise ValueError("policy.close_policy=quorum requires min_ratifiers")
     return base

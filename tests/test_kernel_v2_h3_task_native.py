@@ -50,13 +50,18 @@ def test_v2_native_task_lifecycle_full_cycle(tmp_path, monkeypatch):
     with TestClient(m["app"]) as client:
         client.headers.update(_AUTH)
 
-        # alice opens a task
+        # alice opens a task. The /v2/operations default for kind=task
+        # is now ``bind_remote_task=False`` (collab-task ops should not
+        # block close on a queued RemoteTask). Tests exercising the
+        # full executor lifecycle (claim/evidence/approval/complete)
+        # opt in explicitly so a RemoteTask row exists to claim.
         r = client.post(
             "/v2/operations",
             json={
                 "space_id": discord, "kind": "task",
                 "title": "patch X", "objective": "fix the bug",
                 "opener_actor_handle": "@alice",
+                "policy": {"bind_remote_task": True},
             },
         )
         assert r.status_code == 201, r.text
@@ -154,6 +159,7 @@ def test_v2_native_task_fail_cycle(tmp_path, monkeypatch):
                 "space_id": discord, "kind": "task",
                 "title": "broken", "objective": "do thing",
                 "opener_actor_handle": "@alice",
+                "policy": {"bind_remote_task": True},
             },
         ).json()["id"]
         r = client.post(
@@ -201,6 +207,7 @@ def test_sdk_drives_full_task_cycle(tmp_path, monkeypatch):
         op = alice.open_operation(
             space_id=discord, kind="task", title="patch",
             objective="patch the bug",
+            policy={"bind_remote_task": True},
         )
         op_id = op["id"]
         claim_resp = pca.claim_task(op_id, lease_seconds=300)
@@ -230,6 +237,7 @@ def test_unknown_actor_lease_token_returns_400(tmp_path, monkeypatch):
                 "space_id": discord, "kind": "task",
                 "title": "x", "objective": "y",
                 "opener_actor_handle": "@alice",
+                "policy": {"bind_remote_task": True},
             },
         ).json()["id"]
         r = client.post(

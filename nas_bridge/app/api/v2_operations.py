@@ -348,8 +348,17 @@ def open_operation(
     }
     if payload.success_criteria is not None:
         open_kwargs["success_criteria"] = payload.success_criteria
-    if payload.policy is not None:
-        open_kwargs["policy"] = payload.policy
+    # v3-flavored default: collab-task ops opened via /v2/operations do
+    # not bind a RemoteTask unless the caller explicitly requests one.
+    # The v1 chat path (no /v2 wrapper) keeps the legacy default
+    # (bind=True) so existing v1 chat tests stay green. Callers wanting
+    # actual executor lifecycle should send
+    # ``policy.bind_remote_task: true`` explicitly.
+    effective_policy: dict[str, Any] = dict(payload.policy or {})
+    if payload.kind == "task" and "bind_remote_task" not in effective_policy:
+        effective_policy["bind_remote_task"] = False
+    if effective_policy:
+        open_kwargs["policy"] = effective_policy
     try:
         summary = chat_service.open_conversation(
             discord_thread_id=payload.space_id,

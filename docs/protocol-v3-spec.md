@@ -1,6 +1,6 @@
 # Opscure Bridge Protocol v3 — Normative Specification
 
-**Status**: Normative (rev 1, 2026-05-03). This document is the
+**Status**: Normative (rev 4, 2026-05-03). This document is the
 authoritative description of Opscure Bridge protocol v3.x. Where it
 disagrees with code, the spec is wrong and a clarifying patch is
 welcome — but in the meantime, the **wire test fixtures**
@@ -229,7 +229,8 @@ propagate to subsequent POSTs in the same logical session — they
   "context_compaction": "none" | "rolling_summary",
   "max_rounds": int | null,
   "min_ratifiers": int | null,
-  "bot_open": bool
+  "bot_open": bool,
+  "bind_remote_task": bool
 }
 ```
 
@@ -262,9 +263,16 @@ propagate to subsequent POSTs in the same logical session — they
   reject opens from actors of kind `ai`/`service`. (Enforcement is
   optional in v3.1; bridges that don't enforce **MUST** still
   persist the field verbatim.)
+- `bind_remote_task` (only meaningful for `kind=task`): when `true`,
+  the bridge creates a `RemoteTask` row coupled to the op for the
+  full executor lifecycle (claim / heartbeat / evidence / approval /
+  complete-or-fail). When `false`, the op is purely conversational
+  and **MUST NOT** be coupled to a `RemoteTask`; close admissibility
+  is governed solely by `close_policy`. Default depends on the
+  caller surface — see §9.1.
 
 A bridge **MUST** materialize a normalized policy on every op at
-open time. Clients reading the op **MUST** see all six fields.
+open time. Clients reading the op **MUST** see all seven fields.
 
 ### 6.2 ExpectedResponse
 
@@ -671,7 +679,34 @@ form.
 
 ## 9. Operation lifecycle
 
-### 9.1 State machine
+### 9.1 Choosing `kind`
+
+The op `kind` is the strongest hint a caller gives the bridge about
+what shape the work takes. Pick by what `closed` will mean.
+
+| `kind` | When to use | Closure shape | `bind_remote_task` default |
+|---|---|---|---|
+| `inquiry` | Question, discussion, decision. Result *is* the consensus / answer. | `close_policy` only. | n/a |
+| `proposal` | A specific change is on the table; participants ratify or object. | `close_policy` (often `quorum` or `operator_ratifies`). | n/a |
+| `task` (collab) | Personas collaborate to *produce* a deliverable in-room. No external executor will `claim` the work. | `close_policy` only — same lifecycle gates as `inquiry`. | `false` (when opened via `/v2/operations`) |
+| `task` (executor) | An external agent (`claude-pca`, `remote-codex`, …) will `claim` the work via lease, post `evidence`, and `complete`. | RemoteTask lifecycle drives close (`complete`/`fail`). | `true` (caller opts in via `policy.bind_remote_task: true`) |
+| `general` | Always-open thread chat. | Cannot close. | n/a |
+
+`kind=task` covers two distinct shapes and the choice changes
+admissibility. With `bind_remote_task=true` the bridge couples the
+op to a `RemoteTask`, and a manual `POST /close` is rejected with
+`policy.task_bound_active` while that task is non-terminal — the
+executor must `complete` or `fail` instead. With `bind_remote_task=
+false` the op behaves like an `inquiry` for closure purposes:
+ratifiers + `close_policy` decide.
+
+The `/v2/operations` HTTP endpoint **MUST** default
+`bind_remote_task=false` for `kind=task` opens that omit the field
+(the v3 collab default). Internal `/api/chat` v1 callers preserve
+the legacy default `true`. Either default may be overridden
+explicitly by the caller.
+
+### 9.2 State machine
 
 | State | Transitions |
 |---|---|
@@ -685,7 +720,7 @@ form.
 For `kind=inquiry` and `kind=proposal`, only `open ↔ closed` matter.
 The intermediate states are reserved for `kind=task` lifecycle.
 
-### 9.2 Resolutions per kind
+### 9.3 Resolutions per kind
 
 | Kind | Allowed resolutions |
 |---|---|
@@ -699,7 +734,7 @@ The bridge **MUST** reject `POST /close` with HTTP 400 if the
 caller is system (`bypass_task_guard=true`) — system closes may use
 `abandoned` regardless.
 
-### 9.3 Close gate (policy enforcement)
+### 9.4 Close gate (policy enforcement)
 
 After capability check passes, the bridge **MUST** consult
 `policy.close_policy`:
@@ -710,6 +745,15 @@ After capability check passes, the bridge **MUST** consult
 | `any_participant` | closer **MUST** be a participant |
 | `operator_ratifies` | at least one participant with role `operator` **MUST** have posted `chat.speech.ratify` on this op |
 | `quorum` | at least `min_ratifiers` *distinct* actors **MUST** have posted `chat.speech.ratify` |
+
+When `kind=task` and `policy.bind_remote_task=true`, an additional
+gate applies: the close path **MUST** reject manual `POST /close`
+calls while the bound `RemoteTask` is in a non-terminal state
+(`queued` / `claimed` / `executing` / `verifying` /
+`blocked_approval`). The executor must terminate the task via
+`/complete` or `/fail` (which run with `bypass_task_guard=true`)
+before the op can close. This guard does **NOT** apply when
+`bind_remote_task=false`; see §9.1.
 
 Failures map to error codes in §13.
 
@@ -926,6 +970,7 @@ for details.
 | 1 | 2026-05-03 | Initial normative document (v3.1) |
 | 2 | 2026-05-03 | Patches from interop sprint with TS reference client. Clarified: timestamp precision (§1), per-actor token verbatim (§3.4), traceparent on streaming responses (§5), inbox envelope shape + SSE line-termination + comment-line tolerance (§7.2), heartbeat body shape (§7.3), error response shape (§13). See [protocol-v3-interop-findings.md](./protocol-v3-interop-findings.md). |
 | 3 | 2026-05-03 | Phase 6: §8.1.1 added — INVITING vs TERMINAL reply distinction. Bridges **MUST NOT** synthesize default `expected_response` from speech kind; workflow shape is a speaker-level choice. The protocol stays workflow-agnostic; clients use a compact prefix grammar (`[KIND→@a,@b kinds=…] body`) at their convenience. See `tests/test_v3_next_responder_parser.py` for the grammar. |
+| 4 | 2026-05-03 | T1.1: `policy.bind_remote_task` field added to `OperationPolicy` (§6.1). New §9.1 "Choosing `kind`" makes the collab-task vs executor-task distinction normative. `/v2/operations` defaults `bind_remote_task=false` for `kind=task`; the v1 `/api/chat` path keeps the legacy `true` default. §9.4 documents the task-bound close guard (only fires when `bind_remote_task=true`). Sub-section 9.2/9.3 renumbered. Tests: `tests/test_v3_bind_remote_task_policy.py`. |
 
 ## Appendix A — Error code catalog (machine-readable)
 

@@ -490,14 +490,27 @@ class ChatConversationService:
         # Pre-validate kind=task prerequisites before touching the DB so
         # we never half-commit (no thread row read, no task created) on
         # caller-side input errors.
+        # v3-additive: ``policy.bind_remote_task`` decides whether the
+        # task conversation actually creates a bound RemoteTask row.
+        # v1 callers (no policy) default to True. v3 callers may flip
+        # to False for collab-only task ops that should close on quorum
+        # without a queued RemoteTask blocking the close path. Validate
+        # up-front so invalid policy fails before any DB write.
+        try:
+            _normalized_policy = _v2_contract.validate_operation_policy(
+                getattr(request, "policy", None)
+            )
+        except ValueError as exc:
+            raise ChatConversationStateError(f"invalid policy: {exc}") from exc
+        bind_remote_task = bool(_normalized_policy.get("bind_remote_task", True))
         if request.kind == CONVERSATION_KIND_TASK:
-            if self._remote_task_service is None:
-                raise ChatConversationStateError(
-                    "remote_task_service is not configured; kind=task is unavailable",
-                )
             if not request.objective:
                 raise ChatConversationStateError(
                     "kind=task requires an objective",
+                )
+            if bind_remote_task and self._remote_task_service is None:
+                raise ChatConversationStateError(
+                    "remote_task_service is not configured; kind=task is unavailable",
                 )
 
         envelope: EventEnvelope | None = None
@@ -509,7 +522,7 @@ class ChatConversationService:
             self._get_or_create_general(db, thread_row)
 
             bound_task_id: str | None = None
-            if request.kind == CONVERSATION_KIND_TASK:
+            if request.kind == CONVERSATION_KIND_TASK and bind_remote_task:
                 # RemoteTaskService runs its own session_scope; that's
                 # fine because the bound RemoteTask is independent state
                 # whose existence we record on the conversation row in
@@ -562,12 +575,9 @@ class ChatConversationService:
             # op. Always materialize a normalized policy so the op has
             # a known governance shape (close rule, max_rounds, etc.).
             # request.policy=None falls back to DEFAULT_OPERATION_POLICY.
-            try:
-                _normalized_policy = _v2_contract.validate_operation_policy(
-                    getattr(request, "policy", None)
-                )
-            except ValueError as exc:
-                raise ChatConversationStateError(f"invalid policy: {exc}") from exc
+            # ``_normalized_policy`` was validated at the top of this
+            # method (used to decide ``bind_remote_task`` before the
+            # task row was created); reuse it here.
             from ...kernel.v2 import V2Repository as _V2Repo
             _V2Repo().set_operation_policy(
                 db,

@@ -146,6 +146,7 @@ class BridgeV2Client:
         addressed_to: str | None = None,
         objective: str | None = None,
         success_criteria: dict[str, Any] | None = None,
+        policy: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {
             "space_id": space_id,
@@ -161,6 +162,8 @@ class BridgeV2Client:
             body["objective"] = objective
         if success_criteria is not None:
             body["success_criteria"] = success_criteria
+        if policy is not None:
+            body["policy"] = policy
         return self._post("/v2/operations", json=body)
 
     def append_event(
