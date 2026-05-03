@@ -35,7 +35,10 @@ from typing import Any
 from .claude_runtime import ClaudeRun
 
 
-_SSE_OPEN_TIMEOUT_SECONDS = 30.0
+# Socket timeout applies to BOTH connect and per-read operations on the
+# urllib stream. The bridge sends SSE heartbeats every ~15s, so 60s gives
+# plenty of margin for transient TCP buffering or scheduling jitter.
+_SSE_OPEN_TIMEOUT_SECONDS = 60.0
 _SSE_RECONNECT_BACKOFF_SECONDS = 5.0
 _RUN_RESULT_TIMEOUT_SECONDS = 180.0
 
@@ -55,6 +58,22 @@ class BridgeAgentLoop:
         model: str | None = None,
         permission_mode: str | None = "acceptEdits",
         on_log=None,
+        # Extension knobs (a/b/c from the protocol triage):
+        #   broadcast        — also respond to events with no
+        #                      addressed_to_actor_ids (room-wide speech).
+        #                      Default off; opt in for collab personas.
+        #   history_limit    — pre-fetch this many recent op events
+        #                      before each run so the prompt carries
+        #                      conversational context (option b). 0 = off.
+        #   max_responses_per_op — cap per-op replies as a runaway guard
+        #                          when broadcast is on. 0 = unlimited.
+        #   system_prompt    — persona-specific guidance prepended to
+        #                      every prompt. Lets one executable host
+        #                      different personas via env (option c).
+        broadcast: bool = False,
+        history_limit: int = 0,
+        max_responses_per_op: int = 5,
+        system_prompt: str | None = None,
     ) -> None:
         if not actor_handle.startswith("@"):
             actor_handle = f"@{actor_handle}"
@@ -66,12 +85,18 @@ class BridgeAgentLoop:
         self._permission_mode = permission_mode
         self._on_log = on_log or (lambda msg: print(msg, file=sys.stderr))
 
+        self._broadcast = broadcast
+        self._history_limit = max(0, int(history_limit))
+        self._max_responses_per_op = max(0, int(max_responses_per_op))
+        self._system_prompt = (system_prompt or "").strip()
+
         self._actor_id: str | None = None
         self._stopping = False
         self._sse_thread: threading.Thread | None = None
         self._worker_thread: threading.Thread | None = None
         self._event_q: queue.Queue[dict[str, Any]] = queue.Queue()
         self._seen_event_ids: set[str] = set()  # idempotency
+        self._responses_per_op: dict[str, int] = {}  # op_id -> count
 
     # ---- lifecycle ----------------------------------------------------
 
@@ -166,13 +191,24 @@ class BridgeAgentLoop:
         # Self-loop guard: never respond to my own speech.
         if self._actor_id and ev.get("actor_id") == self._actor_id:
             return
-        # Addressing: respond only if I'm in addressed_to_actor_ids
-        # (or list is empty == public broadcast — skip in agent mode).
+        # Addressing:
+        #   broadcast=False (default): respond only if I'm explicitly addressed.
+        #   broadcast=True: also respond to room-wide speech (empty
+        #                   addressed_to_actor_ids list); still skip when
+        #                   addressed list is non-empty AND excludes me.
         addressed = ev.get("addressed_to_actor_ids") or []
-        if self._actor_id and self._actor_id not in addressed:
+        if addressed:
+            if self._actor_id and self._actor_id not in addressed:
+                return
+        elif not self._broadcast:
             return
-        # Skip my own claims (server-side fanout sometimes echos).
-        if kind == "chat.speech.claim" and ev.get("actor_id") == self._actor_id:
+        # Per-op runaway guard (matters mostly when broadcast=True).
+        op_id = ev.get("operation_id")
+        if (
+            self._max_responses_per_op
+            and op_id
+            and self._responses_per_op.get(op_id, 0) >= self._max_responses_per_op
+        ):
             return
         # Idempotency.
         eid = ev.get("event_id")
@@ -208,23 +244,81 @@ class BridgeAgentLoop:
                 f"agent loop: run produced no result for op={op_id} ev={ev.get('event_id')}"
             )
             return
-        self._post_claim(op_id, result_text)
+        if self._post_claim(op_id, result_text):
+            self._responses_per_op[op_id] = self._responses_per_op.get(op_id, 0) + 1
+
+    def _fetch_op_history(self, op_id: str) -> list[dict[str, Any]]:
+        """Pull the last `history_limit` events from the op so the prompt
+        carries enough context for the persona to reason. Returns [] on
+        any failure — context is best-effort, never fatal.
+        """
+        if self._history_limit <= 0:
+            return []
+        url = (
+            f"{self._bridge_url}/v2/operations/{urllib.request.quote(op_id)}/events"
+            f"?actor_handle={urllib.request.quote(self._actor_handle)}"
+        )
+        req = urllib.request.Request(
+            url,
+            method="GET",
+            headers={"Authorization": f"Bearer {self._token}"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=15.0) as resp:
+                body = resp.read()
+        except Exception as e:  # noqa: BLE001 - includes socket.timeout
+            # History is best-effort context. If the fetch fails (timeout,
+            # transient bridge contention, etc) we just compose the prompt
+            # without history rather than abandon the whole run.
+            self._log(f"agent loop: op history fetch failed op={op_id}: {e}")
+            return []
+        try:
+            data = json.loads(body.decode("utf-8"))
+        except (ValueError, TypeError):
+            return []
+        events = data.get("events") or []
+        if not isinstance(events, list):
+            return []
+        # Drop the trigger event itself (we'll quote it explicitly).
+        return events[-self._history_limit :]
 
     def _build_prompt(self, ev: dict[str, Any]) -> str:
         payload = ev.get("payload") or {}
         text = str(payload.get("text") or "").strip()
         if not text:
             return ""
-        # Minimal protocol context. The bridge already enforces addressing
-        # and op state — we just need the speaker's question.
         kind = str(ev.get("kind") or "chat.speech")
-        return (
-            f"You are agent {self._actor_handle} responding to a "
-            f"{kind} event in operation {ev.get('operation_id')}. "
-            f"The speaker said:\n\n{text}\n\n"
-            f"Respond directly and concisely. Your reply will be posted "
-            f"as a speech.claim back to this operation."
+        op_id = ev.get("operation_id") or ""
+        history = self._fetch_op_history(op_id)
+
+        lines: list[str] = []
+        if self._system_prompt:
+            lines.append(self._system_prompt)
+            lines.append("")
+        lines.append(
+            f"You are {self._actor_handle} in operation {op_id}. "
+            f"Your reply will be posted as a chat.speech.claim event."
         )
+        if history:
+            lines.append("")
+            lines.append("Recent op transcript (oldest first):")
+            for h in history:
+                actor = str(h.get("actor_id") or "?")[:8]
+                hkind = str(h.get("kind") or "")
+                htext = str((h.get("payload") or {}).get("text") or "")[:300]
+                lines.append(f"  [{hkind}] actor={actor}: {htext}")
+        lines.append("")
+        lines.append(f"You were just addressed via {kind}. The trigger message:")
+        lines.append("")
+        lines.append(text)
+        lines.append("")
+        lines.append(
+            "Respond in 1-3 sentences. You may prefix your reply with one "
+            "of [CLAIM] [QUESTION] [PROPOSE] [AGREE] [OBJECT] [REACT] to "
+            "control the speech kind (default: CLAIM). If you have nothing "
+            "useful to add, reply with exactly: SKIP"
+        )
+        return "\n".join(lines)
 
     def _run_claude_blocking(self, prompt: str) -> str:
         """Spawn a fresh claude run, write the prompt, wait for the
@@ -272,12 +366,37 @@ class BridgeAgentLoop:
                 pass
         return result_holder.get("text", "")
 
-    def _post_claim(self, op_id: str, text: str) -> None:
+    # Speech kinds the bridge accepts. Mirrored from kernel.v2.contract;
+    # we deliberately don't import that on the PC side (no shared package)
+    # — drift would manifest as a 400 on POST, which we surface in logs.
+    _ALLOWED_SPEECH_KINDS = {
+        "claim", "question", "answer", "propose", "agree", "object",
+        "evidence", "block", "defer", "summarize", "react",
+    }
+
+    def _post_claim(self, op_id: str, text: str) -> bool:
+        # Personas can opt out of speaking by replying with a literal SKIP
+        # sentinel — keeps broadcast loops quiet when one persona has
+        # nothing to add.
+        cleaned = text.strip()
+        if cleaned == "SKIP" or cleaned.upper() == "SKIP":
+            self._log(f"agent loop: SKIP from {self._actor_handle} on op={op_id}")
+            return False
+        # Optional [KIND] prefix lets a persona post non-claim speech
+        # (object / propose / agree / question / etc.) without each
+        # persona needing its own dispatcher. Format: "[OBJECT] body..."
+        kind = "claim"
+        if cleaned.startswith("[") and "]" in cleaned[:20]:
+            tag_end = cleaned.index("]")
+            tag = cleaned[1:tag_end].strip().lower()
+            if tag in self._ALLOWED_SPEECH_KINDS:
+                kind = tag
+                cleaned = cleaned[tag_end + 1 :].lstrip()
         url = f"{self._bridge_url}/v2/operations/{op_id}/events"
         body = {
             "actor_handle": self._actor_handle,
-            "kind": "speech.claim",
-            "payload": {"text": text},
+            "kind": f"speech.{kind}",
+            "payload": {"text": cleaned},
         }
         data = json.dumps(body).encode("utf-8")
         req = urllib.request.Request(
@@ -292,15 +411,20 @@ class BridgeAgentLoop:
         try:
             with urllib.request.urlopen(req, timeout=30.0) as resp:
                 resp.read()
-            self._log(f"agent loop: posted claim to op={op_id} len={len(text)}")
+            self._log(
+                f"agent loop: posted speech.{kind} to op={op_id} len={len(cleaned)}"
+            )
+            return True
         except urllib.error.HTTPError as e:
             try:
                 detail = e.read().decode("utf-8", errors="replace")
             except Exception:  # noqa: BLE001
                 detail = ""
             self._log(f"agent loop: claim post failed op={op_id} HTTP {e.code}: {detail}")
+            return False
         except urllib.error.URLError as e:
             self._log(f"agent loop: claim post network error op={op_id}: {e.reason}")
+            return False
 
     # ---- helpers ------------------------------------------------------
 

@@ -8,9 +8,11 @@ $sp = $cfg["SSH_PASSWORD"].Replace("'", "'\''")
 $py = @'
 import uuid, sys
 sys.path.insert(0, "/app")
+# Skip init_db -- the bridge already created the schema; init_db here can
+# deadlock against the bridge's own write activity (PRAGMA needs the
+# busy-timeout to elapse). Just open a session and insert.
 from app.behaviors.chat.models import ChatThreadModel
-from app.db import session_scope, init_db
-init_db()
+from app.db import session_scope
 discord_id = "smoke-" + uuid.uuid4().hex[:8]
 with session_scope() as s:
     s.add(ChatThreadModel(

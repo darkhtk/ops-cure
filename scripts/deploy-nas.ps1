@@ -3,7 +3,8 @@ param(
     [string]$CredentialFile = "C:\Users\darkh\Projects\_runtime\ops-cure\config\synology_ssh_credentials.env",
     [string]$DeployPath = "/volume1/docker/discord-bridge",
     [string]$ComposeFile = "docker-compose.yml",
-    [switch]$AllowDirty
+    [switch]$AllowDirty,
+    [switch]$NoCache
 )
 
 Set-StrictMode -Version Latest
@@ -77,6 +78,8 @@ try {
     if ($sshPassword) {
         $sudoPassEsc = $sshPassword.Replace("'", "'\''")
     }
+    $buildExtraArgs = ""
+    if ($NoCache) { $buildExtraArgs = "--no-cache" }
     $remoteScript = @"
 set -e
 # Synology's non-interactive SSH starts with a minimal PATH; docker lives in
@@ -92,7 +95,8 @@ cd '$DeployPath'
 # Merge docker compose stderr into stdout so PowerShell's native-command
 # stderr handling doesn't trip on routine progress output ("Container Foo
 # Recreate"). The remote shell's `set -e` still aborts on real failures.
-echo '$sudoPassEsc' | sudo -S docker compose -f '$ComposeFile' up -d --build 2>&1
+echo '$sudoPassEsc' | sudo -S docker compose -f '$ComposeFile' build $buildExtraArgs 2>&1
+echo '$sudoPassEsc' | sudo -S docker compose -f '$ComposeFile' up -d 2>&1
 rm -f '$remoteArchive'
 "@
 
