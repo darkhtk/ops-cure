@@ -1,0 +1,19 @@
+{
+  "name": "@opscure/ts-agent-loop",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "description": "Reference TypeScript v3 agent client. Validates wire portability of the Opscure Bridge protocol.",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node --import tsx src/index.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "tsx": "^4.19.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "@types/node": "^22.7.0"
+  }
+}

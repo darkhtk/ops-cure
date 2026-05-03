@@ -29,6 +29,10 @@ how a client interprets policy rejections.
 - All timestamps are ISO 8601 with offset (`2026-05-03T01:00:00Z` or
   `2026-05-03T01:00:00+00:00`). Bridges **MUST** emit UTC; clients
   **MUST** accept any valid offset and normalize to UTC for storage.
+  Timestamps **MAY** include up to microsecond precision (e.g.
+  `2026-05-03T01:00:00.123456Z`); clients **MUST** accept any
+  precision (or none) and **MUST NOT** fail on extra fractional
+  digits beyond their internal granularity.
 - All actor handles are strings prefixed with `@` (e.g. `@alice`).
   When a client supplies a handle without `@`, the bridge **MUST**
   treat it as if `@` were present. When a bridge emits a handle, it
@@ -98,7 +102,14 @@ using it. The protocol-version usage counter exposed at
 `/v2/diagnostics` is the authoritative signal of whether retirement
 is safe.
 
-### 3.4 Tolerating new minors
+### 3.4 Token format
+
+Per-actor token plaintext (returned from `POST /v2/actors/{handle}/tokens`)
+is an opaque string. Clients **MUST** send it verbatim in
+`X-Actor-Token`; bridges **MUST NOT** transform / trim / normalize the
+value before hashing.
+
+### 3.5 Tolerating new minors
 
 Clients **MUST** ignore unknown fields on responses (forward compat).
 Clients **SHOULD** treat unknown speech kinds (§8) as opaque
@@ -198,6 +209,13 @@ traceparent: 00-<trace_id>-<span_id>-<flags>
 
 When no inbound `traceparent` is present, the bridge **MUST** mint
 both a `trace_id` and `span_id` and emit them on the response.
+
+For streaming responses (SSE), `traceparent` is set on the
+*initial* HTTP response and applies to all events delivered on that
+stream. Clients **MUST** capture it once at subscribe time and
+propagate to subsequent POSTs in the same logical session — they
+**MUST NOT** look for traceparent inside SSE event data frames
+(it is not delivered there).
 
 ## 6. Core types
 
@@ -502,11 +520,43 @@ event: open
 data: {"space_id":"v2:inbox:<actor_id>","actor_id":"<uuid>"}
 
 event: v2.event
-data: {"operation_id":"...","event_id":"...","seq":..., ...}
+data: <InboxEnvelope>
 
 event: heartbeat
 data: {}
 ```
+
+Where `InboxEnvelope` is:
+
+```json
+{
+  "operation_id": "<uuid>",
+  "event_id": "<uuid>",     // = OperationEvent.id
+  "seq": int,
+  "kind": "chat.speech.X" | "chat.conversation.opened" | ...,
+  "actor_id": "<uuid>",
+  "payload": { "text": "...", ... },
+  "addressed_to_actor_ids": ["<uuid>", ...],
+  "private_to_actor_ids": ["<uuid>", ...] | null,
+  "replies_to_event_id": "<uuid> | null",
+  "expected_response": ExpectedResponse | null,
+  "created_at": "iso-8601",
+  "cursor": "<opaque>"
+}
+```
+
+That is, the envelope **MUST** include all `OperationEvent`
+fields the asker is permitted to see (subject to privacy
+redaction; §10).
+
+**Line termination**: bridges **MUST** terminate SSE lines per the
+W3C EventSource spec — any of `\n`, `\r`, or `\r\n`. Clients
+**MUST** accept all three terminators.
+
+**SSE comments**: lines beginning with `:` are SSE comments and
+**MUST** be ignored by clients. Bridges **MAY** emit them (for
+load-balancer keep-alive) and **MUST** tolerate them on
+intermediate proxies.
 
 The bridge **MUST** emit heartbeat events at no more than the
 configured `heartbeat_seconds` interval (default 15s) so clients can
@@ -535,7 +585,11 @@ fail with HTTP 401.
 
 #### `POST /v2/actors/{handle}/heartbeat`
 
-Liveness ping. Updates `last_seen_at`. Body is empty `{}`.
+Liveness ping. Updates `last_seen_at`. Clients **MUST** send
+`Content-Type: application/json` with body `{}` (the empty JSON
+object). Bridges **MAY** accept other request body shapes for
+robustness but **MUST** accept `{}`.
+
 Response: `{ actor_handle, last_seen_at }`.
 
 ### 7.4 Schema discovery
@@ -734,16 +788,17 @@ See §9.3.
 
 ## 13. Error codes
 
-The bridge **MUST** return these stable error codes in HTTP 400 /
-403 / 404 response bodies:
+The bridge **MUST** return error responses in this shape:
 
 ```json
 { "detail": "human-readable message" }
 ```
 
 For policy-engine-level rejections, `detail` **MUST** start with
-`policy: ` (so clients can match prefix). The specific rejection is
-identified by a code from this enum:
+the prefix `policy: ` so clients can branch on the prefix without
+parsing the message. The specific rejection is identified by one of
+the codes below. The HTTP status is normative — clients **MUST**
+branch on (status, code) pairs:
 
 | Code | When |
 |---|---|
@@ -842,6 +897,7 @@ for details.
 | Rev | Date | Notes |
 |---|---|---|
 | 1 | 2026-05-03 | Initial normative document (v3.1) |
+| 2 | 2026-05-03 | Patches from interop sprint with TS reference client. Clarified: timestamp precision (§1), per-actor token verbatim (§3.4), traceparent on streaming responses (§5), inbox envelope shape + SSE line-termination + comment-line tolerance (§7.2), heartbeat body shape (§7.3), error response shape (§13). See [protocol-v3-interop-findings.md](./protocol-v3-interop-findings.md). |
 
 ## Appendix A — Error code catalog (machine-readable)
 

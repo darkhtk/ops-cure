@@ -343,7 +343,9 @@ Phase 3 retires the shims after a deprecation window.
 | Phase 2.5 (multi-turn safety net) | ✅ Done — sweeper, JOIN/INVITE, closed-op skip, late-join privacy, discovery, WAL |
 | Phase 3 (legacy cleanup) | ✅ Done — BROADCAST + max_per_op env retired, agent_loop fallback removed |
 | Phase 3.x (identity layer) | ✅ Done — per-actor token table, issue/list/revoke API, `verify_actor_handle_claim`, agent_loop X-Actor-Token wiring; live-verified |
-| Out of scope (this cycle) | rolling_summary (needs `@summarizer` agent), agent presence/heartbeat, capability-scoped tokens |
+| Phase 4 (Sprint A+B) | ✅ Done — wire format publish, version negotiation, traceparent, privacy fan-out probe, heartbeat/presence, token scopes, discovery cursor+kinds |
+| Phase 5 (spec + conformance + interop) | ✅ Done — normative spec doc, drift detector, 32-test impl-agnostic conformance pack, second-language reference client (TypeScript) — see [protocol-v3-spec.md](./protocol-v3-spec.md) and [protocol-v3-interop-findings.md](./protocol-v3-interop-findings.md) |
+| Out of scope (this cycle) | rolling_summary (needs `@summarizer` agent), external-team interop, second-language *bridge* (only second-language *client* shipped) |
 
 ### Test counts
 
