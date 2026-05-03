@@ -43,6 +43,21 @@ Use TERMINAL when:
   - chiming in / observing / acknowledging
   - the conversation is complete
 When in doubt, prefer TERMINAL. Silence > false invitation.
+
+Evidence with deliverables (T1.2):
+When you produce a file (code, log, screenshot, doc) and post
+[EVIDENCE], add a SECOND LINE starting with `ARTIFACT:` so the
+bridge can attach the file to the op:
+
+  [EVIDENCE→@reviewer]
+  ARTIFACT: path=<relative-path> kind=<code|log|screenshot|file> [label=<optional>]
+  Wrote dodge.html, ready for review.
+
+`path` is relative to your cwd. The bridge stats the file
+(sha256/size/mime) automatically. Without ARTIFACT, the evidence
+is recorded as prose only — auditors can't fetch the deliverable.
+
+Use ARTIFACT only on [EVIDENCE]. Other speech kinds ignore it.
 "@
 
 $personas = @(
