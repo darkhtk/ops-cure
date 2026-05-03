@@ -11,7 +11,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
+from fastapi import (
+    APIRouter, BackgroundTasks, Depends, Header, HTTPException, Query, Request,
+)
 from pydantic import BaseModel, Field
 
 from ..auth import (
@@ -387,6 +389,7 @@ def append_event(
     operation_id: str,
     payload: V2EventRequest,
     request: Request,
+    background_tasks: BackgroundTasks,
     caller: BridgeCaller = Depends(require_bridge_caller),  # noqa: ARG001
     x_actor_token: str | None = Header(default=None),
 ) -> dict[str, Any]:
@@ -494,7 +497,55 @@ def append_event(
                 )
         op = repo.get_operation(db, operation_id)
         ev = db.get(OperationEventV2Model, v2_event_id)
+        # Discord visibility for v3 op events. The v1 chat path posts
+        # to Discord via thread_manager; v3 callers (agents going
+        # through /v2/operations) bypassed Discord entirely so the
+        # parent thread stayed silent even while agents talked. Hook
+        # here: look up the chat thread, format a human-readable
+        # line, post via thread_manager. Best-effort — Discord errors
+        # never break the event write. Skipped when discord is
+        # disabled (the thread_manager itself short-circuits).
+        from ..behaviors.chat.models import ChatConversationModel, ChatThreadModel
+        v1_conv = db.get(ChatConversationModel, v1_id)
+        discord_thread_id: str | None = None
+        if v1_conv is not None:
+            thread_row = db.get(ChatThreadModel, v1_conv.thread_id)
+            if thread_row is not None:
+                discord_thread_id = thread_row.discord_thread_id
+        if discord_thread_id:
+            handle = payload.actor_handle if payload.actor_handle.startswith("@") else f"@{payload.actor_handle}"
+            # Strip the chat. prefix on the kind so display is concise:
+            # ``chat.speech.propose`` → ``propose``.
+            display_kind = payload.kind.split(".", 1)[1] if "." in payload.kind else payload.kind
+            text = str(payload.payload.get("text", ""))
+            artifact_meta = payload.payload.get("artifact")
+            artifact_line = ""
+            if isinstance(artifact_meta, dict) and artifact_meta.get("uri"):
+                artifact_line = (
+                    f"\n📎 artifact: `{artifact_meta.get('uri')}` "
+                    f"({artifact_meta.get('size_bytes','?')} bytes, "
+                    f"sha256={artifact_meta.get('sha256','?')[:12]}…)"
+                )
+            forwarded = f"**{handle}** _[{display_kind}]_\n{text}{artifact_line}"
+            tm = services.thread_manager
+            background_tasks.add_task(
+                _post_to_discord_safely, tm, discord_thread_id, forwarded,
+            )
         return _serialize_event(ev, repo) | {"operation_id": op.id}
+
+
+async def _post_to_discord_safely(thread_manager, discord_thread_id: str, text: str) -> None:
+    """Best-effort Discord forwarder. Logged + swallowed on any error so
+    a flaky Discord client never blocks the bridge from accepting
+    events. Discord-disabled mode short-circuits inside post_message
+    itself."""
+    try:
+        await thread_manager.post_message(discord_thread_id, text)
+    except Exception as exc:  # noqa: BLE001
+        import logging
+        logging.getLogger(__name__).warning(
+            "v3 → Discord forward failed for thread=%s: %r", discord_thread_id, exc,
+        )
 
 
 @router.post("/{operation_id}/close")
