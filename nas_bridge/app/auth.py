@@ -129,15 +129,15 @@ def hash_actor_token(plaintext: str) -> str:
     return _hashlib.sha256(plaintext.encode("utf-8")).hexdigest()
 
 
-def _resolve_actor_token_handle(token: str | None) -> str | None:
+def _resolve_actor_token(token: str | None) -> tuple[str | None, str | None]:
     """If ``token`` resolves to a non-revoked ``actor_tokens_v2`` row,
-    return the bound actor's handle. Otherwise None.
+    return ``(actor_handle, scope)``. Otherwise ``(None, None)``.
 
     Imported lazily so the ``app.auth`` module stays cheap to import
     in environments that don't use v2 at all.
     """
     if not token:
-        return None
+        return None, None
     from .db import session_scope
     from .kernel.v2 import V2Repository
     from .kernel.v2.models import ActorV2Model
@@ -145,9 +145,70 @@ def _resolve_actor_token_handle(token: str | None) -> str | None:
     with session_scope() as db:
         bound = repo.get_actor_token_by_hash(db, token_hash=hash_actor_token(token))
         if bound is None:
-            return None
+            return None, None
         actor = db.get(ActorV2Model, bound.actor_id)
-        return actor.handle if actor else None
+        if actor is None:
+            return None, None
+        return actor.handle, bound.scope
+
+
+def _resolve_actor_token_handle(token: str | None) -> str | None:
+    """Back-compat wrapper around ``_resolve_actor_token`` for callers
+    that only need the handle (no scope decision)."""
+    handle, _ = _resolve_actor_token(token)
+    return handle
+
+
+# v3 phase 4 token scopes. Stable wire vocabulary.
+TOKEN_SCOPE_ADMIN = "admin"
+TOKEN_SCOPE_SPEAK = "speak"
+TOKEN_SCOPE_READ_ONLY = "read-only"
+ALL_TOKEN_SCOPES: frozenset[str] = frozenset({
+    TOKEN_SCOPE_ADMIN, TOKEN_SCOPE_SPEAK, TOKEN_SCOPE_READ_ONLY,
+})
+
+# Required scope per protocol "verb category". A token must carry a
+# scope >= the required one for the operation to be admissible.
+_SCOPE_RANK = {
+    TOKEN_SCOPE_READ_ONLY: 1,
+    TOKEN_SCOPE_SPEAK: 2,
+    TOKEN_SCOPE_ADMIN: 3,
+}
+
+
+def _scope_satisfies(actual: str, needed: str) -> bool:
+    return _SCOPE_RANK.get(actual, 0) >= _SCOPE_RANK.get(needed, 99)
+
+
+def require_scope(
+    request: Request,
+    *,
+    x_actor_token: str | None,
+    needed: str,
+) -> None:
+    """Reject a request whose token scope is below the required level.
+
+    No-op when ``x_actor_token`` is missing — legacy / shared-bearer
+    flow stays unchanged. The token-bearing path gets the additional
+    enforcement so a ``read-only`` token cannot mutate even if the
+    handle would otherwise be authorized.
+    """
+    if not x_actor_token:
+        return
+    _, scope = _resolve_actor_token(x_actor_token)
+    if scope is None:
+        # invalid/revoked tokens are caught by verify_actor_handle_claim;
+        # don't double-error here.
+        return
+    if not _scope_satisfies(scope, needed):
+        _raise_auth_error(
+            request=request,
+            detail=(
+                f"X-Actor-Token scope={scope!r} insufficient; "
+                f"this endpoint needs scope>={needed!r}"
+            ),
+            status_code=status.HTTP_403_FORBIDDEN,
+        )
 
 
 def verify_actor_handle_claim(

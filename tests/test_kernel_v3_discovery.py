@@ -141,3 +141,69 @@ def test_discoverable_unknown_actor_still_returns_self_join_ops(client):
     assert r.status_code == 200
     visible_ids = {item["id"] for item in r.json()["items"]}
     assert op_id in visible_ids
+
+
+def test_discoverable_kinds_filter_excludes_incompatible_ops(client):
+    """v3 phase 4: when asker declares ``kinds``, ops whose most
+    recent expected_response.kinds doesn't intersect are filtered."""
+    op_id = _open_op(client, title="answer-only op")
+    # Post a question with kinds=[answer] — this becomes the op's
+    # latest expected_response whitelist.
+    client.post(
+        f"/v2/operations/{op_id}/events",
+        json={
+            "actor_handle": "@alice",
+            "kind": "speech.question",
+            "payload": {"text": "?"},
+            "addressed_to_many": ["bob"],
+            "expected_response": {
+                "from_actor_handles": ["@bob"],
+                "kinds": ["answer"],
+            },
+        },
+    )
+    # carol declares she only does object → op excluded
+    r = client.get(
+        "/v2/operations/discoverable",
+        params={"for": "@carol", "kinds": "object"},
+    )
+    visible_ids = {item["id"] for item in r.json()["items"]}
+    assert op_id not in visible_ids
+    # carol declares she does answer → op included
+    r = client.get(
+        "/v2/operations/discoverable",
+        params={"for": "@carol", "kinds": "answer"},
+    )
+    visible_ids = {item["id"] for item in r.json()["items"]}
+    assert op_id in visible_ids
+
+
+def test_discoverable_pagination_cursor(client):
+    """Open many ops; first page returns N + a cursor; second page
+    returns the older ops; concatenating the two covers all."""
+    op_ids = [
+        _open_op(client, title=f"op {i}") for i in range(5)
+    ]
+    r = client.get(
+        "/v2/operations/discoverable",
+        params={"for": "@bob", "limit": 2},
+    )
+    body = r.json()
+    page_ids: list[str] = [it["id"] for it in body["items"]]
+    assert len(page_ids) == 2
+    cursor = body["next_cursor"]
+    assert cursor is not None
+
+    seen = set(page_ids)
+    while cursor:
+        r = client.get(
+            "/v2/operations/discoverable",
+            params={"for": "@bob", "limit": 2, "cursor": cursor},
+        )
+        body = r.json()
+        for it in body["items"]:
+            seen.add(it["id"])
+        cursor = body["next_cursor"]
+    # Eventually all 5 visible
+    for op_id in op_ids:
+        assert op_id in seen

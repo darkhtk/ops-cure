@@ -75,6 +75,8 @@ def get_inbox(
 def list_discoverable_operations(
     actor_handle: str = Query(..., alias="for", description="Actor handle (e.g. '@bob') asking 'what could I join?'"),
     space_id: str | None = Query(default=None, description="Optional scope to a single space"),
+    kinds: str | None = Query(default=None, description="Comma-separated speech kinds the asker can produce; ops whose expected_response.kinds is incompatible are filtered"),
+    cursor: str | None = Query(default=None, description="Opaque cursor from a previous response"),
     limit: int = Query(default=100, ge=1, le=500),
     caller: BridgeCaller = Depends(require_bridge_caller),  # noqa: ARG001
 ) -> dict[str, Any]:
@@ -98,6 +100,24 @@ def list_discoverable_operations(
     repo = V2Repository()
     items: list[dict[str, Any]] = []
     from ..kernel.v2 import contract as _v2_contract
+    asker_kinds: set[str] | None = None
+    if kinds:
+        asker_kinds = {
+            k.strip().removeprefix("speech.")
+            for k in kinds.split(",") if k.strip()
+        }
+
+    # Cursor encodes (created_at_iso, op_id). Opaque to clients.
+    import base64 as _b64
+    import json as _json
+    cursor_after: tuple[str, str] | None = None
+    if cursor:
+        try:
+            decoded = _json.loads(_b64.urlsafe_b64decode(cursor.encode()).decode())
+            cursor_after = (decoded["created_at"], decoded["id"])
+        except Exception:  # noqa: BLE001 - bad cursor → ignore
+            cursor_after = None
+
     with session_scope() as db:
         from ..kernel.v2.models import OperationV2Model, OperationParticipantV2Model
         from sqlalchemy import select as _select
@@ -116,20 +136,46 @@ def list_discoverable_operations(
         stmt = _select(OperationV2Model).where(OperationV2Model.state == "open")
         if space_id:
             stmt = stmt.where(OperationV2Model.space_id == space_id)
-        stmt = stmt.order_by(OperationV2Model.created_at.desc()).limit(max(1, min(int(limit), 500)))
+        # Cursor: strict-less-than tuple comparison on (created_at, id)
+        if cursor_after is not None:
+            from datetime import datetime as _dt
+            try:
+                cursor_dt = _dt.fromisoformat(cursor_after[0])
+            except ValueError:
+                cursor_dt = None
+            if cursor_dt is not None:
+                stmt = stmt.where(
+                    (OperationV2Model.created_at < cursor_dt)
+                    | (
+                        (OperationV2Model.created_at == cursor_dt)
+                        & (OperationV2Model.id < cursor_after[1])
+                    )
+                )
+        stmt = stmt.order_by(
+            OperationV2Model.created_at.desc(),
+            OperationV2Model.id.desc(),
+        ).limit(max(1, min(int(limit), 500)))
+
+        last_cursor_payload: dict[str, str] | None = None
         for op in db.scalars(stmt):
             if op.id in already_in:
                 continue
             policy = repo.operation_policy(op)
             jp = policy.get("join_policy")
             if jp == _v2_contract.JOIN_POLICY_INVITE_ONLY:
-                # Only surface invite_only ops where the asker is
-                # already invited (existing participant).
                 if actor_id is None:
                     continue
-                # actor isn't in already_in (filtered above) so they
-                # can't have been invited; skip.
                 continue
+            if asker_kinds is not None:
+                trigger_kinds = _last_expected_kinds(repo, db, op.id)
+                if trigger_kinds is not None:
+                    allowed = set(trigger_kinds)
+                    if (
+                        _v2_contract.EXPECTED_RESPONSE_KIND_WILDCARD not in allowed
+                        and not (asker_kinds & allowed)
+                    ):
+                        continue
+            created_iso = op.created_at.isoformat() if op.created_at else None
             items.append({
                 "id": op.id,
                 "space_id": op.space_id,
@@ -137,9 +183,38 @@ def list_discoverable_operations(
                 "title": op.title,
                 "intent": op.intent,
                 "policy": policy,
-                "created_at": op.created_at.isoformat() if op.created_at else None,
+                "created_at": created_iso,
             })
-    return {"actor_handle": handle, "items": items}
+            # Materialize cursor data INSIDE the session so attribute
+            # access doesn't trip after commit.
+            if created_iso is not None:
+                last_cursor_payload = {
+                    "created_at": created_iso,
+                    "id": op.id,
+                }
+
+    next_cursor = None
+    if last_cursor_payload is not None and len(items) >= limit:
+        next_cursor = _b64.urlsafe_b64encode(
+            _json.dumps(last_cursor_payload).encode()
+        ).decode()
+    return {
+        "actor_handle": handle,
+        "items": items,
+        "next_cursor": next_cursor,
+    }
+
+
+def _last_expected_kinds(repo, db, op_id: str) -> list[str] | None:
+    """Return the most recent expected_response.kinds whitelist for
+    the op (None if none of the last 20 events declared one). Used by
+    the discovery endpoint's kinds filter."""
+    events = repo.list_events(db, operation_id=op_id, limit=20)
+    for e in reversed(events):
+        ex = repo.event_expected_response(e)
+        if ex and ex.get("kinds"):
+            return list(ex["kinds"])
+    return None
 
 
 @router.get("/inbox/stream")

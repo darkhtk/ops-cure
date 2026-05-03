@@ -39,8 +39,10 @@ from .claude_runtime import ClaudeRun
 # urllib stream. The bridge sends SSE heartbeats every ~15s, so 60s gives
 # plenty of margin for transient TCP buffering or scheduling jitter.
 _SSE_OPEN_TIMEOUT_SECONDS = 60.0
-_SSE_RECONNECT_BACKOFF_SECONDS = 5.0
+_SSE_RECONNECT_BACKOFF_BASE_SECONDS = 1.0   # exponential backoff base
+_SSE_RECONNECT_BACKOFF_MAX_SECONDS = 60.0   # cap
 _RUN_RESULT_TIMEOUT_SECONDS = 180.0
+_HEARTBEAT_INTERVAL_SECONDS = 60.0
 
 
 class BridgeAgentLoop:
@@ -97,6 +99,7 @@ class BridgeAgentLoop:
         self._stopping = False
         self._sse_thread: threading.Thread | None = None
         self._worker_thread: threading.Thread | None = None
+        self._heartbeat_thread: threading.Thread | None = None
         self._event_q: queue.Queue[dict[str, Any]] = queue.Queue()
         self._seen_event_ids: set[str] = set()  # idempotency
         # Traceparent of the SSE session — captured from the response
@@ -116,27 +119,90 @@ class BridgeAgentLoop:
             name=f"agent-loop-worker:{self._actor_handle}",
             daemon=True,
         )
+        # v3 phase 4: liveness heartbeat. The bridge already sees
+        # activity from SSE / POSTs implicitly, but during long idle
+        # periods a periodic ping keeps last_seen_at fresh so
+        # presence consumers don't false-positive "agent dead".
+        self._heartbeat_thread = threading.Thread(
+            target=self._heartbeat_loop,
+            name=f"agent-loop-heartbeat:{self._actor_handle}",
+            daemon=True,
+        )
         self._sse_thread.start()
         self._worker_thread.start()
+        self._heartbeat_thread.start()
         self._log(f"agent loop started: handle={self._actor_handle} cwd={self._cwd}")
 
     def stop(self) -> None:
         self._stopping = True
-        # Worker drains via sentinel; SSE thread breaks on next read.
+        # Worker drains via sentinel; SSE / heartbeat threads break on
+        # next loop iteration (they check _stopping).
         self._event_q.put({"_sentinel": True})
+
+    # ---- heartbeat ----------------------------------------------------
+
+    def _heartbeat_loop(self) -> None:
+        while not self._stopping:
+            # Sleep first so we don't double-ping on startup (the SSE
+            # subscribe + first inbox event already proves liveness).
+            for _ in range(int(_HEARTBEAT_INTERVAL_SECONDS)):
+                if self._stopping:
+                    return
+                time.sleep(1)
+            try:
+                self._post_heartbeat()
+            except Exception as e:  # noqa: BLE001
+                self._log(f"heartbeat error: {e}")
+
+    def _post_heartbeat(self) -> None:
+        url = (
+            f"{self._bridge_url}/v2/actors/"
+            f"{urllib.request.quote(self._actor_handle.lstrip('@'))}/heartbeat"
+        )
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self._token}",
+        }
+        if self._actor_token:
+            headers["X-Actor-Token"] = self._actor_token
+        if self._sse_traceparent:
+            headers["traceparent"] = self._sse_traceparent
+        req = urllib.request.Request(
+            url,
+            data=b"{}",  # body is empty JSON object
+            method="POST",
+            headers=headers,
+        )
+        with urllib.request.urlopen(req, timeout=15.0) as resp:
+            resp.read()
 
     # ---- SSE reader ---------------------------------------------------
 
     def _sse_loop(self) -> None:
+        # v3 phase 4: exponential backoff + jitter so 30 agents
+        # reconnecting after a bridge restart don't all hammer at the
+        # same instant.
+        import random
+        attempt = 0
         while not self._stopping:
             try:
                 self._consume_one_sse_session()
+                attempt = 0  # reset on clean exit
             except Exception as e:  # noqa: BLE001
-                self._log(f"agent loop SSE error: {e}; reconnecting in "
-                          f"{_SSE_RECONNECT_BACKOFF_SECONDS}s")
+                attempt += 1
+                base = _SSE_RECONNECT_BACKOFF_BASE_SECONDS * min(
+                    2 ** (attempt - 1), int(_SSE_RECONNECT_BACKOFF_MAX_SECONDS),
+                )
+                base = min(base, _SSE_RECONNECT_BACKOFF_MAX_SECONDS)
+                jitter = base * (random.random() * 0.2)  # ±10% (×0..×0.2)
+                wait = base + jitter
+                self._log(
+                    f"agent loop SSE error: {e}; reconnect attempt={attempt} "
+                    f"in {wait:.1f}s"
+                )
+                time.sleep(wait)
             if self._stopping:
                 return
-            time.sleep(_SSE_RECONNECT_BACKOFF_SECONDS)
 
     def _consume_one_sse_session(self) -> None:
         url = (

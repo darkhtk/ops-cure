@@ -14,7 +14,7 @@ from sqlalchemy import func, select
 from ..auth import BridgeCaller, require_bridge_caller
 from ..db import session_scope
 from ..kernel.v2 import V2Repository
-from ..kernel.v2.models import OperationV2Model
+from ..kernel.v2.models import ActorV2Model, OperationV2Model
 
 router = APIRouter(prefix="/v2/diagnostics", tags=["v2-diagnostics"])
 
@@ -65,6 +65,31 @@ def diagnostics(
         for kind, count in rows:
             kind_distribution[kind] = int(count)
 
+    # v3 phase 4 — actor presence summary. Surfaces the actor rows we
+    # have, sorted by recent activity. Consumers (UIs, health checks)
+    # decide what "stale" means; this endpoint just exposes raw
+    # last_seen_at so the policy isn't baked into the bridge.
+    presence: list[dict[str, Any]] = []
+    with session_scope() as db:
+        actors = list(
+            db.scalars(
+                select(ActorV2Model).order_by(
+                    ActorV2Model.last_seen_at.desc().nullslast()
+                ).limit(200)
+            )
+        )
+        for a in actors:
+            presence.append({
+                "handle": a.handle,
+                "kind": a.kind,
+                "status": a.status,
+                "last_seen_at": a.last_seen_at.isoformat() if a.last_seen_at else None,
+            })
+
+    # v3 phase 4 — protocol version usage counter (from middleware).
+    from ..protocol_version import usage_counts as _proto_usage
+    protocol_usage = _proto_usage()
+
     return {
         "broker": {
             "spaces": len(backlog_summary),
@@ -76,4 +101,9 @@ def diagnostics(
             "by_state": state_distribution,
             "by_kind": kind_distribution,
         },
+        "actors": {
+            "total": len(presence),
+            "presence": presence,
+        },
+        "protocol_versions": protocol_usage,
     }

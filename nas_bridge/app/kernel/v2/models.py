@@ -76,6 +76,14 @@ class ActorTokenV2Model(Base):
     )
     token_hash: Mapped[str] = mapped_column(Text())
     label: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    # v3 phase 4: capability scope. Three fixed values:
+    #   "admin"     -- full handle authority (default for back-compat)
+    #   "speak"     -- POST events / close / heartbeat / inbox SSE; no
+    #                  token issuance, no revoke
+    #   "read-only" -- inbox SSE + GET only; no mutation
+    # Stored as plain text, validated at issue time. Future expansion
+    # adds new scope values; clients should ignore unknown scopes.
+    scope: Mapped[str] = mapped_column(Text(), default="admin")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 

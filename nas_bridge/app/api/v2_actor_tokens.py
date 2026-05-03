@@ -6,6 +6,9 @@ Token lifecycle:
   GET    /v2/actors/{handle}/tokens          list (metadata only, no plaintext)
   POST   /v2/actors/{handle}/tokens/{id}/revoke   soft-revoke
 
+  POST   /v2/actors/{handle}/heartbeat       (phase 4) liveness ping;
+                                              updates actors_v2.last_seen_at
+
 All endpoints require the shared admin bearer (the existing
 ``require_bridge_caller`` dependency); per-actor tokens cannot mint
 themselves. Plaintext is shown on issue and never again.
@@ -20,10 +23,13 @@ from __future__ import annotations
 import secrets
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel
 
-from ..auth import BridgeCaller, hash_actor_token, require_bridge_caller
+from ..auth import (
+    ALL_TOKEN_SCOPES, BridgeCaller, TOKEN_SCOPE_ADMIN,
+    hash_actor_token, require_bridge_caller, verify_actor_handle_claim,
+)
 from ..db import session_scope
 from ..kernel.v2 import V2Repository
 from ..kernel.v2.actor_service import ActorService
@@ -33,6 +39,7 @@ router = APIRouter(prefix="/v2/actors", tags=["v2-actor-tokens", "protocol-v3-pu
 
 class IssueTokenRequest(BaseModel):
     label: str | None = None
+    scope: str = TOKEN_SCOPE_ADMIN
 
 
 class IssueTokenResponse(BaseModel):
@@ -40,6 +47,7 @@ class IssueTokenResponse(BaseModel):
     actor_handle: str
     token: str          # plaintext, returned ONCE
     label: str | None = None
+    scope: str
     created_at: str
 
 
@@ -67,6 +75,11 @@ def issue_actor_token(
     same identity. Returns the plaintext token *once* — store it on
     the agent side immediately."""
     handle_norm = _normalize(handle)
+    if payload.scope not in ALL_TOKEN_SCOPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown scope {payload.scope!r}; valid: {sorted(ALL_TOKEN_SCOPES)}",
+        )
     repo = V2Repository()
     plaintext = secrets.token_urlsafe(48)
     token_hash = hash_actor_token(plaintext)
@@ -79,12 +92,14 @@ def issue_actor_token(
             actor_id=actor.id,
             token_hash=token_hash,
             label=payload.label,
+            scope=payload.scope,
         )
         return {
             "id": row.id,
             "actor_handle": handle_norm,
             "token": plaintext,
             "label": row.label,
+            "scope": row.scope,
             "created_at": row.created_at.isoformat(),
         }
 
@@ -107,12 +122,48 @@ def list_actor_tokens(
                 "id": r.id,
                 "actor_handle": handle_norm,
                 "label": r.label,
+                "scope": r.scope,
                 "created_at": r.created_at.isoformat(),
                 "revoked_at": r.revoked_at.isoformat() if r.revoked_at else None,
             }
             for r in rows
         ]
     return {"actor_handle": handle_norm, "tokens": items}
+
+
+@router.post("/{handle}/heartbeat")
+def actor_heartbeat(
+    handle: str,
+    request: Request,
+    caller: BridgeCaller = Depends(require_bridge_caller),  # noqa: ARG001
+    x_actor_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """v3 phase 4 — liveness ping.
+
+    Updates ``actors_v2.last_seen_at`` so other participants (and
+    future presence sweepers) can tell the difference between "agent
+    quiet because nothing to say" and "agent dead". Auto-provisions
+    the actor row if absent — a fresh agent's first heartbeat doubles
+    as registration.
+    """
+    handle_norm = _normalize(handle)
+    verify_actor_handle_claim(
+        request, claimed_handle=handle_norm, x_actor_token=x_actor_token,
+    )
+    repo = V2Repository()
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    with session_scope() as db:
+        actor = ActorService(repo).ensure_actor_by_handle(
+            db, handle=handle_norm, display_name=handle.lstrip("@"), kind="ai",
+        )
+        repo.update_actor_presence(
+            db, actor_id=actor.id, status="online", last_seen_at=now,
+        )
+        return {
+            "actor_handle": handle_norm,
+            "last_seen_at": now.isoformat(),
+        }
 
 
 @router.post("/{handle}/tokens/{token_id}/revoke")

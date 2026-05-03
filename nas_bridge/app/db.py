@@ -250,6 +250,15 @@ def _named_migrations(connection) -> tuple[NamedMigration, ...]:
                 ],
             ),
         ),
+        NamedMigration(
+            name="20260503_actor_token_scope",
+            statements=missing_columns(
+                "actor_tokens_v2",
+                [
+                    ("scope", "TEXT NOT NULL DEFAULT 'admin'"),
+                ],
+            ),
+        ),
     )
 
 

@@ -14,7 +14,10 @@ from typing import Any
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
-from ..auth import BridgeCaller, require_bridge_caller, verify_actor_handle_claim
+from ..auth import (
+    BridgeCaller, TOKEN_SCOPE_SPEAK,
+    require_bridge_caller, require_scope, verify_actor_handle_claim,
+)
 from ..db import session_scope
 from ..kernel.v2 import V2Repository
 from ..kernel.v2.models import OperationEventV2Model
@@ -315,6 +318,7 @@ def open_operation(
         claimed_handle=payload.opener_actor_handle,
         x_actor_token=x_actor_token,
     )
+    require_scope(request, x_actor_token=x_actor_token, needed=TOKEN_SCOPE_SPEAK)
     """Open a new operation. Delegates to ChatConversationService.open_conversation
     in the chat-only era; the response surfaces the v2 operation id
     directly so callers never need the v1 conversation id."""
@@ -389,6 +393,7 @@ def append_event(
     verify_actor_handle_claim(
         request, claimed_handle=payload.actor_handle, x_actor_token=x_actor_token,
     )
+    require_scope(request, x_actor_token=x_actor_token, needed=TOKEN_SCOPE_SPEAK)
     if not payload.kind.startswith("speech."):
         raise HTTPException(
             status_code=400,
@@ -470,6 +475,7 @@ def close_operation(
     verify_actor_handle_claim(
         request, claimed_handle=payload.actor_handle, x_actor_token=x_actor_token,
     )
+    require_scope(request, x_actor_token=x_actor_token, needed=TOKEN_SCOPE_SPEAK)
     v1_id = _operation_to_v1_conversation_id(operation_id)
     services = request.app.state.services
     from ..behaviors.chat.conversation_service import (

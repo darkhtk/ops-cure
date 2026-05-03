@@ -68,13 +68,18 @@ class V2Repository:
         actor_id: str,
         token_hash: str,
         label: str | None = None,
+        scope: str = "admin",
     ) -> ActorTokenV2Model:
         """Issue a new actor token. Caller computes the hash; the
-        plaintext never reaches the repository."""
+        plaintext never reaches the repository.
+
+        ``scope`` controls capability: ``admin`` / ``speak`` /
+        ``read-only`` (validated at API layer)."""
         row = ActorTokenV2Model(
             actor_id=actor_id,
             token_hash=token_hash,
             label=label,
+            scope=scope,
         )
         db.add(row)
         db.flush()
