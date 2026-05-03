@@ -1,5 +1,11 @@
 # Protocol v3 — Speech Act Pragmatics + Op Governance
 
+> **Note**: this document captures *design rationale* — why v3 looks
+> the way it does, what gaps it closed, and what's deferred. The
+> **normative wire contract** is at
+> [protocol-v3-spec.md](./protocol-v3-spec.md). When this design doc
+> and the spec disagree, the spec wins.
+
 Two new primitives close the protocol-level problems surfaced in the
 3-persona / 5-task live exercise. v3 is **additive**: phase 1 stores +
 threads the new fields, phase 2 enforces them, phase 3 deprecates the
