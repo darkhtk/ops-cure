@@ -72,6 +72,12 @@ SPEECH_KINDS: frozenset[str] = frozenset({
     # PR20: low-cost ack ("noted", thumbs-up). Reduces noise on
     # "I see you" turns without forcing a full agree/object.
     "react",
+    # v3-additive governance acts. ``move_close`` is "I move we close
+    # this op with resolution X"; ``ratify`` is "I approve closing"
+    # (typically a reply to a prior move_close). The bridge's policy
+    # engine consults these to enforce non-unilateral close policies.
+    "move_close",
+    "ratify",
 })
 
 

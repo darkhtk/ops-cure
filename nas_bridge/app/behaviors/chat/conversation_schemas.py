@@ -41,6 +41,10 @@ SpeechKind = Literal[
     # registers presence + intent. Useful for reducing noise on
     # "I see you" turns.
     "react",
+    # v3 governance acts. The bridge's policy engine treats these
+    # specially when computing close admissibility.
+    "move_close",
+    "ratify",
 ]
 
 

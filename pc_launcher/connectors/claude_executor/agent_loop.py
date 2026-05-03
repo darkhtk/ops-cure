@@ -388,6 +388,8 @@ class BridgeAgentLoop:
     _ALLOWED_SPEECH_KINDS = {
         "claim", "question", "answer", "propose", "agree", "object",
         "evidence", "block", "defer", "summarize", "react",
+        # v3 governance acts.
+        "move_close", "ratify",
     }
 
     def _post_claim(

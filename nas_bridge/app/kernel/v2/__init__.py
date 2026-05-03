@@ -63,6 +63,15 @@ from .capabilities import (  # noqa: F401
     make_capability_authorizer,
     make_per_capability_authorizer,
 )
+from .policy_engine import (  # noqa: F401
+    PolicyEngine,
+    PolicyViolation,
+    CODE_MAX_ROUNDS_EXHAUSTED,
+    CODE_REPLY_KIND_REJECTED,
+    CODE_CLOSE_NEEDS_OPERATOR,
+    CODE_CLOSE_NEEDS_QUORUM,
+    CODE_CLOSE_NEEDS_PARTICIPANT,
+)
 
 __all__ = [
     "ActorV2Model",
@@ -86,4 +95,11 @@ __all__ = [
     "CAP_TASK_COMPLETE",
     "CAP_TASK_FAIL",
     "CAP_TASK_APPROVE_DESTRUCTIVE",
+    "PolicyEngine",
+    "PolicyViolation",
+    "CODE_MAX_ROUNDS_EXHAUSTED",
+    "CODE_REPLY_KIND_REJECTED",
+    "CODE_CLOSE_NEEDS_OPERATOR",
+    "CODE_CLOSE_NEEDS_QUORUM",
+    "CODE_CLOSE_NEEDS_PARTICIPANT",
 ]

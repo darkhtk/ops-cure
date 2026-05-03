@@ -673,6 +673,35 @@ class ChatConversationService:
                     _v2_contract.CAP_CONVERSATION_CLOSE_OPENER,
                     caller_context=caller_context,
                 )
+            # v3 phase 2: enforce op governance close policy. The legacy
+            # gate above already verified actor identity + capability.
+            # The policy engine adds the additional contract:
+            #   - operator_ratifies: requires a chat.speech.ratify from a
+            #     participant with role=operator
+            #   - quorum:           requires N distinct ratifiers
+            #   - any_participant:  closer must be a participant
+            #   - opener_unilateral / default: no extra check
+            # bypass_task_guard (system / lease-driven) skips policy too.
+            if not bypass_task_guard and row.v2_operation_id:
+                from ...kernel.v2 import (
+                    PolicyEngine, PolicyViolation, V2Repository,
+                )
+                _v2_repo = V2Repository()
+                _v2_op = _v2_repo.get_operation(db, row.v2_operation_id)
+                if _v2_op is not None:
+                    _h = closed_by if closed_by.startswith("@") else f"@{closed_by}"
+                    actor_row = self._operation_mirror._actors.ensure_actor_by_handle(
+                        db, handle=_h or "@system",
+                    )
+                    try:
+                        PolicyEngine(_v2_repo).check_close_admissible(
+                            db, op=_v2_op, closer_actor_id=actor_row.id,
+                        )
+                    except PolicyViolation as exc:
+                        raise ChatConversationStateError(
+                            f"policy: {exc.detail}"
+                        ) from exc
+
             # When a task is bound and still active, only the task lifecycle
             # path (ChatTaskCoordinator.complete/fail) may close — refuse
             # manual closes so the bound RemoteTask doesn't get orphaned.
@@ -814,6 +843,30 @@ class ChatConversationService:
                 raise ChatConversationStateError(
                     f"invalid expected_response: {exc}"
                 ) from exc
+
+            # v3 phase 2: gate on op policy (max_rounds, reply-kind
+            # whitelist) BEFORE the mirror writes. Engine is no-op for
+            # ops with the default policy + no max_rounds.
+            from ...kernel.v2 import PolicyEngine, PolicyViolation, V2Repository
+            if row.v2_operation_id:
+                _v2_repo = V2Repository()
+                _v2_op = _v2_repo.get_operation(db, row.v2_operation_id)
+                if _v2_op is not None:
+                    try:
+                        PolicyEngine(_v2_repo).check_speech_admissible(
+                            db,
+                            op=_v2_op,
+                            actor_id="",  # not used for speech gates
+                            speech_kind=request.kind,
+                            replies_to_event_id=getattr(
+                                request, "replies_to_v2_event_id", None,
+                            ),
+                        )
+                    except PolicyViolation as exc:
+                        raise ChatConversationStateError(
+                            f"policy: {exc.detail}"
+                        ) from exc
+
             _mirror_v1_message_to_v2(
                 db, message, row, self._operation_mirror,
                 private_to_actors=list(request.private_to_actors)

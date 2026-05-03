@@ -120,41 +120,63 @@ gets `DEFAULT_OPERATION_POLICY` materialized at open time.
 Test status: **478/479 pass** (1 skipped = live LLM). Phase 1 introduces
 zero regressions vs the prior 471/472 baseline.
 
-## Phase 2 — opt-in enforcement (TODO)
+## Phase 2 — opt-in enforcement (DONE for 3/6, deferred for 3/6)
 
-What turns on:
+### Implemented in this round
 
-1. **Cascade prevention end-to-end.** Update agent_loop to drop the
-   legacy `BROADCAST` env (still present as a fallback in phase 1).
-   When `expected_response` is null on an event, the agent will *no
-   longer auto-respond* even with `BROADCAST=true` — broadcast becomes
-   "speak when explicitly invited" only.
+| Component | Enforcement |
+|---|---|
+| `kernel/v2/policy_engine.py` | New module. `PolicyEngine.check_speech_admissible` + `check_close_admissible`. Stable error codes (`policy.max_rounds_exhausted`, `policy.reply_kind_rejected`, `policy.close_needs_operator_ratify`, `policy.close_needs_quorum`, `policy.close_needs_participant`) for client-side mapping. |
+| `kernel/v2/repository.py` | `count_events()` for fast cap checks without paginating the log. |
+| `kernel/v2/contract.py` | Added `move_close` + `ratify` to `SPEECH_KINDS`. Drift detector keeps schema and contract aligned. |
+| `behaviors/chat/conversation_schemas.py` | `SpeechKind` Literal extended for `move_close` / `ratify`. |
+| `behaviors/chat/conversation_service.py` | `submit_speech` runs `check_speech_admissible` before mirror writes. `close_conversation` runs `check_close_admissible` after the legacy capability gate. `bypass_task_guard` paths skip enforcement (system / lease-driven closes keep their authority). |
+| `pc_launcher/.../agent_loop.py` | `_ALLOWED_SPEECH_KINDS` now includes `move_close` + `ratify` so personas can use those prefixes. |
+| `tests/test_kernel_v3_policy_engine.py` | 9 new tests: max_rounds (cap + unset noop), kind whitelist (reject + wildcard), close policies (default unilateral, any_participant, operator_ratifies — block until role + ratify, quorum — N distinct + de-dup, invalid `min_ratifiers=0` rejected). |
 
-2. **Close policy enforcement.** `POST /v2/operations/{id}/close`
-   currently allows anyone with `CAP_CONVERSATION_CLOSE` to close. With
-   `close_policy=operator_ratifies`, the bridge needs to:
-   - Reject direct close calls
-   - Accept a `MOVE_CLOSE` speech event from any participant
-   - Accept `RATIFY` events; transition state to `closed` only when a
-     participant with `@operator` role has ratified
+### Enforcement turns on automatically
 
-3. **`max_rounds` enforcement.** Bridge rejects events past the cap;
-   op auto-transitions to `expired`. Replaces the per-persona client
-   cap.
+Default policy (`close_policy=opener_unilateral`, no `max_rounds`)
+keeps exact v2 semantics — engine is a no-op. Stricter policies
+declared at op-open time activate the corresponding gates.
 
-4. **Context compaction.** When `context_compaction=rolling_summary`,
-   the bridge generates an op summary every N events and stores it as
-   an artifact. agent_loop's `_fetch_op_history` swaps to "summary +
-   recent N" instead of raw history.
+### Wire contract for clients
 
-5. **`expected_response.kinds` whitelist enforcement.** Bridge rejects
-   replies whose kind isn't in the allowed list. Today an `[AGREE]`
-   prefix that disagrees just sails through.
+`ChatConversationStateError` carrying `policy: <detail>` is the
+current-shape signal that an enforcement gate fired. Phase 2.5 will
+promote these to a typed HTTP 409 response with the engine's error
+code so clients can branch on machine-readable codes:
 
-6. **`by_round_seq` expiry.** Background sweep auto-emits a
-   `speech.defer` from the addressee when the round budget elapses.
-   Other participants then know the addressee couldn't / wouldn't
-   answer in time.
+```
+POST /v2/operations/{id}/close → 409 Conflict
+{ "code": "policy.close_needs_operator_ratify",
+  "detail": "close_policy=operator_ratifies requires a chat.speech.ratify
+             event from a participant with role='operator'" }
+```
+
+### Deferred to phase 2.5
+
+These needed more architecture than this round could land cleanly:
+
+1. **`by_round_seq` auto-DEFER.** Requires a periodic sweep to
+   examine open events with `expected_response.by_round_seq` set,
+   compare against current op `MAX(seq)`, and (when expired) emit a
+   synthetic `speech.defer` from the addressee. Recovery loop has the
+   wrong cadence; need either a dedicated `policy_sweeper` or to fold
+   this into the existing idle sweep.
+
+2. **`context_compaction=rolling_summary`.** Generating summaries
+   needs an LLM caller. The kernel deliberately doesn't carry an
+   API key (pivot earlier this work). Right shape: a designated
+   external agent (e.g. `@summarizer`) listens for compaction
+   triggers and posts `speech.summarize` artifacts.
+
+3. **`join_policy` enforcement.** Phase 1 stores the policy; phase 2
+   doesn't enforce it because there is no `JOIN` speech act yet. The
+   current "addressed_to auto-adds participant" semantics is the
+   implicit join — fine for `self_or_invite`, ambiguous for
+   `invite_only`. Phase 2.5 will add an explicit `JOIN` /  `INVITE`
+   pair (likely as new event kinds, not speech kinds).
 
 ## Phase 3 — deprecate the shims (TODO)
 

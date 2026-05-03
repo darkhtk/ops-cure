@@ -373,6 +373,26 @@ class V2Repository:
         # Unreachable -- last attempt either returns or raises.
         raise last_error if last_error else RuntimeError("insert_event retry exhausted")
 
+    def count_events(
+        self,
+        db: Session,
+        *,
+        operation_id: str,
+        kinds: list[str] | None = None,
+        kind_prefix: str | None = None,
+    ) -> int:
+        """Return the number of events recorded for an op, optionally
+        filtered. Used by the policy engine to enforce ``max_rounds``
+        without paginating the full event log."""
+        from sqlalchemy import func as _func, and_ as _and
+        clauses = [OperationEventV2Model.operation_id == operation_id]
+        if kinds:
+            clauses.append(OperationEventV2Model.kind.in_(kinds))
+        if kind_prefix:
+            clauses.append(OperationEventV2Model.kind.like(f"{kind_prefix}%"))
+        stmt = select(_func.count()).select_from(OperationEventV2Model).where(_and(*clauses))
+        return int(db.scalar(stmt) or 0)
+
     def list_events(
         self,
         db: Session,
