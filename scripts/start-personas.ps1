@@ -2,7 +2,11 @@
 param(
     [string]$BridgeUrl = "http://172.30.1.12:18080",
     [string]$Token     = "kmagD8TckFIFoqr7gpgMjtIWKCOqat_GmvnyraA4IEUo3nhKDMbeKKtq9VaHNgJ9",
-    [string]$AgentCwd  = "C:\Users\darkh\Projects\ops-cure-scratch"
+    [string]$AgentCwd  = "C:\Users\darkh\Projects\ops-cure-scratch",
+    # v3 phase 4: when true, mint a per-actor token (scope=speak) for
+    # each persona and pass it via X-Actor-Token. Required when the
+    # bridge runs with BRIDGE_REQUIRE_ACTOR_TOKEN=1.
+    [switch]$IssueActorTokens
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
@@ -38,6 +42,26 @@ $personas = @(
 )
 
 foreach ($p in $personas) {
+    # v3 phase 4: optionally mint a per-actor token (scope=speak) so
+    # the agent_loop authenticates via X-Actor-Token rather than the
+    # shared bearer with self-asserted handle.
+    $actorToken = $null
+    if ($IssueActorTokens) {
+        $headers = @{
+            "Authorization" = "Bearer $Token"
+            "Content-Type" = "application/json"
+        }
+        $issuedHandle = $p.Handle.TrimStart('@')
+        $issued = Invoke-RestMethod `
+            -Uri "$BridgeUrl/v2/actors/$issuedHandle/tokens" `
+            -Method POST `
+            -Headers $headers `
+            -Body '{"scope":"speak","label":"start-personas.ps1"}' `
+            -TimeoutSec 30
+        $actorToken = $issued.token
+        Write-Host ("issued speak-scope token for {0}: id={1}" -f $p.Handle, $issued.id)
+    }
+
     # Per-process env overrides (PowerShell carries Env:* into Start-Process).
     $env:CLAUDE_BRIDGE_URL                    = $BridgeUrl
     $env:CLAUDE_BRIDGE_TOKEN                  = $Token
@@ -58,6 +82,11 @@ foreach ($p in $personas) {
     # full persona list at op-open / question time.
     $env:CLAUDE_BRIDGE_AGENT_HISTORY_LIMIT    = "20"
     $env:CLAUDE_BRIDGE_AGENT_SYSTEM_PROMPT    = $p.Sys
+    if ($actorToken) {
+        $env:CLAUDE_BRIDGE_AGENT_ACTOR_TOKEN = $actorToken
+    } else {
+        Remove-Item Env:CLAUDE_BRIDGE_AGENT_ACTOR_TOKEN -ErrorAction SilentlyContinue
+    }
     $proc = Start-Process -FilePath python `
         -ArgumentList "-u","-m","pc_launcher.connectors.claude_executor.runner" `
         -WorkingDirectory "C:\Users\darkh\Projects\ops-cure" `
