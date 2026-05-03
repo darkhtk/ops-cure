@@ -20,7 +20,7 @@ from ..auth import BridgeCaller, require_bridge_caller, verify_actor_handle_clai
 from ..db import session_scope
 from ..kernel.v2 import V2Repository
 
-router = APIRouter(prefix="/v2", tags=["v2-inbox"])
+router = APIRouter(prefix="/v2", tags=["v2-inbox", "protocol-v3-public"])
 
 
 def _serialize_operation(op, role: str, repo: V2Repository) -> dict[str, Any]:

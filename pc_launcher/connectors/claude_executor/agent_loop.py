@@ -99,6 +99,9 @@ class BridgeAgentLoop:
         self._worker_thread: threading.Thread | None = None
         self._event_q: queue.Queue[dict[str, Any]] = queue.Queue()
         self._seen_event_ids: set[str] = set()  # idempotency
+        # Traceparent of the SSE session — captured from the response
+        # headers when present so subsequent POSTs inherit the trace.
+        self._sse_traceparent: str | None = None
 
     # ---- lifecycle ----------------------------------------------------
 
@@ -152,6 +155,12 @@ class BridgeAgentLoop:
             headers=sse_headers,
         )
         with urllib.request.urlopen(req, timeout=_SSE_OPEN_TIMEOUT_SECONDS) as resp:
+            # Capture the bridge's session traceparent so all POSTs
+            # for this SSE session inherit the same trace_id (the
+            # span_id changes per request -- that's the bridge's job).
+            tp = resp.headers.get("traceparent")
+            if tp:
+                self._sse_traceparent = tp
             self._log(f"agent loop connected to {url}")
             event_name = ""
             data_lines: list[str] = []
@@ -271,6 +280,11 @@ class BridgeAgentLoop:
         h = {"Authorization": f"Bearer {self._token}"}
         if self._actor_token:
             h["X-Actor-Token"] = self._actor_token
+        # Forward the SSE session's traceparent so bridge-side logs
+        # link "event delivered to agent" → "claim posted by agent"
+        # under one trace_id.
+        if self._sse_traceparent:
+            h["traceparent"] = self._sse_traceparent
         return h
 
     def _op_is_closed(self, op_id: str) -> bool:
@@ -465,6 +479,8 @@ class BridgeAgentLoop:
         }
         if self._actor_token:
             post_headers["X-Actor-Token"] = self._actor_token
+        if self._sse_traceparent:
+            post_headers["traceparent"] = self._sse_traceparent
         req = urllib.request.Request(
             url,
             data=data,

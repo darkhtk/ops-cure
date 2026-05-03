@@ -19,7 +19,7 @@ from ..db import session_scope
 from ..kernel.v2 import V2Repository
 from ..kernel.v2.models import OperationEventV2Model
 
-router = APIRouter(prefix="/v2/operations", tags=["v2-operations"])
+router = APIRouter(prefix="/v2/operations", tags=["v2-operations", "protocol-v3-public"])
 
 
 def _normalize_handle(value: str | None) -> str | None:

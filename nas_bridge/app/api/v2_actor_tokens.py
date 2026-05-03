@@ -28,7 +28,7 @@ from ..db import session_scope
 from ..kernel.v2 import V2Repository
 from ..kernel.v2.actor_service import ActorService
 
-router = APIRouter(prefix="/v2/actors", tags=["v2-actor-tokens"])
+router = APIRouter(prefix="/v2/actors", tags=["v2-actor-tokens", "protocol-v3-public"])
 
 
 class IssueTokenRequest(BaseModel):

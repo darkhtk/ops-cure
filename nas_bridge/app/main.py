@@ -9,7 +9,7 @@ from typing import Any
 
 from fastapi import FastAPI
 
-from .api import actors, behaviors, events, health, kernel_approvals, kernel_scratch, kernel_tasks, presence, remote_tasks, sessions, spaces, v2_actor_tokens, v2_diagnostics, v2_inbox, v2_operations, verification, workers
+from .api import actors, behaviors, events, health, kernel_approvals, kernel_scratch, kernel_tasks, presence, remote_tasks, sessions, spaces, v2_actor_tokens, v2_diagnostics, v2_inbox, v2_operations, v3_schema, verification, workers
 from .behaviors.catalog import BehaviorCatalogService
 from .behaviors.chat import api as chat_api
 from .behaviors.remote_codex import api as remote_codex_api
@@ -381,6 +381,16 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Opscure Bridge", lifespan=lifespan)
+# v3 phase 4: protocol version negotiation. Middleware echoes
+# X-Protocol-Version-Supported on every response and rejects unknown
+# versions before they reach a route. See app/protocol_version.py.
+from .protocol_version import ProtocolVersionMiddleware  # noqa: E402
+app.add_middleware(ProtocolVersionMiddleware)
+# v3 phase 4: W3C traceparent propagation. Per-request trace_id +
+# span_id stored on a contextvar so log records can be enriched.
+from .trace_context import TraceparentMiddleware, install_logging_filter  # noqa: E402
+app.add_middleware(TraceparentMiddleware)
+install_logging_filter()
 app.include_router(health.router)
 app.include_router(actors.router)
 app.include_router(behaviors.router)
@@ -400,4 +410,5 @@ app.include_router(v2_actor_tokens.router)
 app.include_router(v2_inbox.router)
 app.include_router(v2_operations.router)
 app.include_router(v2_diagnostics.router)
+app.include_router(v3_schema.router)
 app.include_router(workers.router)
