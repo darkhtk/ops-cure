@@ -220,6 +220,9 @@ def _publish_v2_inbox_fanout(
             "addressed_to_actor_ids": repo.event_addressed_to(ev),
             "private_to_actor_ids": repo.event_private_to(ev),
             "replies_to_event_id": ev.replies_to_event_id,
+            # v3-additive: surface expected_response on the wrapped envelope
+            # so SSE consumers don't have to re-parse payload._meta.
+            "expected_response": repo.event_expected_response(ev),
         }
         content_json = json.dumps(wrapped, ensure_ascii=False)
         cursor = encode_event_cursor(created_at=ev.created_at, event_id=ev.id)
@@ -248,6 +251,8 @@ def _mirror_v1_message_to_v2(
     operation_mirror: OperationMirror,
     *,
     private_to_actors: list[str] | None = None,
+    expected_response: dict | None = None,
+    replies_to_v2_event_id: str | None = None,
 ) -> None:
     """F4: Resolve replies_to + addressed_to_many from v1 forms and call
     OperationMirror.mirror_message. Stamps v2_event_id back on the v1
@@ -274,6 +279,10 @@ def _mirror_v1_message_to_v2(
         parent = db.get(ChatMessageModel, msg.replies_to_speech_id)
         if parent is not None:
             parent_v2 = parent.v2_event_id
+    # v3-additive: explicit v2 reply id wins when caller provided one
+    # (external /v2 callers don't have v1 message ids).
+    if replies_to_v2_event_id and not parent_v2:
+        parent_v2 = replies_to_v2_event_id
     msg.v2_event_id = operation_mirror.mirror_message(
         db,
         v2_operation_id=conversation_row.v2_operation_id,
@@ -284,6 +293,7 @@ def _mirror_v1_message_to_v2(
         addressed_to_many=extras,
         replies_to_v2_event_id=parent_v2,
         private_to_actors=private_to_actors,
+        expected_response=expected_response,
     )
 
 
@@ -548,6 +558,23 @@ class ChatConversationService:
                 is_general=False,
             )
 
+            # v3-additive: persist operation policy on the mirrored v2
+            # op. Always materialize a normalized policy so the op has
+            # a known governance shape (close rule, max_rounds, etc.).
+            # request.policy=None falls back to DEFAULT_OPERATION_POLICY.
+            try:
+                _normalized_policy = _v2_contract.validate_operation_policy(
+                    getattr(request, "policy", None)
+                )
+            except ValueError as exc:
+                raise ChatConversationStateError(f"invalid policy: {exc}") from exc
+            from ...kernel.v2 import V2Repository as _V2Repo
+            _V2Repo().set_operation_policy(
+                db,
+                operation_id=row.v2_operation_id,
+                policy=_normalized_policy,
+            )
+
             payload = self._summary_payload(row)
             event_message = ChatMessageModel(
                 thread_id=thread_row.id,
@@ -777,10 +804,22 @@ class ChatConversationService:
             )
             db.add(message)
             db.flush()
+            # v3-additive: validate expected_response and pass through
+            # to the v2 mirror. None / empty bypasses entirely.
+            try:
+                _expected = _v2_contract.validate_expected_response(
+                    getattr(request, "expected_response", None)
+                )
+            except ValueError as exc:
+                raise ChatConversationStateError(
+                    f"invalid expected_response: {exc}"
+                ) from exc
             _mirror_v1_message_to_v2(
                 db, message, row, self._operation_mirror,
                 private_to_actors=list(request.private_to_actors)
                 if getattr(request, "private_to_actors", None) else None,
+                expected_response=_expected,
+                replies_to_v2_event_id=getattr(request, "replies_to_v2_event_id", None),
             )
 
             row.last_speech_at = now

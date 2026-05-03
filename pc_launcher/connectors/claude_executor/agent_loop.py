@@ -191,17 +191,30 @@ class BridgeAgentLoop:
         # Self-loop guard: never respond to my own speech.
         if self._actor_id and ev.get("actor_id") == self._actor_id:
             return
-        # Addressing:
-        #   broadcast=False (default): respond only if I'm explicitly addressed.
-        #   broadcast=True: also respond to room-wide speech (empty
-        #                   addressed_to_actor_ids list); still skip when
-        #                   addressed list is non-empty AND excludes me.
-        addressed = ev.get("addressed_to_actor_ids") or []
-        if addressed:
-            if self._actor_id and self._actor_id not in addressed:
+        # v3-additive routing:
+        #
+        # If the speaker declared an explicit reply contract via
+        # ``expected_response`` (kernel.v2.contract.validate_expected_response),
+        # that wins -- respond iff my handle is listed in
+        # ``expected_response.from_actor_handles``. Otherwise the
+        # cascade-prevention is mechanical and broadcast/cap heuristics
+        # don't get to second-guess it.
+        #
+        # When expected_response is absent (legacy v2 events), fall back
+        # to the original logic: explicit address wins, empty address
+        # only triggers when ``BROADCAST=true``.
+        ex = ev.get("expected_response")
+        if isinstance(ex, dict):
+            wanted = ex.get("from_actor_handles") or []
+            if self._actor_handle not in wanted:
                 return
-        elif not self._broadcast:
-            return
+        else:
+            addressed = ev.get("addressed_to_actor_ids") or []
+            if addressed:
+                if self._actor_id and self._actor_id not in addressed:
+                    return
+            elif not self._broadcast:
+                return
         # Per-op runaway guard (matters mostly when broadcast=True).
         op_id = ev.get("operation_id")
         if (
@@ -244,7 +257,10 @@ class BridgeAgentLoop:
                 f"agent loop: run produced no result for op={op_id} ev={ev.get('event_id')}"
             )
             return
-        if self._post_claim(op_id, result_text):
+        # v3-additive: link reply to the trigger event so the bridge's
+        # reply chain (replies_to_event_id) is no longer dead.
+        trigger_event_id = ev.get("event_id")
+        if self._post_claim(op_id, result_text, in_reply_to=trigger_event_id):
             self._responses_per_op[op_id] = self._responses_per_op.get(op_id, 0) + 1
 
     def _fetch_op_history(self, op_id: str) -> list[dict[str, Any]]:
@@ -374,7 +390,13 @@ class BridgeAgentLoop:
         "evidence", "block", "defer", "summarize", "react",
     }
 
-    def _post_claim(self, op_id: str, text: str) -> bool:
+    def _post_claim(
+        self,
+        op_id: str,
+        text: str,
+        *,
+        in_reply_to: str | None = None,
+    ) -> bool:
         # Personas can opt out of speaking by replying with a literal SKIP
         # sentinel — keeps broadcast loops quiet when one persona has
         # nothing to add.
@@ -393,11 +415,17 @@ class BridgeAgentLoop:
                 kind = tag
                 cleaned = cleaned[tag_end + 1 :].lstrip()
         url = f"{self._bridge_url}/v2/operations/{op_id}/events"
-        body = {
+        body: dict[str, Any] = {
             "actor_handle": self._actor_handle,
             "kind": f"speech.{kind}",
             "payload": {"text": cleaned},
         }
+        if in_reply_to:
+            # The /v2/operations/{id}/events endpoint accepts
+            # ``replies_to_event_id`` -- v3-additive: this is now always
+            # populated when we're replying to an inbox event so the
+            # bridge can reconstruct disagreement / proposal chains.
+            body["replies_to_event_id"] = in_reply_to
         data = json.dumps(body).encode("utf-8")
         req = urllib.request.Request(
             url,

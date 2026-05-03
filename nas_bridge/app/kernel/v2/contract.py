@@ -1,4 +1,5 @@
-"""Protocol v2 Contract — single source of truth for vocab, state, and rules.
+"""Protocol v2 + v3-additive Contract — single source of truth for vocab,
+state, and rules.
 
 Every speech kind, evidence kind, resolution vocabulary, state transition,
 default capability, and event-to-state mapping that the v2 protocol
@@ -29,6 +30,8 @@ Future additions to v2 (G5 hierarchy, F11 task lifecycle on native
 v2, capability inheritance) all start by editing THIS module.
 """
 from __future__ import annotations
+
+from typing import Any
 
 
 # ----- operation kinds ----------------------------------------------------
@@ -184,6 +187,160 @@ DEFAULT_CAPABILITIES_AI: tuple[str, ...] = (
     CAP_TASK_COMPLETE,
     CAP_TASK_FAIL,
 )
+
+
+# ----- protocol v3 primitives (additive in this phase) -------------------
+# Two new constructs were missing in the original speech-act schema:
+#   1. expected_response on each event (who is expected to reply, with
+#      what speech kind, by when), so cascade prevention + reply-target
+#      resolution become mechanical instead of heuristic.
+#   2. operation policy (close rule, max rounds, member admission,
+#      context compaction) so an op is a *governed process*, not just
+#      an event log.
+#
+# These are accepted optionally everywhere and stored inside existing
+# JSON columns (event payload._meta.expected_response, op metadata.policy)
+# so no schema migration is required for phase-1 introduction.
+
+# expected_response.kinds: subset of SPEECH_KINDS the responder may
+# choose from. Empty/missing => any speech kind. The literal "*" sentinel
+# is also accepted to mean "any kind".
+EXPECTED_RESPONSE_KIND_WILDCARD = "*"
+
+
+def validate_expected_response(value: dict | None) -> dict | None:
+    """Normalize and validate an expected_response payload. Returns the
+    normalized dict (or None if the input is empty/None). Raises
+    ValueError on shape violations.
+
+    Shape:
+      {
+        "from_actor_handles": [str, ...]  # who is expected to reply
+        "kinds": [speech_kind, ...]?      # restricted reply kinds, or "*"
+        "by_round_seq": int?              # if responder hasn't replied
+                                          # by this op-event seq, the op
+                                          # is considered to have a
+                                          # pending defer (caller policy)
+      }
+    """
+    if value in (None, {}):
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("expected_response must be a dict")
+    out: dict[str, Any] = {}
+    handles = value.get("from_actor_handles") or value.get("from") or []
+    if isinstance(handles, str):
+        handles = [handles]
+    if not isinstance(handles, list):
+        raise ValueError("expected_response.from_actor_handles must be a list")
+    norm_handles: list[str] = []
+    for h in handles:
+        if not isinstance(h, str) or not h:
+            raise ValueError("expected_response.from_actor_handles entries must be non-empty strings")
+        norm_handles.append(h if h.startswith("@") else f"@{h}")
+    out["from_actor_handles"] = norm_handles
+    kinds = value.get("kinds")
+    if kinds is not None:
+        if isinstance(kinds, str):
+            kinds = [kinds]
+        if not isinstance(kinds, list):
+            raise ValueError("expected_response.kinds must be a list")
+        for k in kinds:
+            if k != EXPECTED_RESPONSE_KIND_WILDCARD and k not in SPEECH_KINDS:
+                raise ValueError(f"expected_response.kinds: unknown speech kind {k!r}")
+        out["kinds"] = list(kinds)
+    by = value.get("by_round_seq")
+    if by is not None:
+        if not isinstance(by, int) or by < 0:
+            raise ValueError("expected_response.by_round_seq must be a non-negative int")
+        out["by_round_seq"] = by
+    return out
+
+
+# Operation policy controls op-level governance. None of the fields are
+# enforced in phase 1 (we just persist), but the shape is fixed so phase 2
+# can switch on it without schema churn.
+CLOSE_POLICY_OPENER_UNILATERAL = "opener_unilateral"  # current behavior
+CLOSE_POLICY_ANY_PARTICIPANT = "any_participant"
+CLOSE_POLICY_QUORUM = "quorum"  # parameterized by min_ratifiers
+CLOSE_POLICY_OPERATOR_RATIFIES = "operator_ratifies"  # @operator role required
+
+ALL_CLOSE_POLICIES: frozenset[str] = frozenset({
+    CLOSE_POLICY_OPENER_UNILATERAL,
+    CLOSE_POLICY_ANY_PARTICIPANT,
+    CLOSE_POLICY_QUORUM,
+    CLOSE_POLICY_OPERATOR_RATIFIES,
+})
+
+JOIN_POLICY_INVITE_ONLY = "invite_only"
+JOIN_POLICY_SELF_OR_INVITE = "self_or_invite"
+JOIN_POLICY_OPEN = "open"
+
+ALL_JOIN_POLICIES: frozenset[str] = frozenset({
+    JOIN_POLICY_INVITE_ONLY,
+    JOIN_POLICY_SELF_OR_INVITE,
+    JOIN_POLICY_OPEN,
+})
+
+CONTEXT_COMPACTION_NONE = "none"
+CONTEXT_COMPACTION_ROLLING_SUMMARY = "rolling_summary"
+
+ALL_CONTEXT_COMPACTIONS: frozenset[str] = frozenset({
+    CONTEXT_COMPACTION_NONE,
+    CONTEXT_COMPACTION_ROLLING_SUMMARY,
+})
+
+
+DEFAULT_OPERATION_POLICY: dict = {
+    "close_policy": CLOSE_POLICY_OPENER_UNILATERAL,
+    "join_policy": JOIN_POLICY_SELF_OR_INVITE,
+    "context_compaction": CONTEXT_COMPACTION_NONE,
+    "max_rounds": None,            # None = unbounded
+    "min_ratifiers": None,         # only used when close_policy=quorum
+    "bot_open": True,              # bots are first-class openers by default
+}
+
+
+def validate_operation_policy(value: dict | None) -> dict:
+    """Normalize an operation policy. Falls back to DEFAULT_OPERATION_POLICY
+    for missing keys. Raises ValueError on unknown enum values."""
+    base = dict(DEFAULT_OPERATION_POLICY)
+    if value:
+        if not isinstance(value, dict):
+            raise ValueError("policy must be a dict")
+        cp = value.get("close_policy")
+        if cp is not None:
+            if cp not in ALL_CLOSE_POLICIES:
+                raise ValueError(f"policy.close_policy: unknown {cp!r}")
+            base["close_policy"] = cp
+        jp = value.get("join_policy")
+        if jp is not None:
+            if jp not in ALL_JOIN_POLICIES:
+                raise ValueError(f"policy.join_policy: unknown {jp!r}")
+            base["join_policy"] = jp
+        cc = value.get("context_compaction")
+        if cc is not None:
+            if cc not in ALL_CONTEXT_COMPACTIONS:
+                raise ValueError(f"policy.context_compaction: unknown {cc!r}")
+            base["context_compaction"] = cc
+        mr = value.get("max_rounds")
+        if mr is not None:
+            if not isinstance(mr, int) or mr <= 0:
+                raise ValueError("policy.max_rounds must be a positive int")
+            base["max_rounds"] = mr
+        mq = value.get("min_ratifiers")
+        if mq is not None:
+            if not isinstance(mq, int) or mq <= 0:
+                raise ValueError("policy.min_ratifiers must be a positive int")
+            base["min_ratifiers"] = mq
+        bo = value.get("bot_open")
+        if bo is not None:
+            if not isinstance(bo, bool):
+                raise ValueError("policy.bot_open must be a bool")
+            base["bot_open"] = bo
+    if base["close_policy"] == CLOSE_POLICY_QUORUM and not base.get("min_ratifiers"):
+        raise ValueError("policy.close_policy=quorum requires min_ratifiers")
+    return base
 
 
 def validate_contract() -> None:

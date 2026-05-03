@@ -39,6 +39,8 @@ def _serialize_event(ev, repo: V2Repository) -> dict[str, Any]:
         "addressed_to_actor_ids": repo.event_addressed_to(ev),
         "private_to_actor_ids": repo.event_private_to(ev),
         "replies_to_event_id": ev.replies_to_event_id,
+        # v3-additive: explicit reply contract.
+        "expected_response": repo.event_expected_response(ev),
         "created_at": ev.created_at.isoformat() if ev.created_at else None,
     }
 
@@ -52,6 +54,9 @@ def _serialize_operation(op, repo: V2Repository) -> dict[str, Any]:
         "title": op.title,
         "intent": op.intent,
         "metadata": repo.operation_metadata(op),
+        # v3-additive: surface the normalized governance policy
+        # explicitly so callers don't have to dig into metadata.
+        "policy": repo.operation_policy(op),
         "resolution": op.resolution,
         "resolution_summary": op.resolution_summary,
         "closed_by_actor_id": op.closed_by_actor_id,
@@ -232,6 +237,10 @@ class V2OpenOperationRequest(BaseModel):
     opener_actor_handle: str
     objective: str | None = None
     success_criteria: dict[str, Any] | None = None
+    # v3-additive op governance policy. See
+    # kernel.v2.contract.DEFAULT_OPERATION_POLICY for the shape +
+    # defaults. Stored under op.metadata.policy on dual-write.
+    policy: dict[str, Any] | None = None
 
 
 class V2EventRequest(BaseModel):
@@ -242,6 +251,9 @@ class V2EventRequest(BaseModel):
     addressed_to_many: list[str] | None = None
     replies_to_event_id: str | None = None
     private_to_actors: list[str] | None = None
+    # v3-additive: declare who is expected to respond + how. See
+    # kernel.v2.contract.validate_expected_response.
+    expected_response: dict[str, Any] | None = None
 
 
 class V2CloseRequest(BaseModel):
@@ -326,6 +338,8 @@ def open_operation(
     }
     if payload.success_criteria is not None:
         open_kwargs["success_criteria"] = payload.success_criteria
+    if payload.policy is not None:
+        open_kwargs["policy"] = payload.policy
     try:
         summary = chat_service.open_conversation(
             discord_thread_id=payload.space_id,
@@ -392,8 +406,13 @@ def append_event(
                 content=text,
                 addressed_to=payload.addressed_to,
                 addressed_to_many=payload.addressed_to_many or [],
-                replies_to_speech_id=None,  # v2 reply chain resolved below
+                replies_to_speech_id=None,  # v2 callers use v2 ids
+                # v3-additive: pass v2 reply id straight through so the
+                # mirror writes it BEFORE fan-out (SSE subscribers see
+                # the link in real time).
+                replies_to_v2_event_id=payload.replies_to_event_id,
                 private_to_actors=payload.private_to_actors or [],
+                expected_response=payload.expected_response,
             ),
         )
     except ChatConversationNotFoundError:

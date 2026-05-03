@@ -167,6 +167,12 @@ class ConversationOpenRequest(BaseModel):
     objective: str | None = None
     success_criteria: dict[str, Any] = Field(default_factory=dict)
     priority: str = "normal"
+    # v3-additive: optional governance policy for this op.
+    # See kernel.v2.contract.DEFAULT_OPERATION_POLICY for shape +
+    # defaults. Stored under op metadata.policy on dual-write so the
+    # bridge can later enforce close/quorum/compaction rules without
+    # a v3 schema migration.
+    policy: dict[str, Any] | None = None
 
     @field_validator("title", "intent", "opener_actor", "owner_actor", "addressed_to", "objective")
     @classmethod
@@ -195,6 +201,12 @@ class SpeechActSubmitRequest(BaseModel):
     # to keep that consistent (cross-conversation replies could arise
     # from cross-references like "see #other-conv message-X").
     replies_to_speech_id: str | None = None
+    # v3-additive: same pointer but expressed as the v2 event id.
+    # External /v2 callers don't have v1 message ids; the bridge
+    # resolves this at submit time so the reply chain lands BEFORE
+    # the broker fan-out (so SSE subscribers see it in real time, not
+    # after a re-fetch).
+    replies_to_v2_event_id: str | None = None
     # F6 (v2-only): when set, the speech is whispered to these actors
     # only. The v1 ChatMessageModel stores no privacy bit -- it always
     # records the message. The v2 OperationEvent.private_to_actor_ids
@@ -202,6 +214,13 @@ class SpeechActSubmitRequest(BaseModel):
     # v1 readers (chat API GET /messages) currently do not (will be
     # closed in F7 reader transition).
     private_to_actors: list[str] = Field(default_factory=list)
+    # v3-additive: declare who is expected to respond, with what speech
+    # kinds, and by which round (op event seq).
+    # See kernel.v2.contract.validate_expected_response. Stored under
+    # event payload._meta.expected_response so external SSE consumers
+    # can drive cascade-prevention without inspecting any extra
+    # metadata column.
+    expected_response: dict[str, Any] | None = None
 
     @field_validator("addressed_to")
     @classmethod

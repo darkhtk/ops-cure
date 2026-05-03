@@ -134,6 +134,10 @@ async def stream_inbox(
                     "addressed_to_actor_ids": wrapped.get("addressed_to_actor_ids", []),
                     "private_to_actor_ids": wrapped.get("private_to_actor_ids"),
                     "replies_to_event_id": wrapped.get("replies_to_event_id"),
+                    # v3-additive: pass through expected_response so external
+                    # agents can do mechanical "should I respond?" without
+                    # heuristics or BROADCAST flags.
+                    "expected_response": wrapped.get("expected_response"),
                     "created_at": envelope.event.created_at.isoformat() if envelope.event.created_at else None,
                     "cursor": envelope.cursor,
                 }

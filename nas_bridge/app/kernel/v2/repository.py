@@ -142,6 +142,33 @@ class V2Repository:
     def operation_metadata(self, row: OperationV2Model) -> dict[str, Any]:
         return dict(_loads(row.metadata_json, {}))
 
+    def operation_policy(self, row: OperationV2Model) -> dict[str, Any]:
+        """Return the v3-additive policy dict for the op, or the
+        contract default. Stored under metadata.policy for compatibility
+        with the existing schema (no v3 column migration needed)."""
+        from . import contract as _v2_contract
+        meta = self.operation_metadata(row)
+        return _v2_contract.validate_operation_policy(meta.get("policy"))
+
+    def set_operation_policy(
+        self,
+        db: Session,
+        *,
+        operation_id: str,
+        policy: dict[str, Any],
+    ) -> OperationV2Model | None:
+        """Persist a normalized policy dict into op.metadata.policy.
+        Caller is expected to have validated via
+        contract.validate_operation_policy first."""
+        row = db.get(OperationV2Model, operation_id)
+        if row is None:
+            return None
+        meta = self.operation_metadata(row)
+        meta["policy"] = policy
+        row.metadata_json = _dumps(meta)
+        db.flush()
+        return row
+
     def list_operations_in_space(
         self,
         db: Session,
@@ -367,6 +394,20 @@ class V2Repository:
 
     def event_payload(self, row: OperationEventV2Model) -> dict[str, Any]:
         return dict(_loads(row.payload_json, {}))
+
+    def event_expected_response(self, row: OperationEventV2Model) -> dict[str, Any] | None:
+        """Return the v3 expected_response dict for the event, or None
+        if the speaker did not declare one. Stored nested in payload at
+        ``payload._meta.expected_response`` so the existing payload column
+        carries it without a v3-specific schema migration."""
+        payload = self.event_payload(row)
+        meta = payload.get("_meta") or {}
+        if not isinstance(meta, dict):
+            return None
+        ex = meta.get("expected_response")
+        if not isinstance(ex, dict):
+            return None
+        return ex
 
     def event_addressed_to(self, row: OperationEventV2Model) -> list[str]:
         return list(_loads(row.addressed_to_actor_ids_json, []))

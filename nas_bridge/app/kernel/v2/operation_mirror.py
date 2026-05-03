@@ -96,6 +96,7 @@ class OperationMirror:
         addressed_to_many: list[str] | None,
         replies_to_v2_event_id: str | None,
         private_to_actors: list[str] | None = None,
+        expected_response: dict | None = None,
     ) -> str | None:
         """Mirror a v1 ChatMessage row into a v2 OperationEvent. Returns
         the v2 event id (or None if the conversation has no v2 mirror)."""
@@ -166,6 +167,12 @@ class OperationMirror:
                     payload_dict["lifecycle"] = parsed
             except (ValueError, TypeError):
                 pass
+        # v3-additive: nest expected_response under payload._meta so
+        # SSE consumers (external agents) can read the speaker's reply
+        # contract without a v3 schema migration. Validation already
+        # ran at the API layer; this is just persistence.
+        if expected_response:
+            payload_dict["_meta"] = {"expected_response": dict(expected_response)}
         ev = self._repo.insert_event(
             db,
             operation_id=v2_operation_id,
