@@ -320,6 +320,13 @@ DEFAULT_OPERATION_POLICY: dict = {
     # from quorum-close by an orphan ``queued`` RemoteTask. Explicit
     # callers can flip either way.
     "bind_remote_task": True,
+    # T2.1: when True, close is rejected unless ≥1 OperationArtifact is
+    # attached to the op. Pairs with T1.2's speech.evidence + payload
+    # .artifact: the op cannot terminate cleanly without a deliverable.
+    # Default False so existing inquiry/proposal/non-task ops keep
+    # closing on close_policy alone. Useful with kind=task /
+    # kind=proposal where deliverable existence is part of completion.
+    "requires_artifact": False,
 }
 
 
@@ -431,6 +438,11 @@ def validate_operation_policy(value: dict | None) -> dict:
             if not isinstance(brt, bool):
                 raise ValueError("policy.bind_remote_task must be a bool")
             base["bind_remote_task"] = brt
+        ra = value.get("requires_artifact")
+        if ra is not None:
+            if not isinstance(ra, bool):
+                raise ValueError("policy.requires_artifact must be a bool")
+            base["requires_artifact"] = ra
     if base["close_policy"] == CLOSE_POLICY_QUORUM and not base.get("min_ratifiers"):
         raise ValueError("policy.close_policy=quorum requires min_ratifiers")
     return base

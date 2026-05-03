@@ -55,6 +55,7 @@ CODE_CLOSE_NEEDS_QUORUM = "policy.close_needs_quorum"
 CODE_CLOSE_NEEDS_PARTICIPANT = "policy.close_needs_participant"
 CODE_JOIN_INVITE_ONLY = "policy.join_invite_only"
 CODE_INVITE_NEEDS_PARTICIPANT = "policy.invite_needs_participant"
+CODE_CLOSE_NEEDS_ARTIFACT = "policy.close_needs_artifact"
 
 
 class PolicyEngine:
@@ -198,6 +199,26 @@ class PolicyEngine:
         """
         policy = self._repo.operation_policy(op)
         cp = policy.get("close_policy")
+
+        # T2.1 — orthogonal to close_policy. Even if the close_policy
+        # vote/quorum/role check passes, requires_artifact gates the
+        # close on having ≥1 OperationArtifact attached. Useful for
+        # kind=task / kind=proposal where deliverable existence is a
+        # completion criterion.
+        if policy.get("requires_artifact"):
+            artifacts = self._repo.list_artifacts_for_operation(
+                db, operation_id=op.id,
+            )
+            if not artifacts:
+                raise PolicyViolation(
+                    code=CODE_CLOSE_NEEDS_ARTIFACT,
+                    detail=(
+                        "policy.requires_artifact=true but no "
+                        "OperationArtifact is attached to this op; "
+                        "post a speech.evidence with payload.artifact "
+                        "before closing"
+                    ),
+                )
 
         if cp == _contract.CLOSE_POLICY_OPENER_UNILATERAL:
             return  # legacy / default — capability already gated

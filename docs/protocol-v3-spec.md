@@ -1,6 +1,6 @@
 # Opscure Bridge Protocol v3 — Normative Specification
 
-**Status**: Normative (rev 6, 2026-05-03). This document is the
+**Status**: Normative (rev 7, 2026-05-03). This document is the
 authoritative description of Opscure Bridge protocol v3.x. Where it
 disagrees with code, the spec is wrong and a clarifying patch is
 welcome — but in the meantime, the **wire test fixtures**
@@ -230,7 +230,8 @@ propagate to subsequent POSTs in the same logical session — they
   "max_rounds": int | null,
   "min_ratifiers": int | null,
   "bot_open": bool,
-  "bind_remote_task": bool
+  "bind_remote_task": bool,
+  "requires_artifact": bool
 }
 ```
 
@@ -270,9 +271,16 @@ propagate to subsequent POSTs in the same logical session — they
   and **MUST NOT** be coupled to a `RemoteTask`; close admissibility
   is governed solely by `close_policy`. Default depends on the
   caller surface — see §9.1.
+- `requires_artifact` (default `false`): when `true`, the bridge
+  **MUST** reject `POST /close` with HTTP 400 + code
+  `policy.close_needs_artifact` while the op has zero
+  `OperationArtifact` rows attached. Orthogonal to `close_policy`
+  — both must be satisfied. Pairs with `speech.evidence` carrying
+  a `payload.artifact` (§8.1.2) for ops where deliverable
+  existence is part of completion criteria.
 
 A bridge **MUST** materialize a normalized policy on every op at
-open time. Clients reading the op **MUST** see all seven fields.
+open time. Clients reading the op **MUST** see all eight fields.
 
 ### 6.2 ExpectedResponse
 
@@ -819,6 +827,12 @@ calls while the bound `RemoteTask` is in a non-terminal state
 before the op can close. This guard does **NOT** apply when
 `bind_remote_task=false`; see §9.1.
 
+When `policy.requires_artifact=true`, the bridge **MUST** reject
+`POST /close` with HTTP 400 + code `policy.close_needs_artifact`
+while the op has zero `OperationArtifact` rows attached. This
+gate is orthogonal to `close_policy` — both must be satisfied.
+Artifacts arrive via `speech.evidence` (§8.1.2).
+
 Failures map to error codes in §13.
 
 ## 10. Privacy
@@ -944,6 +958,7 @@ branch on (status, code) pairs:
 | `policy.close_needs_participant` | `close_policy=any_participant` and closer is not a participant |
 | `policy.join_invite_only` | `join_policy=invite_only` and joiner has no prior participant role |
 | `policy.invite_needs_participant` | `chat.speech.invite` from non-participant |
+| `policy.close_needs_artifact` | `requires_artifact=true` and op has zero `OperationArtifact` rows |
 
 Authentication / scope rejections use the corresponding HTTP status:
 
@@ -1037,6 +1052,7 @@ for details.
 | 4 | 2026-05-03 | T1.1: `policy.bind_remote_task` field added to `OperationPolicy` (§6.1). New §9.1 "Choosing `kind`" makes the collab-task vs executor-task distinction normative. `/v2/operations` defaults `bind_remote_task=false` for `kind=task`; the v1 `/api/chat` path keeps the legacy `true` default. §9.4 documents the task-bound close guard (only fires when `bind_remote_task=true`). Sub-section 9.2/9.3 renumbered. Tests: `tests/test_v3_bind_remote_task_policy.py`. |
 | 5 | 2026-05-03 | Cross-impl parser conformance: 37-case JSON fixture at `tests/fixtures/reply_prefix_cases.json` exercised by Python (`tests/test_v3_parser_cross_impl_fixture.py`) and TypeScript (`clients/ts-agent-loop/src/parser-fixture.test.ts`). Fixed Python parser drift on prefix-length boundary — `]` at exact idx 200 was rejected by Python but accepted by TS. Both impls now agree on **≤ 200 chars (inclusive)**, documented in §8.1.1. |
 | 6 | 2026-05-03 | T1.2: artifact-on-evidence (§8.1.2). `speech.evidence` may carry a `payload.artifact` dict (`kind/uri/sha256/mime/size_bytes` + optional `label`/`metadata`). The bridge auto-creates an `OperationArtifact` row tied to the event. Other speech kinds ignore the field. Partial/malformed artifact is rejected with HTTP 400 (no silent drop). Reference Python parser (`agent_loop.py`) understands an `ARTIFACT: path=...` first-line header and stats the file before posting. Tests: `tests/test_v3_artifact_evidence.py` (HTTP path) + `tests/test_v3_agent_loop_artifact_extract.py` (parser). |
+| 7 | 2026-05-03 | T2.1: `policy.requires_artifact` field added to `OperationPolicy` (§6.1, §9.4). When `true`, close is rejected with HTTP 400 + code `policy.close_needs_artifact` until ≥1 `OperationArtifact` row is attached. Orthogonal to `close_policy` — both must be satisfied. Default `false` (back-compat). Pairs with T1.2 evidence-with-artifact for "no close without deliverable" semantics. Tests: `tests/test_v3_requires_artifact_policy.py`. |
 
 ## Appendix A — Error code catalog (machine-readable)
 
@@ -1069,6 +1085,10 @@ for details.
   "policy.invite_needs_participant": {
     "http_status": 400,
     "summary": "speech.invite must come from an existing participant"
+  },
+  "policy.close_needs_artifact": {
+    "http_status": 400,
+    "summary": "policy.requires_artifact=true and op has zero OperationArtifact rows; post a speech.evidence with payload.artifact first"
   }
 }
 ```
