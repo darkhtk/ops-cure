@@ -178,18 +178,17 @@ class ProgressionSweeper:
 class ProgressionRunner:
     """Production wiring around ProgressionSweeper.
 
-    Phase-12 ships the *detection* layer: every tick the runner asks
-    the sweeper which ops have a stalled implicit follow-up, and
-    structured-logs each action. The emit path (turning a "nudge"
-    decision into a real ``chat.system.nudge`` event written through
-    the chat-service so v1↔v2 mirroring stays consistent) is phase
-    13's job — pulling that into phase 12 doubles the regression
-    surface and the ROI is the same.
+    Phase 12 shipped the *detection* layer (sweeper + log only).
+    Phase 13 (this class) wires the decisions through to actual events:
 
-    Operators who want to act on a stall today can grep the
-    ``opscure.progression_sweeper`` log for ``decision=nudge`` /
-    ``decision=defer`` and post a manual wake-ping. That's what the
-    repo's ``spawn-*-task.ps1`` scripts already do.
+      - ``"nudge"`` → ``ChatConversationService.emit_system_event(
+            kind="chat.system.nudge", addressed_to_handle=<target>,
+            replies_to_v2_event_id=<trigger>)``
+      - ``"defer"`` → ``emit_system_event(kind="chat.speech.defer", …)``
+
+    A chat-service handle is required for emission; if missing, the
+    runner falls back to log-only behaviour (back-compat with phase
+    12 unit tests that exercise just the loop).
     """
 
     def __init__(
@@ -198,10 +197,12 @@ class ProgressionRunner:
         sweeper: ProgressionSweeper,
         session_scope,
         interval_seconds: float = 30.0,
+        chat_service: object | None = None,
     ) -> None:
         self._sweeper = sweeper
         self._session_scope = session_scope
         self._interval = max(1.0, float(interval_seconds))
+        self._chat = chat_service
         self._stopping = False
 
     def stop(self) -> None:
@@ -210,8 +211,9 @@ class ProgressionRunner:
     async def run_forever(self) -> None:
         import asyncio
         logger.info(
-            "progression sweeper started: interval=%.1fs idle=%.1fs max_retries=%d",
+            "progression sweeper started: interval=%.1fs idle=%.1fs max_retries=%d emit=%s",
             self._interval, self._sweeper.idle_s, self._sweeper.max_retries,
+            "on" if self._chat is not None else "log-only",
         )
         while not self._stopping:
             await asyncio.sleep(self._interval)
@@ -223,14 +225,61 @@ class ProgressionRunner:
                 logger.exception("progression sweeper tick failed")
 
     def _tick_once(self) -> None:
+        # Phase 1: collect decisions inside one read session.
         with self._session_scope() as db:
             actions = self._sweeper.tick(db)
-        for a in actions:
-            if a.action == "skip":
-                continue
+            # Resolve op_id → v1 conversation_id while the session is
+            # open so the emit phase doesn't need its own read.
+            plans: list[tuple[SweepAction, str | None]] = []
+            for a in actions:
+                if a.action == "skip":
+                    continue
+                v1_conv_id = self._resolve_v1_conv_id(db, a.op_id)
+                plans.append((a, v1_conv_id))
+
+        # Phase 2: log every plan, optionally emit.
+        for a, v1_conv_id in plans:
             logger.info(
                 "progression decision=%s op=%s target=%s replies_to=%s reason=%s",
                 a.action, a.op_id, a.target_handle,
                 (a.replies_to_event_id or "-")[:8],
                 a.reason,
+            )
+            if self._chat is None or v1_conv_id is None:
+                continue
+            self._emit(action=a, v1_conv_id=v1_conv_id)
+
+    @staticmethod
+    def _resolve_v1_conv_id(db, op_id: str) -> str | None:
+        from ...behaviors.chat.models import ChatConversationModel
+        from sqlalchemy import select
+        return db.scalar(
+            select(ChatConversationModel.id).where(
+                ChatConversationModel.v2_operation_id == op_id,
+            )
+        )
+
+    def _emit(self, *, action: SweepAction, v1_conv_id: str) -> None:
+        kind = (
+            _contract.EVENT_SYSTEM_NUDGE if action.action == "nudge"
+            else "chat.speech.defer"
+        )
+        payload = {
+            "reason": action.reason,
+            "target_handle": action.target_handle,
+            "trigger_event_id": action.replies_to_event_id,
+            "decision": action.action,
+        }
+        try:
+            self._chat.emit_system_event(  # type: ignore[union-attr]
+                conversation_id=v1_conv_id,
+                kind=kind,
+                addressed_to_handle=action.target_handle,
+                replies_to_v2_event_id=action.replies_to_event_id,
+                payload=payload,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "progression emit failed op=%s decision=%s",
+                action.op_id, action.action,
             )

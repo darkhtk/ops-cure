@@ -377,6 +377,7 @@ async def lifespan(app: FastAPI):
             sweeper=progression_sweeper,
             session_scope=_session_scope_factory,
             interval_seconds=settings.progression_nudge_idle_s,
+            chat_service=services.chat_conversation_service,
         )
         services.progression_runner = progression_runner
         services.progression_runner_task = asyncio.create_task(

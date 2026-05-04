@@ -1,6 +1,6 @@
 # Opscure Bridge Protocol v3 — Normative Specification
 
-**Status**: Normative (rev 12, 2026-05-04). This document is the
+**Status**: Normative (rev 13, 2026-05-04). This document is the
 authoritative description of Opscure Bridge protocol v3.x. Where it
 disagrees with code, the spec is wrong and a clarifying patch is
 welcome — but in the meantime, the **wire test fixtures**
@@ -1167,25 +1167,41 @@ The sweeper logs every non-skip decision under
 for ``decision=nudge`` / ``decision=defer`` to see which ops are
 stalled and on which actor.
 
-### 18.2 Emission (rev 13 ships this layer — out of scope at rev 12)
+### 18.2 Emission (rev 13 ships this layer)
 
-When the *emit* layer ships, decisions become real events:
+The bridge **MUST** turn each non-skip decision into a real event:
 
-  - **nudge**: a ``chat.system.nudge`` written by the system actor,
+  - **nudge**: ``chat.system.nudge`` written by the ``system`` actor,
     addressed to the inferred responder, with
-    ``replies_to_event_id`` set to the trigger. Outside
-    ``SPEECH_KINDS`` so it does **not** count toward
-    ``policy.max_rounds`` and does **not** feed the over_speech
+    ``replies_to_event_id`` set to the trigger speech event. Outside
+    ``SPEECH_KINDS`` so it does **NOT** count toward
+    ``policy.max_rounds`` and does **NOT** feed the over_speech
     gauge. Carries no ``payload._meta.expected_response`` —
     receiving actors decide whether to act.
-  - **defer-escalate**: a ``chat.speech.defer`` from the system
-    actor on behalf of the inferred responder, surfacing the stall
-    to the operator's attention queue. Standard speech kind, so it
-    does count toward ``max_rounds`` (caps already in place).
+    Payload shape (informational, clients SHOULD treat as opaque):
 
-Until §18.2 ships, the operator emits the wake-ping by hand
-(``spawn-*-task.ps1`` style PowerShell call), guided by the
-``decision=...`` log line.
+    ```json
+    { "reason": "idle ≥30.0s, channel=expected_response",
+      "target_handle": "@curator",
+      "trigger_event_id": "<v2-event-uuid>",
+      "decision": "nudge" }
+    ```
+
+  - **defer-escalate**: ``chat.speech.defer`` from the ``system`` actor
+    on behalf of the inferred responder, surfacing the stall to the
+    operator's attention queue. This is a standard speech kind so it
+    DOES count toward ``max_rounds`` — operators capping rounds
+    tightly should size for ≤ ``max_retries`` system defers.
+
+Both emissions go through ``ChatConversationService.emit_system_event``
+which mirrors the over_speech path (v1 ChatMessageModel insert →
+v2 OperationEvent mirror → broker publish + v2 inbox SSE fanout) so
+every subscribed actor sees the event on their stream.
+
+Operators may set ``BRIDGE_PROGRESSION_DISABLED=1`` to fall back to
+phase-12 detection-only behaviour (log without emit) — useful for
+staged rollout. The runner also drops to log-only when no chat
+service is wired (test fixtures, dry runs).
 
 ### 18.3 Three-channel turn-taking
 
@@ -1219,6 +1235,7 @@ that always set ``addressed_to`` are unaffected.
 | 7 | 2026-05-03 | T2.1: `policy.requires_artifact` field added to `OperationPolicy` (§6.1, §9.4). When `true`, close is rejected with HTTP 400 + code `policy.close_needs_artifact` until ≥1 `OperationArtifact` row is attached. Orthogonal to `close_policy` — both must be satisfied. Default `false` (back-compat). Pairs with T1.2 evidence-with-artifact for "no close without deliverable" semantics. Tests: `tests/test_v3_requires_artifact_policy.py`. |
 | 8 | 2026-05-04 | RPG smoke 결함 정리 — `evidence` 와 `object` 가 `defer` 옆에 universal carve-out 으로 추가됨 (§12.2). 좁은 `kinds=` whitelist 가 demand-patch 흐름을 묶던 deadlock 해소. Reference `agent_loop.py` 가 (a) HTTP 400 rejection 을 다음 prompt 에 노출 (D2) 하고 (b) 트리거의 `expected_response.kinds` 를 LLM 에게 미리 알려줌 (D8) — 자기교정 가능. `addressed_to_*` 가 v3.1 에선 structural-only / `expected_response` 가 권장 surface 임을 §6.4 에 명시. Tests: `tests/test_v3_reply_kind_carveouts.py`, `tests/test_v3_agent_loop_rejection_surface.py`. |
 | 9 | 2026-05-04 | Unity arcade smoke 후속 — 6 결함 일괄 fix. **D9** ratify intent split: quorum gate 가 close-intent ratify 만 카운트 (explicit `payload.intent="close"` / replies_to `move_close` / replies_to artifact-bearing event / op 이미 artifact 보유). **D10** agent_loop prompt 에 "[KIND] MUST be position-0" 강조. **D11** `payload.artifacts: list` 다중 artifact 첨부 (singular `payload.artifact` 보존). **D14** agent_loop 가 claude run "no result" 도 `_last_run_failure` 로 캡처 → 다음 prompt 에 ⚠️ 노출 (D2 패턴). **P9.5** Discord forwarder 가 `/operations` open + `/close` lifecycle marker 도 forwarding. **D3** `expected_response.from_actor_handles` 에 미존재 handle WARN log (옵션 `BRIDGE_REQUIRE_KNOWN_HANDLES=1` 시 reject 400). 페르소나 prompt 에 domain pre-flight checklist 추가 (D12). Tests: `test_v3_ratify_intent_split.py`, `test_v3_multi_artifact.py`, `test_v3_discord_lifecycle_forward.py`, `test_v3_handle_validation.py`. |
+| 13 | 2026-05-04 | Phase 13 — progression emit layer. § 18.2 promoted from "rev 13 ships this" to normative: ProgressionRunner now turns each `decision=nudge` into a `chat.system.nudge` event and each `decision=defer` into a system-on-behalf `chat.speech.defer`, via the new `ChatConversationService.emit_system_event` method (mirrors the over_speech v1↔v2↔broker path). `chat.system.nudge` stays outside SPEECH_KINDS and does NOT count toward max_rounds. Tests: `test_chat_emit_system_event.py` (4), `test_kernel_v3_progression_emit.py` (3) — covers nudge emit, log-only fallback when no chat service, and 2-nudge-then-defer escalation. |
 | 12 | 2026-05-04 | Phase 12 — progression nudges (detection layer). New §18 defines the progression sweeper that detects stalled implicit follow-ups across three channels (`expected_response`, `addressed_to`, `replies_to` author) and structured-logs `decision=nudge` / `decision=defer` per stalled op. Three new settings: `BRIDGE_PROGRESSION_NUDGE_IDLE_S` (30s), `BRIDGE_PROGRESSION_NUDGE_MAX_RETRIES` (2), `BRIDGE_PROGRESSION_DISABLED` (false). `_compute_effective_addr` (in `conversation_service`) now also considers `expected_response.from_actor_handles[0]` so the existing over_speech gauge stops missing implicit-only signals. Emission of `chat.system.nudge` / system-on-behalf `chat.speech.defer` events is explicitly deferred to phase 13 — operators currently surface stalls via the log. Tests: `test_kernel_v3_progression_helper.py` (9), `test_kernel_v3_progression_repo.py` (5), `test_kernel_v3_effective_addr.py` (8), `test_kernel_v3_progression_sweeper.py` (11). |
 | 11 | 2026-05-04 | Phase 11 — adversarial-robustness perimeter (axis H). New §17 "Bounds & quotas" defines transport-level (body 1 MiB, timeout 30 s) + parser-level (JSON depth 32, regex input 8 KiB) caps. New error codes `body.too_large` (413), `request.timeout` (504), `payload.depth_exceeded` (400) added to §13. `BRIDGE_BOUNDS_LOG_ONLY=1` enables observe-only rollout. SSE/heartbeat/health prefixes exempt from handler timeout. Tests: `test_security_bounds.py`, `test_security_regex_safety.py`, `tests/conformance/test_adversarial.py`. |
 | 10 | 2026-05-04 | Phase 10 — silent failures 전부 surface. **P10.1+P10.5** agent_loop pre-flight 가 본문 가운데 `[KIND]` 발견 시 post 거부 + self-rejection 캡처 (D10 깊이 패치). **P10.2** ARTIFACT 헤더가 path stat 실패 시 `_last_artifact_failure` 캡처 → 다음 prompt ⚠️. **P10.3** 5xx 도 `_last_post_rejection` 에 캡처 (transient flag) — 4xx 와 별도 가이드. **P10.4** `policy.requires_artifact` gate 가 success resolution (`completed`/`accepted`/`answered` 등) 만 적용 — abandoned/cancelled/failed/withdrawn/superseded/dropped 는 bypass. **P10.6** 같은 op 같은 kind 연속 4xx 시 prompt escalate (🚨 "Stop trying [<kind>]"). **P10.7** TS reference (`agent.ts`) 가 plural artifacts + intent 패스스루. **P10.10** task-bound close 메시지에 `bind_remote_task=false` 우회 hint. Tests: `test_v3_phase10_silent_failure_surfacing.py`, `test_v3_abandoned_bypass_artifact.py`. 회귀: `test_kernel_v3_*` / conformance / multiturn helper 들에 close-intent stamping 추가. |

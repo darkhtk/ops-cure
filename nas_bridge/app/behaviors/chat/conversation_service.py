@@ -1900,3 +1900,75 @@ class ChatConversationService:
 
     def _publish(self, envelope: EventEnvelope | None) -> None:
         publish_envelope(self._broker, envelope)
+
+    # ----- Phase 13: system-authored event emit ----------------------------
+
+    def emit_system_event(
+        self,
+        *,
+        conversation_id: str,
+        kind: str,
+        addressed_to_handle: str | None = None,
+        replies_to_v2_event_id: str | None = None,
+        payload: dict | None = None,
+    ) -> dict[str, str | None]:
+        """Emit a system-authored event into a chat conversation.
+
+        Used by the progression sweeper (phase 13) to issue
+        ``chat.system.nudge`` (off SPEECH_KINDS, advisory) and
+        ``chat.speech.defer`` (system-on-behalf escalation) follow-ups
+        when an op stalls on an implicit responder.
+
+        Mirrors the over_speech emit pattern in :meth:`submit_speech`:
+
+          1. Insert a ``ChatMessageModel`` row with ``actor_name="system"``.
+          2. ``_mirror_v1_message_to_v2`` to materialize the v2 event
+             (cascade: ``replies_to_v2_event_id`` carries the trigger
+             so the v2 event is correctly linked).
+          3. Publish to the chat broker AND fan out to v2 inbox SSE so
+             every subscriber actor sees it on their stream.
+
+        Returns ``{"v1_message_id": ..., "v2_event_id": ...}``. Raises
+        :class:`ChatConversationNotFoundError` on missing
+        ``conversation_id``.
+
+        Notes:
+        - Bypasses ``actor_authorizer`` / capability checks (system
+          actor is always allowed; the caller is the bridge itself).
+        - Does NOT update ``row.expected_speaker`` or the
+          ``unaddressed_speech_count`` gauge — the only side-effect on
+          turn-taking state lives in the audit log + SSE delivery.
+        - ``payload`` is JSON-serialized into ``content``; pass a flat
+          dict so log/diagnostic readers can parse it.
+        """
+        if payload is None:
+            payload = {}
+        with session_scope() as db:
+            row = db.get(ChatConversationModel, conversation_id)
+            if row is None:
+                raise ChatConversationNotFoundError(
+                    f"conversation {conversation_id!r} not found",
+                )
+            now = _utcnow()
+            msg = ChatMessageModel(
+                thread_id=row.thread_id,
+                conversation_id=row.id,
+                actor_name="system",
+                event_kind=kind,
+                addressed_to=addressed_to_handle,
+                content=json.dumps(payload, ensure_ascii=False),
+                created_at=now,
+            )
+            db.add(msg)
+            db.flush()
+            _mirror_v1_message_to_v2(
+                db, msg, row, self._operation_mirror,
+                replies_to_v2_event_id=replies_to_v2_event_id,
+            )
+            envelope = self._envelope_for(row.thread_id, msg)
+            v1_msg_id = msg.id
+            v2_event_id = msg.v2_event_id
+            v2_op_id = row.v2_operation_id
+        self._publish(envelope)
+        _publish_v2_inbox_fanout(self._broker, v2_op_id, v2_event_id)
+        return {"v1_message_id": v1_msg_id, "v2_event_id": v2_event_id}
