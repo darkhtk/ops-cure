@@ -167,6 +167,68 @@ EVENT_KIND_TO_TARGET_STATE: dict[str, str] = {
 EVENT_SYSTEM_NUDGE = "chat.system.nudge"
 
 
+# ----- phase 15: generic event-kind taxonomy --------------------------------
+# Event kinds historically carry a transport prefix (``chat.``) baked into
+# the wire format. Phase 15 makes the *category* part normative — any
+# matching code (policy engine, progression sweeper, operation mirror)
+# must look at the category, not the transport prefix, so a future
+# transport (cli, webhook, agent SDK direct) can ship its own prefix
+# without touching kernel code.
+#
+# Recognized event-kind shapes (all normative under spec rev 15):
+#
+#   <category>.<action>                         "speech.claim"
+#   <transport>.<category>.<action>             "chat.speech.claim"
+#   <transport>.<sub>.<category>.<action>       (reserved; not in use today)
+#
+# Categories the kernel cares about:
+SPEECH_CATEGORY = "speech"
+SYSTEM_CATEGORY = "system"
+CONVERSATION_CATEGORY = "conversation"
+TASK_CATEGORY = "task"
+
+
+def _category_of(kind: str) -> str | None:
+    """Return the category token of an event_kind, or None if the
+    shape is unrecognized.
+
+    Two recognized shapes:
+      - ``speech.claim``       → ``"speech"``
+      - ``chat.speech.claim``  → ``"speech"``
+
+    The function looks for the category token in the kind string and
+    returns the *first* known category found; this lets a future
+    transport.subtransport.category.action shape continue to work.
+    """
+    if not kind:
+        return None
+    parts = kind.split(".")
+    for tok in parts[:-1]:  # the last token is always the action
+        if tok in (SPEECH_CATEGORY, SYSTEM_CATEGORY,
+                   CONVERSATION_CATEGORY, TASK_CATEGORY):
+            return tok
+    return None
+
+
+def is_speech_kind(kind: str) -> bool:
+    """True iff the event_kind belongs to the ``speech`` category,
+    regardless of transport prefix."""
+    return _category_of(kind) == SPEECH_CATEGORY
+
+
+def is_system_kind(kind: str) -> bool:
+    return _category_of(kind) == SYSTEM_CATEGORY
+
+
+def speech_action(kind: str) -> str | None:
+    """Return the action token of a speech event_kind (e.g. ``claim``,
+    ``object``, ``ratify``, ``defer``, ``move_close``), or None if the
+    kind is not a speech event. Transport-prefix-agnostic."""
+    if not is_speech_kind(kind):
+        return None
+    return kind.rsplit(".", 1)[-1]
+
+
 def infer_implicit_responder(
     *,
     expected_response: dict | None,
