@@ -47,14 +47,18 @@ def test_spec_carries_section_18_progression():
     assert "decision=nudge" in text or "decision=" in text
 
 
-def test_changelog_carries_rev_12():
+def test_changelog_carries_progression_revs():
+    """Phase 12 introduced § 18 (rev 12, detection); phase 13 promoted
+    § 18.2 to normative (rev 13, emit). Both rows must remain in the
+    changelog so future readers can reconstruct the history."""
     spec_path = os.path.join(PROJECT_ROOT, "docs", "protocol-v3-spec.md")
     with open(spec_path, "r", encoding="utf-8") as f:
         text = f.read()
-    # Header status bumped
-    assert "Normative (rev 12" in text
-    # Changelog row
+    # Header status is the latest shipped rev.
+    assert "Normative (rev 13" in text
+    # Both phase rows persist.
     assert "| 12 |" in text and "Phase 12" in text
+    assert "| 13 |" in text and "Phase 13" in text
 
 
 # ---------------------------------------------------------------------------
