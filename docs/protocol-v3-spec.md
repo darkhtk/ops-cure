@@ -1,6 +1,6 @@
 # Opscure Bridge Protocol v3 — Normative Specification
 
-**Status**: Normative (rev 13, 2026-05-04). This document is the
+**Status**: Normative (rev 14, 2026-05-04). This document is the
 authoritative description of Opscure Bridge protocol v3.x. Where it
 disagrees with code, the spec is wrong and a clarifying patch is
 welcome — but in the meantime, the **wire test fixtures**
@@ -1222,7 +1222,52 @@ that always set ``addressed_to`` are unaffected.
 - LLM-side rate limits / SKIP behavior on receiving a nudge is not
   the protocol's concern.
 
-## 19. Changelog
+## 19. Administrative operations
+
+The bridge **MUST** expose an admin-only force-close so dormant or
+orphan ops whose ``close_policy`` cannot be satisfied (e.g. the
+operator persona is gone, or the quorum will never be met) can be
+cleaned up without manual database surgery.
+
+### 19.1 `POST /v2/operations/{id}/_admin/abandon`
+
+Authentication: shared admin bearer (``BRIDGE_SHARED_AUTH_TOKEN``).
+**No** ``X-Actor-Token`` is required or honored — the caller is
+acting as the bridge operator, not as a participant.
+
+Request body:
+
+```json
+{ "summary": "<optional human-readable reason>" }
+```
+
+Response (200): the serialized op with ``state="closed"`` and
+``resolution="abandoned"``.
+
+Behavior:
+- Bypasses ``policy_engine`` close-side checks
+  (operator_ratifies / quorum / any_participant /
+  requires_artifact, all skipped uniformly).
+- Bypasses actor-authorizer / capability checks.
+- State machine takes the documented system-bypass path
+  (``can_close(system=True, resolution='abandoned')``), which is
+  legal from any non-terminal state for any closeable kind.
+- Mirrors v1 chat close + emits the standard Discord forward, so
+  observers see the lifecycle marker the same way as a normal
+  close.
+
+Errors:
+- 404 if the op or its v1 mirror conversation is missing.
+- 400 if the op is already closed, or if a state-machine invariant
+  beyond bypass_task_guard is violated.
+
+This endpoint **MUST NOT** be exposed to client tokens — it is
+intentionally the admin-only escape hatch. Clients implementing
+v3 may treat its presence as part of the conformance pack but
+**MUST NOT** rely on it for normal close semantics; that's what
+§ 7.1 ``/close`` is for.
+
+## 20. Changelog
 
 | Rev | Date | Notes |
 |---|---|---|
@@ -1235,6 +1280,7 @@ that always set ``addressed_to`` are unaffected.
 | 7 | 2026-05-03 | T2.1: `policy.requires_artifact` field added to `OperationPolicy` (§6.1, §9.4). When `true`, close is rejected with HTTP 400 + code `policy.close_needs_artifact` until ≥1 `OperationArtifact` row is attached. Orthogonal to `close_policy` — both must be satisfied. Default `false` (back-compat). Pairs with T1.2 evidence-with-artifact for "no close without deliverable" semantics. Tests: `tests/test_v3_requires_artifact_policy.py`. |
 | 8 | 2026-05-04 | RPG smoke 결함 정리 — `evidence` 와 `object` 가 `defer` 옆에 universal carve-out 으로 추가됨 (§12.2). 좁은 `kinds=` whitelist 가 demand-patch 흐름을 묶던 deadlock 해소. Reference `agent_loop.py` 가 (a) HTTP 400 rejection 을 다음 prompt 에 노출 (D2) 하고 (b) 트리거의 `expected_response.kinds` 를 LLM 에게 미리 알려줌 (D8) — 자기교정 가능. `addressed_to_*` 가 v3.1 에선 structural-only / `expected_response` 가 권장 surface 임을 §6.4 에 명시. Tests: `tests/test_v3_reply_kind_carveouts.py`, `tests/test_v3_agent_loop_rejection_surface.py`. |
 | 9 | 2026-05-04 | Unity arcade smoke 후속 — 6 결함 일괄 fix. **D9** ratify intent split: quorum gate 가 close-intent ratify 만 카운트 (explicit `payload.intent="close"` / replies_to `move_close` / replies_to artifact-bearing event / op 이미 artifact 보유). **D10** agent_loop prompt 에 "[KIND] MUST be position-0" 강조. **D11** `payload.artifacts: list` 다중 artifact 첨부 (singular `payload.artifact` 보존). **D14** agent_loop 가 claude run "no result" 도 `_last_run_failure` 로 캡처 → 다음 prompt 에 ⚠️ 노출 (D2 패턴). **P9.5** Discord forwarder 가 `/operations` open + `/close` lifecycle marker 도 forwarding. **D3** `expected_response.from_actor_handles` 에 미존재 handle WARN log (옵션 `BRIDGE_REQUIRE_KNOWN_HANDLES=1` 시 reject 400). 페르소나 prompt 에 domain pre-flight checklist 추가 (D12). Tests: `test_v3_ratify_intent_split.py`, `test_v3_multi_artifact.py`, `test_v3_discord_lifecycle_forward.py`, `test_v3_handle_validation.py`. |
+| 14 | 2026-05-04 | Phase 14 — admin-only force-close. New § 19 + endpoint `POST /v2/operations/{id}/_admin/abandon` (admin bearer only, no X-Actor-Token). Bypasses `close_policy` (operator_ratifies / quorum / any_participant / requires_artifact) by routing through the existing `bypass_task_guard=True` path on `ChatConversationService.close_conversation` and the state-machine system-bypass `can_close(system=True, resolution='abandoned')`. Tests: `tests/conformance/test_admin_abandon.py` (4 — operator_ratifies bypass, quorum bypass, 404 on unknown, 400 on already-closed). |
 | 13 | 2026-05-04 | Phase 13 — progression emit layer. § 18.2 promoted from "rev 13 ships this" to normative: ProgressionRunner now turns each `decision=nudge` into a `chat.system.nudge` event and each `decision=defer` into a system-on-behalf `chat.speech.defer`, via the new `ChatConversationService.emit_system_event` method (mirrors the over_speech v1↔v2↔broker path). `chat.system.nudge` stays outside SPEECH_KINDS and does NOT count toward max_rounds. Tests: `test_chat_emit_system_event.py` (4), `test_kernel_v3_progression_emit.py` (3) — covers nudge emit, log-only fallback when no chat service, and 2-nudge-then-defer escalation. |
 | 12 | 2026-05-04 | Phase 12 — progression nudges (detection layer). New §18 defines the progression sweeper that detects stalled implicit follow-ups across three channels (`expected_response`, `addressed_to`, `replies_to` author) and structured-logs `decision=nudge` / `decision=defer` per stalled op. Three new settings: `BRIDGE_PROGRESSION_NUDGE_IDLE_S` (30s), `BRIDGE_PROGRESSION_NUDGE_MAX_RETRIES` (2), `BRIDGE_PROGRESSION_DISABLED` (false). `_compute_effective_addr` (in `conversation_service`) now also considers `expected_response.from_actor_handles[0]` so the existing over_speech gauge stops missing implicit-only signals. Emission of `chat.system.nudge` / system-on-behalf `chat.speech.defer` events is explicitly deferred to phase 13 — operators currently surface stalls via the log. Tests: `test_kernel_v3_progression_helper.py` (9), `test_kernel_v3_progression_repo.py` (5), `test_kernel_v3_effective_addr.py` (8), `test_kernel_v3_progression_sweeper.py` (11). |
 | 11 | 2026-05-04 | Phase 11 — adversarial-robustness perimeter (axis H). New §17 "Bounds & quotas" defines transport-level (body 1 MiB, timeout 30 s) + parser-level (JSON depth 32, regex input 8 KiB) caps. New error codes `body.too_large` (413), `request.timeout` (504), `payload.depth_exceeded` (400) added to §13. `BRIDGE_BOUNDS_LOG_ONLY=1` enables observe-only rollout. SSE/heartbeat/health prefixes exempt from handler timeout. Tests: `test_security_bounds.py`, `test_security_regex_safety.py`, `tests/conformance/test_adversarial.py`. |

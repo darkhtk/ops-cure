@@ -686,6 +686,66 @@ async def _post_to_discord_safely(thread_manager, discord_thread_id: str, text: 
         )
 
 
+class V2AdminAbandonRequest(BaseModel):
+    """Phase 14: minimal admin abandon. The shared admin bearer is the
+    only credential — no per-actor identity is required because the
+    op's policy is being explicitly bypassed by the operator running
+    the bridge.
+    """
+    summary: str | None = None
+
+
+@router.post("/{operation_id}/_admin/abandon")
+def admin_abandon_operation(
+    operation_id: str,
+    payload: V2AdminAbandonRequest,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    caller: BridgeCaller = Depends(require_bridge_caller),  # noqa: ARG001
+) -> dict[str, Any]:
+    """Force-close an operation as ``abandoned`` regardless of its
+    close_policy. Intended for orphan / dormant op cleanup when the
+    normal policy chain (operator_ratifies, quorum, etc.) cannot be
+    satisfied — e.g. the op's operator persona is gone and no ratify
+    will arrive.
+
+    Authentication: shared admin bearer only (no X-Actor-Token check —
+    the caller is by definition acting as the bridge operator, not as
+    a participant). The state-machine system bypass
+    (``can_close(system=True, resolution='abandoned')``) and chat
+    service ``bypass_task_guard=True`` are wired underneath, so all
+    of policy/actor/state-machine checks are skipped uniformly.
+
+    The dual-write (v1 chat + v2 op + Discord forward) follows the
+    same path as the normal close endpoint.
+    """
+    v1_id = _operation_to_v1_conversation_id(operation_id)
+    services = request.app.state.services
+    from ..behaviors.chat.conversation_service import (
+        ChatConversationNotFoundError, ChatConversationStateError,
+    )
+    summary = payload.summary or "admin abandon"
+    try:
+        services.chat_conversation_service.close_conversation(
+            conversation_id=v1_id,
+            closed_by="system",
+            resolution="abandoned",
+            summary=summary,
+            bypass_task_guard=True,
+        )
+    except ChatConversationNotFoundError:
+        raise HTTPException(status_code=404, detail="operation conversation not found")
+    except ChatConversationStateError as exc:
+        # Already closed, or some invariant beyond bypass_task_guard.
+        raise HTTPException(status_code=400, detail=str(exc))
+    repo = V2Repository()
+    with session_scope() as db:
+        op = repo.get_operation(db, operation_id)
+        if op is None:
+            raise HTTPException(status_code=404, detail="operation not found")
+        return _serialize_operation(op, repo)
+
+
 @router.post("/{operation_id}/close")
 def close_operation(
     operation_id: str,
