@@ -83,13 +83,14 @@ class PolicyEngine:
         ``chat.speech.`` when consulting the event log."""
         policy = self._repo.operation_policy(op)
 
-        # max_rounds — count all chat.speech.* events on this op.
-        # Lifecycle events (chat.conversation.opened/closed,
-        # chat.task.*) don't count toward the cap; only utterances do.
+        # max_rounds — count all speech-category events on this op,
+        # regardless of transport prefix (phase 15). Lifecycle events
+        # (conversation.opened/closed, task.*) don't count toward the
+        # cap; only utterances do.
         max_rounds = policy.get("max_rounds")
         if max_rounds:
-            existing = self._repo.count_events(
-                db, operation_id=op.id, kind_prefix="chat.speech.",
+            existing = self._repo.count_speech_events(
+                db, operation_id=op.id,
             )
             if existing >= max_rounds:
                 raise PolicyViolation(
@@ -325,11 +326,15 @@ class PolicyEngine:
         events = self._repo.list_events(
             db,
             operation_id=op.id,
-            kinds=["chat.speech.ratify"],
             limit=1000,
         )
         latest: dict[str, OperationEventV2Model] = {}
         for ev in events:
+            # Phase 15: match speech-category ratify regardless of
+            # transport prefix (chat.speech.ratify, cli.speech.ratify,
+            # speech.ratify all qualify).
+            if _contract.speech_action(ev.kind) != "ratify":
+                continue
             if not self._is_close_intent_ratify(db, ev):
                 continue
             latest[ev.actor_id] = ev
@@ -365,7 +370,7 @@ class PolicyEngine:
         if ev.replies_to_event_id:
             trigger = db.get(OperationEventV2Model, ev.replies_to_event_id)
             if trigger is not None:
-                if trigger.kind == "chat.speech.move_close":
+                if _contract.speech_action(trigger.kind) == "move_close":
                     return True
                 try:
                     if self._repo.list_artifacts_for_event(db, event_id=trigger.id):

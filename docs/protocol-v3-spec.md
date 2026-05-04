@@ -1,6 +1,6 @@
 # Opscure Bridge Protocol v3 — Normative Specification
 
-**Status**: Normative (rev 14, 2026-05-04). This document is the
+**Status**: Normative (rev 15, 2026-05-04). This document is the
 authoritative description of Opscure Bridge protocol v3.x. Where it
 disagrees with code, the spec is wrong and a clarifying patch is
 welcome — but in the meantime, the **wire test fixtures**
@@ -1267,7 +1267,68 @@ v3 may treat its presence as part of the conformance pack but
 **MUST NOT** rely on it for normal close semantics; that's what
 § 7.1 ``/close`` is for.
 
-## 20. Changelog
+## 20. Event-kind taxonomy (transport-agnostic)
+
+Until rev 14 the kernel matched event kinds with the literal prefix
+``chat.`` (e.g. ``chat.speech.claim``, ``chat.speech.move_close``,
+``chat.system.nudge``). That left non-chat transports — CLI tooling,
+direct SDK callers, future webhook adapters — unable to participate
+in the same protocol without forking kernel code.
+
+Rev 15 lifts the recognition rule onto the *category token* and
+makes it normative.
+
+### 20.1 Recognized shapes
+
+An event_kind **MUST** match one of the two shapes below:
+
+  - ``<category>.<action>``                          e.g. ``speech.claim``
+  - ``<transport>.<category>.<action>``              e.g. ``chat.speech.claim``
+
+The kernel walks the dotted parts and picks the first known
+*category* token. Today's normative categories:
+
+  - ``speech``        — utterances counted by ``policy.max_rounds``
+  - ``system``        — bridge-emitted advisories (e.g. ``system.nudge``)
+  - ``conversation``  — lifecycle (``opened``, ``closed``, ``over_speech``)
+  - ``task``          — task-lifecycle markers
+
+The transport token (when present) is informational. Two clients
+posting ``chat.speech.claim`` and ``cli.speech.claim`` against the
+same op are both speech events for policy/progression purposes.
+
+### 20.2 Kernel guarantees that hold across transports
+
+These previously chat-prefix-specific behaviours now apply to *any*
+transport that uses the recognized shapes:
+
+  - ``policy.max_rounds`` counts speech events across transports.
+  - ``progression_sweeper`` finds the most-recent speech-category event
+    as the trigger, regardless of transport prefix.
+  - ``policy_engine`` close-quorum identifies ratify/move_close events
+    by *action token*, not literal kind string.
+  - ``operation_mirror`` exposes the parsed lifecycle JSON only for
+    non-speech events (lifecycle/task/system) — same rule as before.
+
+### 20.3 Emit-side contract (unchanged)
+
+The bridge **continues** to emit chat-prefixed kinds
+(``chat.speech.*``, ``chat.conversation.*``, ``chat.system.nudge``,
+``chat.task.*``) for back-compat. New transports MAY adopt their own
+prefix or use the bare-category form; clients SHOULD treat the
+prefix as informational and dispatch on category.
+
+### 20.4 What's intentionally NOT changed
+
+  - Wire format of existing events stays the same. No rev bump
+    needed in the *major* sense — this is additive (recognizing
+    additional shapes that previously would have been ignored).
+  - The v1 chat surface (``ChatMessageModel`` etc.) still mirrors
+    its events with the ``chat.`` prefix; phase 16+ may retire the
+    v1 surface entirely, at which point the kernel can drop the
+    transport prefix on its own emissions.
+
+## 21. Changelog
 
 | Rev | Date | Notes |
 |---|---|---|
@@ -1280,6 +1341,7 @@ v3 may treat its presence as part of the conformance pack but
 | 7 | 2026-05-03 | T2.1: `policy.requires_artifact` field added to `OperationPolicy` (§6.1, §9.4). When `true`, close is rejected with HTTP 400 + code `policy.close_needs_artifact` until ≥1 `OperationArtifact` row is attached. Orthogonal to `close_policy` — both must be satisfied. Default `false` (back-compat). Pairs with T1.2 evidence-with-artifact for "no close without deliverable" semantics. Tests: `tests/test_v3_requires_artifact_policy.py`. |
 | 8 | 2026-05-04 | RPG smoke 결함 정리 — `evidence` 와 `object` 가 `defer` 옆에 universal carve-out 으로 추가됨 (§12.2). 좁은 `kinds=` whitelist 가 demand-patch 흐름을 묶던 deadlock 해소. Reference `agent_loop.py` 가 (a) HTTP 400 rejection 을 다음 prompt 에 노출 (D2) 하고 (b) 트리거의 `expected_response.kinds` 를 LLM 에게 미리 알려줌 (D8) — 자기교정 가능. `addressed_to_*` 가 v3.1 에선 structural-only / `expected_response` 가 권장 surface 임을 §6.4 에 명시. Tests: `tests/test_v3_reply_kind_carveouts.py`, `tests/test_v3_agent_loop_rejection_surface.py`. |
 | 9 | 2026-05-04 | Unity arcade smoke 후속 — 6 결함 일괄 fix. **D9** ratify intent split: quorum gate 가 close-intent ratify 만 카운트 (explicit `payload.intent="close"` / replies_to `move_close` / replies_to artifact-bearing event / op 이미 artifact 보유). **D10** agent_loop prompt 에 "[KIND] MUST be position-0" 강조. **D11** `payload.artifacts: list` 다중 artifact 첨부 (singular `payload.artifact` 보존). **D14** agent_loop 가 claude run "no result" 도 `_last_run_failure` 로 캡처 → 다음 prompt 에 ⚠️ 노출 (D2 패턴). **P9.5** Discord forwarder 가 `/operations` open + `/close` lifecycle marker 도 forwarding. **D3** `expected_response.from_actor_handles` 에 미존재 handle WARN log (옵션 `BRIDGE_REQUIRE_KNOWN_HANDLES=1` 시 reject 400). 페르소나 prompt 에 domain pre-flight checklist 추가 (D12). Tests: `test_v3_ratify_intent_split.py`, `test_v3_multi_artifact.py`, `test_v3_discord_lifecycle_forward.py`, `test_v3_handle_validation.py`. |
+| 15 | 2026-05-04 | Phase 15 — generic event-kind taxonomy. New § 20 makes the *category token* normative: kernel matchers (`policy_engine.max_rounds`, `progression_sweeper.last_speech_event`, ratify/move_close detection in close-quorum, `operation_mirror` lifecycle/speech split) now look at the action category, not the literal `chat.` prefix. Both `<category>.<action>` and `<transport>.<category>.<action>` are accepted. New helpers in `contract.py` (`is_speech_kind`, `speech_action`, `_category_of`); new `repository.count_speech_events` and a generalized `last_speech_event_for_op`. Wire format unchanged — bridge still emits `chat.*` kinds. Tests: `test_kernel_v3_event_taxonomy.py` (generic + back-compat). |
 | 14 | 2026-05-04 | Phase 14 — admin-only force-close. New § 19 + endpoint `POST /v2/operations/{id}/_admin/abandon` (admin bearer only, no X-Actor-Token). Bypasses `close_policy` (operator_ratifies / quorum / any_participant / requires_artifact) by routing through the existing `bypass_task_guard=True` path on `ChatConversationService.close_conversation` and the state-machine system-bypass `can_close(system=True, resolution='abandoned')`. Tests: `tests/conformance/test_admin_abandon.py` (4 — operator_ratifies bypass, quorum bypass, 404 on unknown, 400 on already-closed). |
 | 13 | 2026-05-04 | Phase 13 — progression emit layer. § 18.2 promoted from "rev 13 ships this" to normative: ProgressionRunner now turns each `decision=nudge` into a `chat.system.nudge` event and each `decision=defer` into a system-on-behalf `chat.speech.defer`, via the new `ChatConversationService.emit_system_event` method (mirrors the over_speech v1↔v2↔broker path). `chat.system.nudge` stays outside SPEECH_KINDS and does NOT count toward max_rounds. Tests: `test_chat_emit_system_event.py` (4), `test_kernel_v3_progression_emit.py` (3) — covers nudge emit, log-only fallback when no chat service, and 2-nudge-then-defer escalation. |
 | 12 | 2026-05-04 | Phase 12 — progression nudges (detection layer). New §18 defines the progression sweeper that detects stalled implicit follow-ups across three channels (`expected_response`, `addressed_to`, `replies_to` author) and structured-logs `decision=nudge` / `decision=defer` per stalled op. Three new settings: `BRIDGE_PROGRESSION_NUDGE_IDLE_S` (30s), `BRIDGE_PROGRESSION_NUDGE_MAX_RETRIES` (2), `BRIDGE_PROGRESSION_DISABLED` (false). `_compute_effective_addr` (in `conversation_service`) now also considers `expected_response.from_actor_handles[0]` so the existing over_speech gauge stops missing implicit-only signals. Emission of `chat.system.nudge` / system-on-behalf `chat.speech.defer` events is explicitly deferred to phase 13 — operators currently surface stalls via the log. Tests: `test_kernel_v3_progression_helper.py` (9), `test_kernel_v3_progression_repo.py` (5), `test_kernel_v3_effective_addr.py` (8), `test_kernel_v3_progression_sweeper.py` (11). |

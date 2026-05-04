@@ -147,12 +147,17 @@ class PolicySweeper:
         # which trigger?
         existing_defers: set[tuple[str, str]] = set()
         explicit_replies: set[tuple[str, str]] = set()
+        from . import contract as _v2_contract
         for ev in events:
             if ev.replies_to_event_id is None:
                 continue
-            if ev.kind == "chat.speech.defer":
+            # Phase 15: action-based matching, transport-prefix-agnostic.
+            action = _v2_contract.speech_action(ev.kind)
+            if action is None:
+                continue
+            if action == "defer":
                 existing_defers.add((ev.actor_id, ev.replies_to_event_id))
-            elif ev.kind.startswith("chat.speech."):
+            else:
                 explicit_replies.add((ev.actor_id, ev.replies_to_event_id))
 
         # Resolve participant handle <-> actor_id once per op so we

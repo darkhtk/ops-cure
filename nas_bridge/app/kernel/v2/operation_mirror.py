@@ -160,7 +160,12 @@ class OperationMirror:
         # so consumers can read structured fields without re-parsing
         # ``text``.
         payload_dict: dict[str, object] = {"text": content}
-        if not event_kind.startswith("chat.speech."):
+        # Phase 15: transport-prefix-agnostic. For non-speech (lifecycle,
+        # task, system) events, also expose the parsed JSON under
+        # ``lifecycle`` so consumers can read structured fields without
+        # re-parsing ``text``. Speech events keep ``text`` only.
+        from . import contract as _v2_contract
+        if not _v2_contract.is_speech_kind(event_kind):
             try:
                 parsed = json.loads(content)
                 if isinstance(parsed, dict):

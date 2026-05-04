@@ -521,17 +521,46 @@ class V2Repository:
         *,
         operation_id: str,
     ) -> OperationEventV2Model | None:
-        """Return the most recent ``chat.speech.*`` event for an op.
+        """Return the most recent speech-category event for an op.
 
-        Used by the progression sweeper so system events (nudges,
-        lifecycle markers) trailing a real speech turn don't shadow
-        the trigger we actually need to chase.
+        Phase 15: matches both the legacy transport-prefixed shape
+        (``chat.speech.*``, ``cli.speech.*``) and the bare-category
+        shape (``speech.*``). The progression sweeper relies on this
+        so system events (nudges, lifecycle markers) trailing a real
+        speech turn don't shadow the trigger we actually need to chase.
         """
+        from sqlalchemy import or_
         stmt = select(OperationEventV2Model).where(
             OperationEventV2Model.operation_id == operation_id,
-            OperationEventV2Model.kind.like("chat.speech.%"),
+            or_(
+                OperationEventV2Model.kind.like("%.speech.%"),
+                OperationEventV2Model.kind.like("speech.%"),
+            ),
         ).order_by(OperationEventV2Model.seq.desc()).limit(1)
         return db.scalar(stmt)
+
+    def count_speech_events(
+        self,
+        db: Session,
+        *,
+        operation_id: str,
+    ) -> int:
+        """Phase 15: count speech-category events on an op, regardless
+        of transport prefix. Replaces the policy_engine's
+        ``count_events(kind_prefix='chat.speech.')`` so a non-chat
+        transport's speech events count toward ``policy.max_rounds``."""
+        from sqlalchemy import func as _func, or_, and_ as _and
+        clauses = [
+            OperationEventV2Model.operation_id == operation_id,
+            or_(
+                OperationEventV2Model.kind.like("%.speech.%"),
+                OperationEventV2Model.kind.like("speech.%"),
+            ),
+        ]
+        stmt = select(_func.count()).select_from(
+            OperationEventV2Model
+        ).where(_and(*clauses))
+        return int(db.scalar(stmt) or 0)
 
     def event_payload(self, row: OperationEventV2Model) -> dict[str, Any]:
         return dict(_loads(row.payload_json, {}))
