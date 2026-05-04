@@ -471,6 +471,68 @@ class V2Repository:
         stmt = stmt.order_by(OperationEventV2Model.seq.asc()).limit(max(1, min(int(limit), 1000)))
         return list(db.scalars(stmt))
 
+    # ---------------- phase 12: progression-sweeper helpers ----------------
+
+    def recent_active_ops(
+        self,
+        db: Session,
+        *,
+        since: datetime | None = None,
+        limit: int = 200,
+    ) -> list[OperationV2Model]:
+        """Return open (non-terminal) ops updated since ``since``.
+
+        Used by the progression sweeper to bound its per-tick scan.
+        ``since=None`` returns all open ops (test convenience).
+        """
+        from . import contract as _v2_contract
+        active_states = (
+            _v2_contract.STATE_OPEN,
+            _v2_contract.STATE_CLAIMED,
+            _v2_contract.STATE_EXECUTING,
+            _v2_contract.STATE_BLOCKED_APPROVAL,
+            _v2_contract.STATE_VERIFYING,
+        )
+        stmt = select(OperationV2Model).where(
+            OperationV2Model.state.in_(active_states),
+        )
+        if since is not None:
+            stmt = stmt.where(OperationV2Model.updated_at >= since)
+        stmt = stmt.order_by(
+            OperationV2Model.updated_at.desc(),
+        ).limit(max(1, min(int(limit), 1000)))
+        return list(db.scalars(stmt))
+
+    def last_event_for_op(
+        self,
+        db: Session,
+        *,
+        operation_id: str,
+    ) -> OperationEventV2Model | None:
+        """Return the highest-``seq`` event for an op, or None if empty."""
+        stmt = select(OperationEventV2Model).where(
+            OperationEventV2Model.operation_id == operation_id,
+        ).order_by(OperationEventV2Model.seq.desc()).limit(1)
+        return db.scalar(stmt)
+
+    def last_speech_event_for_op(
+        self,
+        db: Session,
+        *,
+        operation_id: str,
+    ) -> OperationEventV2Model | None:
+        """Return the most recent ``chat.speech.*`` event for an op.
+
+        Used by the progression sweeper so system events (nudges,
+        lifecycle markers) trailing a real speech turn don't shadow
+        the trigger we actually need to chase.
+        """
+        stmt = select(OperationEventV2Model).where(
+            OperationEventV2Model.operation_id == operation_id,
+            OperationEventV2Model.kind.like("chat.speech.%"),
+        ).order_by(OperationEventV2Model.seq.desc()).limit(1)
+        return db.scalar(stmt)
+
     def event_payload(self, row: OperationEventV2Model) -> dict[str, Any]:
         return dict(_loads(row.payload_json, {}))
 

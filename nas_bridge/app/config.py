@@ -73,6 +73,25 @@ class Settings(BaseSettings):
         default=False,
         alias="BRIDGE_BOUNDS_LOG_ONLY",
     )
+    # Phase 12: progression-sweeper. Implicit follow-ups (replies-to,
+    # expected_response without explicit addressing) used to silently
+    # stall — the sweeper detects them and emits a system.nudge to the
+    # inferred responder. Idle threshold is conservative (30s) so a
+    # persona LLM call has plenty of time to land before a nudge fires.
+    # Two retries cap nudge spam; the third tick on the same trigger
+    # escalates to a system DEFER so the op surfaces to the operator.
+    progression_nudge_idle_s: float = Field(
+        default=30.0,
+        alias="BRIDGE_PROGRESSION_NUDGE_IDLE_S",
+    )
+    progression_nudge_max_retries: int = Field(
+        default=2,
+        alias="BRIDGE_PROGRESSION_NUDGE_MAX_RETRIES",
+    )
+    progression_disabled: bool = Field(
+        default=False,
+        alias="BRIDGE_PROGRESSION_DISABLED",
+    )
 
     model_config = SettingsConfigDict(
         env_file=".env",

@@ -106,6 +106,8 @@ class ServiceContainer:
     # v3 phase 2.5: by_round_seq auto-DEFER sweeper
     policy_sweeper: Any | None = None
     policy_sweeper_task: asyncio.Task[None] | None = None
+    progression_runner: Any | None = None
+    progression_runner_task: asyncio.Task[None] | None = None
 
 
 def build_services(settings: Settings) -> ServiceContainer:
@@ -358,6 +360,29 @@ async def lifespan(app: FastAPI):
             policy_sweeper.run_forever(),
             name="opscure-policy-sweeper",
         )
+    # Phase 12: progression sweeper (detection layer). Logs every
+    # stalled implicit follow-up so operators can see at a glance
+    # which ops are waiting on an inferred next-responder.
+    # BRIDGE_PROGRESSION_DISABLED=1 skips entirely.
+    if not settings.progression_disabled:
+        from .kernel.v2.progression_sweeper import (
+            ProgressionRunner, ProgressionSweeper,
+        )
+        from .db import session_scope as _session_scope_factory
+        progression_sweeper = ProgressionSweeper(
+            idle_s=settings.progression_nudge_idle_s,
+            max_retries=settings.progression_nudge_max_retries,
+        )
+        progression_runner = ProgressionRunner(
+            sweeper=progression_sweeper,
+            session_scope=_session_scope_factory,
+            interval_seconds=settings.progression_nudge_idle_s,
+        )
+        services.progression_runner = progression_runner
+        services.progression_runner_task = asyncio.create_task(
+            progression_runner.run_forever(),
+            name="opscure-progression-sweeper",
+        )
     try:
         yield
     finally:
@@ -377,6 +402,12 @@ async def lifespan(app: FastAPI):
             services.policy_sweeper_task.cancel()
             with suppress(asyncio.CancelledError):
                 await services.policy_sweeper_task
+        if getattr(services, "progression_runner", None) is not None:
+            services.progression_runner.stop()
+        if getattr(services, "progression_runner_task", None) is not None:
+            services.progression_runner_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await services.progression_runner_task
         await services.discord_gateway.stop()
 
 

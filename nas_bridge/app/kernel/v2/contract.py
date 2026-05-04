@@ -156,6 +156,56 @@ EVENT_KIND_TO_TARGET_STATE: dict[str, str] = {
 }
 
 
+# ----- phase 12: progression nudge ---------------------------------------
+# When the progression sweeper detects a stalled implicit follow-up
+# (last event has a recoverable next-responder signal but no event has
+# arrived from that responder), it emits a system-authored event of
+# this kind addressed to the inferred responder. The kind is
+# intentionally outside SPEECH_KINDS so it never counts toward
+# max_rounds and does not feed the over_speech gauge — it is purely a
+# routing signal, not a turn.
+EVENT_SYSTEM_NUDGE = "chat.system.nudge"
+
+
+def infer_implicit_responder(
+    *,
+    expected_response: dict | None,
+    addressed_actor_ids: list[str] | None,
+    replies_to_author_actor_id: str | None,
+) -> tuple[str, str] | None:
+    """Return ``(channel, value)`` for the next-responder signal carried
+    by an event, or ``None`` if the event is truly TERMINAL.
+
+    Priority (most specific first):
+
+      1. ``("handle", "@…")``   — ``expected_response.from_actor_handles[0]``
+      2. ``("actor_id", "…")``  — ``addressed_actor_ids[0]``
+      3. ``("actor_id", "…")``  — ``replies_to_author_actor_id``
+
+    The function is intentionally pure (no db, no I/O) so its priority
+    rules can be unit-tested in isolation. Callers resolve the
+    ``actor_id`` channel to a handle through their own repository.
+
+    Truly TERMINAL events (no addressing on any of the three channels)
+    yield ``None`` — they are silence by design and the sweeper must
+    leave them alone (preserves "Silence > false invitation").
+    """
+    if expected_response:
+        handles = expected_response.get("from_actor_handles") or []
+        if handles:
+            first = handles[0]
+            if isinstance(first, str) and first:
+                return ("handle", first)
+    if addressed_actor_ids:
+        first = addressed_actor_ids[0]
+        if isinstance(first, str) and first:
+            return ("actor_id", first)
+    if replies_to_author_actor_id:
+        if isinstance(replies_to_author_actor_id, str) and replies_to_author_actor_id:
+            return ("actor_id", replies_to_author_actor_id)
+    return None
+
+
 # ----- capabilities -------------------------------------------------------
 CAP_CONVERSATION_OPEN = "conversation.open"
 CAP_CONVERSATION_CLOSE = "conversation.close"

@@ -177,6 +177,36 @@ def get_or_create_general_conversation(
     return general
 
 
+def _compute_effective_addr(
+    *,
+    primary_addr: str | None,
+    expected_response: object | None,
+) -> str | None:
+    """Phase 12: pick the actor whose presence drives turn-taking.
+
+    Priority (preserves existing happy-path):
+      1. ``primary_addr`` — caller's explicit ``addressed_to`` (or
+         the first element of ``addressed_to_many``, lifted by
+         normalization upstream).
+      2. ``expected_response.from_actor_handles[0]`` — fallback so
+         a caller who only declared an expected responder (without
+         filling addressed_to) still drives ``row.expected_speaker``,
+         the over_speech gauge, and the progression sweeper.
+
+    Returns ``None`` if neither channel carries a value (truly
+    TERMINAL message — silence by design).
+    """
+    if primary_addr:
+        return primary_addr
+    if isinstance(expected_response, dict):
+        handles = expected_response.get("from_actor_handles") or []
+        if handles:
+            first = handles[0]
+            if isinstance(first, str) and first:
+                return first
+    return None
+
+
 def _speech_event_kind(kind: str) -> str:
     return f"chat.speech.{kind}"
 
@@ -834,7 +864,17 @@ class ChatConversationService:
             )
             # The primary_addr (possibly lifted from many) is what
             # turn-taking logic below should treat as request.addressed_to.
-            effective_addr = primary_addr
+            #
+            # Phase 12: three-channel expected_speaker tracking. When the
+            # caller didn't address anyone but DID declare an
+            # expected_response, fall back to the first responder handle
+            # so row.expected_speaker / over_speech / progression sweeper
+            # still see a next-responder signal. This closes the silent-
+            # stall where the next-responder lived only in expected_response.
+            effective_addr = _compute_effective_addr(
+                primary_addr=primary_addr,
+                expected_response=getattr(request, "expected_response", None),
+            )
             message = ChatMessageModel(
                 thread_id=row.thread_id,
                 conversation_id=row.id,
